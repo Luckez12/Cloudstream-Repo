@@ -25,11 +25,13 @@ allprojects {
     }
 }
 
-fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) =
-    extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
+fun Project.cloudstream(
+    configuration: CloudstreamExtension.() -> Unit
+) = extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
 
-fun Project.android(configuration: BaseExtension.() -> Unit) =
-    extensions.getByName<BaseExtension>("android").configuration()
+fun Project.android(
+    configuration: BaseExtension.() -> Unit
+) = extensions.getByName<BaseExtension>("android").configuration()
 
 subprojects {
     apply(plugin = "com.android.library")
@@ -41,6 +43,7 @@ subprojects {
             System.getenv("GITHUB_REPOSITORY")
                 ?: "https://github.com/Luckez12/Cloudstream-Repo"
         )
+
         authors = listOf("Luckez12")
     }
 
@@ -58,9 +61,10 @@ subprojects {
             targetCompatibility = JavaVersion.VERSION_1_8
         }
 
-        tasks.withType<KotlinJvmCompile>().configureEach {
+        tasks.withType<KotlinJvmCompile> {
             compilerOptions {
                 jvmTarget.set(JvmTarget.JVM_1_8)
+
                 freeCompilerArgs.addAll(
                     "-Xno-call-assertions",
                     "-Xno-param-assertions",
@@ -73,11 +77,30 @@ subprojects {
     dependencies {
         val implementation by configurations
 
-        implementation("com.github.recloudstream.cloudstream:library:-SNAPSHOT")
+        implementation(
+            "com.github.recloudstream.cloudstream:library:-SNAPSHOT"
+        )
+
         implementation(kotlin("stdlib"))
+
+        implementation(
+            "com.github.Blatzar:NiceHttp:0.4.11"
+        )
+
+        implementation(
+            "org.jsoup:jsoup:1.18.3"
+        )
+
+        implementation(
+            "com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1"
+        )
+
+        implementation(
+            "com.github.teamnewpipe:NewPipeExtractor:v0.25.2"
+        )
     }
 }
 
-tasks.register<Delete>("clean") {
+task<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }
