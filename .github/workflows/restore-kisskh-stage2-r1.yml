@@ -1,0 +1,701 @@
+name: Restore KissKH
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4.0.1
+
+      - name: Configure Git
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Restore KissKH module
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf KissKH
+          mkdir -p KissKH/src/main/kotlin/com/luckez12/kisskh
+          mkdir -p KissKH/src/main
+
+          cat > KissKH/build.gradle.kts <<'EOF'
+          version = 1
+
+          cloudstream {
+              description = "KissKH"
+              authors = listOf("Luckez12")
+              language = "en"
+              status = 1
+              tvTypes = listOf("Movie", "TvSeries", "Anime")
+          }
+          EOF
+
+          cat > KissKH/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+          EOF
+
+          cat > KissKH/src/main/kotlin/com/luckez12/kisskh/KissKHPlugin.kt <<'EOF'
+          package com.luckez12.kisskh
+
+          import android.content.Context
+          import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
+          import com.lagradost.cloudstream3.plugins.Plugin
+
+          @CloudstreamPlugin
+          class KissKHPlugin : Plugin() {
+              override fun load(context: Context) {
+                  registerMainAPI(KissKHProvider())
+              }
+          }
+          EOF
+
+          cat > KissKH/src/main/kotlin/com/luckez12/kisskh/KissKHProvider.kt <<'EOF'
+          package com.luckez12.kisskh
+
+          import com.fasterxml.jackson.databind.JsonNode
+          import com.lagradost.cloudstream3.*
+          import com.lagradost.cloudstream3.utils.ExtractorLink
+          import com.lagradost.cloudstream3.utils.ExtractorLinkType
+          import com.lagradost.cloudstream3.utils.Qualities
+          import com.lagradost.cloudstream3.utils.newExtractorLink
+          import java.net.URLEncoder
+          import java.nio.charset.StandardCharsets
+
+          class KissKHProvider : MainAPI() {
+              override var mainUrl = "https://kisskh.co"
+              override var name = "KissKH"
+              override var lang = "en"
+
+              override val supportedTypes = setOf(
+                  TvType.Movie,
+                  TvType.TvSeries,
+                  TvType.Anime,
+              )
+
+              // Stage 2 recovery begins with the parts we can validate:
+              // search, details, episodes and playback.
+              override val hasMainPage = false
+
+              // KissKH media requests need an episode-page Referer.
+              override val hasChromecastSupport = false
+
+              private val requestHeaders: Map<String, String>
+                  get() = mapOf(
+                      "User-Agent" to USER_AGENT,
+                      "Accept" to "application/json, text/plain, */*",
+                      "Referer" to "$mainUrl/",
+                  )
+
+              override suspend fun search(query: String): List<SearchResponse> {
+                  if (query.isBlank()) return emptyList()
+
+                  val endpoint =
+                      "$mainUrl/api/DramaList/Search?q=${urlEncode(query.trim())}"
+
+                  val root = mapper.readTree(
+                      app.get(
+                          endpoint,
+                          headers = requestHeaders,
+                          cacheTime = 0,
+                      ).text
+                  )
+
+                  return arrayNodes(root).mapNotNull { item ->
+                      val id = item.intText("id", "ID") ?: return@mapNotNull null
+                      val title = item.text("title", "Title", "name", "Name")
+                          ?.takeIf { it.isNotBlank() }
+                          ?: return@mapNotNull null
+
+                      val poster = absoluteUrl(
+                          item.text(
+                              "thumbnail",
+                              "Thumbnail",
+                              "poster",
+                              "Poster",
+                              "image",
+                              "Image",
+                          )
+                      )
+
+                      val type = parseType(item.text("type", "Type"))
+                      val detailsUrl = dramaUrl(title, id)
+
+                      when (type) {
+                          TvType.Movie -> newMovieSearchResponse(
+                              title,
+                              detailsUrl,
+                              TvType.Movie,
+                          ) {
+                              posterUrl = poster
+                          }
+
+                          TvType.Anime -> newAnimeSearchResponse(
+                              title,
+                              detailsUrl,
+                              TvType.Anime,
+                          ) {
+                              posterUrl = poster
+                          }
+
+                          else -> newTvSeriesSearchResponse(
+                              title,
+                              detailsUrl,
+                              TvType.TvSeries,
+                          ) {
+                              posterUrl = poster
+                          }
+                      }
+                  }
+              }
+
+              override suspend fun load(url: String): LoadResponse? {
+                  val dramaId = queryValue(url, "id")?.toIntOrNull() ?: return null
+
+                  val endpoint =
+                      "$mainUrl/api/DramaList/Drama/$dramaId?isq=false"
+
+                  val root = mapper.readTree(
+                      app.get(
+                          endpoint,
+                          headers = requestHeaders,
+                          cacheTime = 0,
+                      ).text
+                  )
+
+                  val title = root.text("title", "Title", "name", "Name")
+                      ?.takeIf { it.isNotBlank() }
+                      ?: return null
+
+                  val type = parseType(root.text("type", "Type"))
+                  val poster = absoluteUrl(
+                      root.text(
+                          "thumbnail",
+                          "Thumbnail",
+                          "poster",
+                          "Poster",
+                          "image",
+                          "Image",
+                      )
+                  )
+                  val plot = root.text(
+                      "description",
+                      "Description",
+                      "synopsis",
+                      "Synopsis",
+                  )
+                  val year = extractYear(
+                      root.text(
+                          "releaseDate",
+                          "ReleaseDate",
+                          "release",
+                          "Release",
+                      )
+                  )
+
+                  val episodeNodes = arrayNodes(root.getIgnoreCase("episodes"))
+                      .sortedBy { it.numberText("number", "Number") ?: Double.MAX_VALUE }
+
+                  val episodes = episodeNodes.mapNotNull { episodeNode ->
+                      val episodeId =
+                          episodeNode.intText("id", "ID") ?: return@mapNotNull null
+                      val number =
+                          episodeNode.numberText("number", "Number")
+                              ?: episodeNode.numberText("episode", "Episode")
+                              ?: return@mapNotNull null
+
+                      val numberLabel = cleanEpisodeNumber(number)
+                      val episodeUrl = episodeUrl(
+                          title = title,
+                          dramaId = dramaId,
+                          episodeId = episodeId,
+                          episodeNumber = numberLabel,
+                      )
+
+                      newEpisode(episodeUrl) {
+                          name = "Episode $numberLabel"
+                          episode = number
+                              .takeIf { it % 1.0 == 0.0 }
+                              ?.toInt()
+                      }
+                  }
+
+                  if (type == TvType.Movie) {
+                      val dataUrl = episodes.firstOrNull()?.data
+                          ?: episodeNodes.firstOrNull()?.let { episodeNode ->
+                              val episodeId =
+                                  episodeNode.intText("id", "ID") ?: return@let null
+                              val number =
+                                  episodeNode.numberText("number", "Number")
+                                      ?: episodeNode.numberText("episode", "Episode")
+                                      ?: 1.0
+
+                              episodeUrl(
+                                  title = title,
+                                  dramaId = dramaId,
+                                  episodeId = episodeId,
+                                  episodeNumber = cleanEpisodeNumber(number),
+                              )
+                          }.orEmpty()
+
+                      return newMovieLoadResponse(
+                          title,
+                          url,
+                          TvType.Movie,
+                          dataUrl = dataUrl,
+                      ) {
+                          posterUrl = poster
+                          this.plot = plot
+                          this.year = year
+                      }
+                  }
+
+                  return newTvSeriesLoadResponse(
+                      title,
+                      url,
+                      type,
+                      episodes,
+                  ) {
+                      posterUrl = poster
+                      this.plot = plot
+                      this.year = year
+                  }
+              }
+
+              override suspend fun loadLinks(
+                  data: String,
+                  isCasting: Boolean,
+                  subtitleCallback: (SubtitleFile) -> Unit,
+                  callback: (ExtractorLink) -> Unit,
+              ): Boolean {
+                  val episodeId = queryValue(data, "ep") ?: return false
+
+                  // First try the episode page itself. This keeps the provider useful
+                  // if KissKH exposes a direct media URL in page state again.
+                  val pageText = runCatching {
+                      app.get(
+                          data,
+                          headers = requestHeaders + ("Referer" to "$mainUrl/"),
+                          cacheTime = 0,
+                      ).text
+                  }.getOrNull().orEmpty()
+
+                  val directFromPage = findMediaUrl(pageText)
+                  if (!directFromPage.isNullOrBlank()) {
+                      emitVideo(
+                          url = directFromPage,
+                          referer = data,
+                          callback = callback,
+                      )
+                      return true
+                  }
+
+                  // Current KissKH stream APIs require a per-episode kkey.
+                  // This compatibility endpoint is only a fallback and is deliberately
+                  // isolated here so it can be replaced without touching provider logic.
+                  val kkey = fetchCompatibilityKey(
+                      episodeId = episodeId,
+                      type = "vid",
+                  ) ?: return false
+
+                  val streamEndpoint =
+                      "$mainUrl/api/DramaList/Episode/$episodeId.png" +
+                          "?err=false&ts=null&time=null&kkey=${urlEncode(kkey)}"
+
+                  val streamResponse = runCatching {
+                      app.get(
+                          streamEndpoint,
+                          headers = requestHeaders + ("Referer" to data),
+                          cacheTime = 0,
+                      ).text
+                  }.getOrNull() ?: return false
+
+                  val video = extractVideoFromApi(streamResponse)
+                      ?: findMediaUrl(streamResponse)
+                      ?: return false
+
+                  emitVideo(
+                      url = video,
+                      referer = data,
+                      callback = callback,
+                  )
+
+                  // Do not manufacture subtitle support here. Modern KissKH subtitles
+                  // are separately authenticated and may also require decryption.
+                  // They will be restored only after playback is verified.
+                  return true
+              }
+
+              private suspend fun emitVideo(
+                  url: String,
+                  referer: String,
+                  callback: (ExtractorLink) -> Unit,
+              ) {
+                  callback(
+                      newExtractorLink(
+                          source = name,
+                          name = name,
+                          url = normaliseEscapedUrl(url),
+                          type = ExtractorLinkType.VIDEO,
+                      ) {
+                          this.referer = referer
+                          this.quality = Qualities.Unknown.value
+                      }
+                  )
+              }
+
+              private suspend fun fetchCompatibilityKey(
+                  episodeId: String,
+                  type: String,
+              ): String? {
+                  val endpoint =
+                      "https://enc-dec.app/api/enc-kisskh" +
+                          "?text=${urlEncode(episodeId)}&type=${urlEncode(type)}"
+
+                  val response = runCatching {
+                      app.get(
+                          endpoint,
+                          headers = mapOf(
+                              "User-Agent" to USER_AGENT,
+                              "Accept" to "application/json, text/plain, */*",
+                          ),
+                          cacheTime = 0,
+                      ).text
+                  }.getOrNull() ?: return null
+
+                  return parseToken(response)
+              }
+
+              private fun parseToken(raw: String): String? {
+                  val value = raw.trim()
+                  if (value.isBlank()) return null
+
+                  if (value.startsWith("{") || value.startsWith("[")) {
+                      val node = runCatching { mapper.readTree(value) }.getOrNull()
+
+                      val candidates = listOf(
+                          "result",
+                          "token",
+                          "kkey",
+                          "key",
+                          "data",
+                          "value",
+                      )
+
+                      candidates.forEach { key ->
+                          val text = node?.getIgnoreCase(key)?.asText()
+                          if (!text.isNullOrBlank() && text != "null") {
+                              return text.trim().trim('"')
+                          }
+                      }
+
+                      if (node?.isTextual == true) {
+                          return node.asText().takeIf { it.isNotBlank() }
+                      }
+
+                      return null
+                  }
+
+                  return value.trim('"').takeIf { it.isNotBlank() }
+              }
+
+              private fun extractVideoFromApi(raw: String): String? {
+                  val node = runCatching { mapper.readTree(raw) }.getOrNull()
+                  val direct = node
+                      ?.text(
+                          "Video",
+                          "video",
+                          "url",
+                          "Url",
+                          "URL",
+                          "stream",
+                          "Stream",
+                      )
+                      ?.takeIf { it.startsWith("http") }
+
+                  return direct?.let(::normaliseEscapedUrl)
+              }
+
+              private fun findMediaUrl(raw: String): String? {
+                  if (raw.isBlank()) return null
+
+                  val normalised = normaliseEscapedUrl(raw)
+
+                  val hls = Regex(
+                      """https?://[^\s"'<>\\]+\.m3u8(?:\?[^\s"'<>\\]*)?""",
+                      RegexOption.IGNORE_CASE,
+                  ).find(normalised)?.value
+                  if (!hls.isNullOrBlank()) return hls
+
+                  val mp4 = Regex(
+                      """https?://[^\s"'<>\\]+\.mp4(?:\?[^\s"'<>\\]*)?""",
+                      RegexOption.IGNORE_CASE,
+                  ).find(normalised)?.value
+                  if (!mp4.isNullOrBlank()) return mp4
+
+                  return null
+              }
+
+              private fun normaliseEscapedUrl(value: String): String {
+                  return value
+                      .replace("\\u0026", "&")
+                      .replace("\\/", "/")
+                      .replace("&amp;", "&")
+                      .trim()
+                      .trim('"')
+              }
+
+              private fun dramaUrl(title: String, dramaId: Int): String {
+                  return "$mainUrl/Drama/${slug(title)}?id=$dramaId"
+              }
+
+              private fun episodeUrl(
+                  title: String,
+                  dramaId: Int,
+                  episodeId: Int,
+                  episodeNumber: String,
+              ): String {
+                  return "$mainUrl/Drama/${slug(title)}/Episode-$episodeNumber" +
+                      "?id=$dramaId&ep=$episodeId&page=0&pageSize=100"
+              }
+
+              private fun slug(value: String): String {
+                  return value
+                      .trim()
+                      .replace(Regex("""[^\p{L}\p{N}]+"""), "-")
+                      .trim('-')
+                      .ifBlank { "Drama" }
+              }
+
+              private fun parseType(raw: String?): TvType {
+                  return when (raw?.trim()?.lowercase()) {
+                      "movie", "film" -> TvType.Movie
+                      "anime" -> TvType.Anime
+                      else -> TvType.TvSeries
+                  }
+              }
+
+              private fun cleanEpisodeNumber(number: Double): String {
+                  return if (number % 1.0 == 0.0) {
+                      number.toInt().toString()
+                  } else {
+                      number.toString().trimEnd('0').trimEnd('.')
+                  }
+              }
+
+              private fun extractYear(value: String?): Int? {
+                  return Regex("""\b(?:19|20)\d{2}\b""")
+                      .find(value.orEmpty())
+                      ?.value
+                      ?.toIntOrNull()
+              }
+
+              private fun queryValue(url: String, key: String): String? {
+                  val pattern = Regex("""(?:[?&])${Regex.escape(key)}=([^&#]+)""")
+                  return pattern.find(url)?.groupValues?.getOrNull(1)
+              }
+
+              private fun urlEncode(value: String): String {
+                  return URLEncoder.encode(
+                      value,
+                      StandardCharsets.UTF_8.toString(),
+                  )
+              }
+
+              private fun absoluteUrl(value: String?): String? {
+                  val url = value?.trim()?.takeIf { it.isNotBlank() } ?: return null
+
+                  return when {
+                      url.startsWith("https://") || url.startsWith("http://") -> url
+                      url.startsWith("//") -> "https:$url"
+                      url.startsWith("/") -> "$mainUrl$url"
+                      else -> "$mainUrl/$url"
+                  }
+              }
+
+              private fun arrayNodes(node: JsonNode?): List<JsonNode> {
+                  if (node == null || node.isNull) return emptyList()
+
+                  if (node.isArray) {
+                      return node.toList()
+                  }
+
+                  listOf(
+                      "data",
+                      "Data",
+                      "result",
+                      "Result",
+                      "items",
+                      "Items",
+                      "dramas",
+                      "Dramas",
+                  ).forEach { key ->
+                      val child = node.get(key)
+                      if (child?.isArray == true) {
+                          return child.toList()
+                      }
+                  }
+
+                  return emptyList()
+              }
+
+              private fun JsonNode.getIgnoreCase(key: String): JsonNode? {
+                  get(key)?.let { return it }
+                  fields().forEachRemaining { entry ->
+                      if (entry.key.equals(key, ignoreCase = true)) {
+                          return entry.value
+                      }
+                  }
+                  return null
+              }
+
+              private fun JsonNode.text(vararg keys: String): String? {
+                  keys.forEach { key ->
+                      val node = getIgnoreCase(key)
+                      if (node != null && !node.isNull) {
+                          val value = node.asText()
+                          if (value.isNotBlank() && value != "null") {
+                              return value
+                          }
+                      }
+                  }
+                  return null
+              }
+
+              private fun JsonNode.intText(vararg keys: String): Int? {
+                  keys.forEach { key ->
+                      val node = getIgnoreCase(key) ?: return@forEach
+
+                      if (node.isInt || node.isLong) {
+                          return node.asInt()
+                      }
+
+                      node.asText().toIntOrNull()?.let { return it }
+                  }
+                  return null
+              }
+
+              private fun JsonNode.numberText(vararg keys: String): Double? {
+                  keys.forEach { key ->
+                      val node = getIgnoreCase(key) ?: return@forEach
+
+                      if (node.isNumber) {
+                          return node.asDouble()
+                      }
+
+                      node.asText().toDoubleOrNull()?.let { return it }
+                  }
+                  return null
+              }
+          }
+          EOF
+
+      - name: Verify repository foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for file in \
+            build.gradle.kts \
+            settings.gradle.kts \
+            gradlew \
+            repo.json
+          do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Missing Stage 1 foundation file: $file"
+              exit 1
+            fi
+          done
+
+          chmod +x gradlew
+
+      - name: Compile KissKH before committing
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew :KissKH:make --no-daemon --stacktrace
+
+      - name: Confirm KissKH artifact exists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t ARTIFACTS < <(
+            find KissKH/build \
+              -maxdepth 2 \
+              -type f \
+              -name '*.cs3' \
+              -print
+          )
+
+          if [[ ${#ARTIFACTS[@]} -eq 0 ]]; then
+            echo "::error::KissKH compiled without producing a .cs3 artifact."
+            exit 1
+          fi
+
+          printf 'Validated artifact: %s\n' "${ARTIFACTS[@]}"
+
+      - name: Commit restored KissKH source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add KissKH
+
+          if git diff --cached --quiet; then
+            echo "KissKH source is already identical. Nothing to commit."
+            exit 0
+          fi
+
+          git commit -m "Restore KissKH"
+          git push origin main
+
+      - name: Start repository build and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run build.yml --ref main
+          echo "CloudStream Build was dispatched for main."
+
+      - name: Recovery summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## KissKH Stage 2"
+            echo
+            echo "* Module identity: \`KissKH\`"
+            echo "* Provider display name: \`KissKH\`"
+            echo "* Source domain: \`https://kisskh.co\`"
+            echo "* Main page: intentionally deferred"
+            echo "* Search: restored"
+            echo "* Details and episodes: restored"
+            echo "* Playback: restored with direct-page first strategy and isolated kkey compatibility fallback"
+            echo "* Subtitles: intentionally deferred until playback is verified"
+          } >> "$GITHUB_STEP_SUMMARY"
