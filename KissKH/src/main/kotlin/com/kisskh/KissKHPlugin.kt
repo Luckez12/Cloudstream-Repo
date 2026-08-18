@@ -1,4 +1,4 @@
-package com.luckez12.kisskh
+package com.kisskh
 
 import android.content.Context
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
