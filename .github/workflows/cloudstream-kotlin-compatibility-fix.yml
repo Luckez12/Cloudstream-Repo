@@ -1,0 +1,265 @@
+name: Fix CloudStream Kotlin Compatibility
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cloudstream-kotlin-fix
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Patch current CloudStream compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/cloudstream-kotlin-fix-diagnose"
+          cp build.gradle.kts \
+            "$RUNNER_TEMP/cloudstream-kotlin-fix-diagnose/build.gradle.kts.before"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("build.gradle.kts")
+          text = path.read_text(encoding="utf-8")
+
+          # The previous repair pinned Kotlin 2.1.0. Current CloudStream
+          # binaries are newer, while the actively maintained official
+          # extensions repo uses Kotlin 2.3.0.
+          text, kotlin_changes = re.subn(
+              r'classpath\("org\.jetbrains\.kotlin:kotlin-gradle-plugin:[^"]+"\)',
+              'classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")',
+              text,
+              count=1,
+          )
+          if kotlin_changes != 1:
+              raise SystemExit("Could not patch Kotlin Gradle plugin version")
+
+          # Follow the current official recloudstream/extensions dependency
+          # model instead of the older cloudstream3:pre-release stub.
+          text = re.sub(
+              r'^\s*val cloudstream by configurations\s*\n',
+              '',
+              text,
+              flags=re.MULTILINE,
+          )
+
+          old_stub = 'cloudstream("com.lagradost:cloudstream3:pre-release")'
+          new_lib = 'implementation("com.github.recloudstream.cloudstream:library:-SNAPSHOT")'
+
+          if old_stub in text:
+              text = text.replace(old_stub, new_lib, 1)
+          elif new_lib not in text:
+              # If the old line has drifted, insert the official library
+              # dependency after the implementation configuration.
+              needle = "val implementation by configurations"
+              if needle not in text:
+                  raise SystemExit("Could not locate implementation configuration")
+              text = text.replace(
+                  needle,
+                  needle + "\n\n    " + new_lib,
+                  1,
+              )
+
+          # Avoid accidental duplicates.
+          while text.count(new_lib) > 1:
+              first = text.find(new_lib)
+              second = text.find(new_lib, first + len(new_lib))
+              line_start = text.rfind("\n", 0, second) + 1
+              line_end = text.find("\n", second)
+              if line_end == -1:
+                  line_end = len(text)
+              else:
+                  line_end += 1
+              text = text[:line_start] + text[line_end:]
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          cp build.gradle.kts \
+            "$RUNNER_TEMP/cloudstream-kotlin-fix-diagnose/build.gradle.kts.after"
+
+          grep -Fq 'com.android.tools.build:gradle:8.7.3' build.gradle.kts
+          grep -Fq 'kotlin-gradle-plugin:2.3.0' build.gradle.kts
+          grep -Fq 'com.github.recloudstream:gradle:-SNAPSHOT' build.gradle.kts
+          grep -Fq 'com.github.recloudstream.cloudstream:library:-SNAPSHOT' build.gradle.kts
+          grep -Fq 'JvmTarget.JVM_1_8' build.gradle.kts
+
+          if grep -Fq 'com.lagradost:cloudstream3:pre-release' build.gradle.kts; then
+            echo "::error::Old CloudStream pre-release stub is still present."
+            exit 1
+          fi
+
+          git diff -- build.gradle.kts \
+            > "$RUNNER_TEMP/cloudstream-kotlin-fix-diagnose/repair.diff"
+
+      - name: Record environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIAG="$RUNNER_TEMP/cloudstream-kotlin-fix-diagnose"
+
+          {
+            echo "Java:"
+            java -version
+            echo
+            echo "Gradle:"
+            chmod +x gradlew
+            ./gradlew --version
+          } > "$DIAG/environment.txt" 2>&1
+
+      - name: Full provider build
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIAG="$RUNNER_TEMP/cloudstream-kotlin-fix-diagnose"
+
+          set +e
+          ./gradlew clean make makePluginsJson \
+            --no-daemon \
+            --refresh-dependencies \
+            --stacktrace \
+            2>&1 | tee "$DIAG/provider-build.log"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "$status" > "$DIAG/provider-build-exit-code.txt"
+
+      - name: Collect error candidates
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIAG="$RUNNER_TEMP/cloudstream-kotlin-fix-diagnose"
+
+          if [[ -f "$DIAG/provider-build.log" ]]; then
+            grep -nE \
+              '(^e: |FAILURE:|What went wrong:|Caused by:|Could not|Cannot|Unresolved reference|error:|Exception|incompatible version)' \
+              "$DIAG/provider-build.log" | tail -n 500 \
+              > "$DIAG/error-candidates.txt" || true
+          fi
+
+          {
+            echo "CLOUDSTREAM KOTLIN COMPATIBILITY FIX"
+            echo "===================================="
+            echo
+            echo "Repository: ${GITHUB_REPOSITORY}"
+            echo "Commit checked out: ${GITHUB_SHA}"
+            echo
+            echo "Target foundation:"
+            echo "AGP: 8.7.3"
+            echo "Gradle wrapper: 8.12"
+            echo "Kotlin Gradle plugin: 2.3.0"
+            echo "CloudStream Gradle plugin: -SNAPSHOT"
+            echo "CloudStream library: com.github.recloudstream.cloudstream:library:-SNAPSHOT"
+            echo "JVM target: 1.8"
+            echo "JDK runner: 17"
+            echo
+            echo "Provider build exit code: ${{ steps.build.outputs.exit_code || 'not-run' }}"
+          } > "$DIAG/summary.txt"
+
+      - name: Verify generated providers
+        if: steps.build.outputs.exit_code == '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f build/plugins.json
+
+          CS3_COUNT="$(find . -type f -path '*/build/*.cs3' | wc -l)"
+          echo "Generated .cs3 files: $CS3_COUNT"
+
+          if [[ "$CS3_COUNT" -lt 1 ]]; then
+            echo "::error::Gradle returned success but generated no .cs3 provider."
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          plugins = json.loads(Path("build/plugins.json").read_text(encoding="utf-8"))
+          if not isinstance(plugins, list):
+              raise SystemExit("build/plugins.json is not a JSON list")
+
+          print(f"plugins.json entries: {len(plugins)}")
+          PY
+
+      - name: Commit compatibility fix
+        if: steps.build.outputs.exit_code == '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add build.gradle.kts
+
+          if git diff --cached --quiet; then
+            echo "build.gradle.kts already matches the corrected baseline."
+          else
+            git commit -m "Fix CloudStream Kotlin compatibility [skip ci]"
+            git push origin HEAD:main
+          fi
+
+      - name: Upload built providers
+        if: steps.build.outputs.exit_code == '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudstream-kotlin-fix-cs3
+          path: |
+            **/build/*.cs3
+            build/plugins.json
+            repo.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnose
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudstream-kotlin-fix-diagnose
+          path: ${{ runner.temp }}/cloudstream-kotlin-fix-diagnose
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Final result
+        if: always()
+        shell: bash
+        run: |
+          status="${{ steps.build.outputs.exit_code || '999' }}"
+
+          if [[ "$status" != "0" ]]; then
+            echo "::error::Provider build still failed. Download cloudstream-kotlin-fix-diagnose."
+            exit 1
+          fi
+
+          echo "CloudStream Kotlin compatibility fixed and provider build passed."
