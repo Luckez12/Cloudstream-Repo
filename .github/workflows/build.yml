@@ -38,7 +38,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '9.6.1'
-          cache-provider: basic
+          cache-disabled: true
 
       - name: Configure Git
         shell: bash
