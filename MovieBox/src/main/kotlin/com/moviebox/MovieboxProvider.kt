@@ -20,7 +20,7 @@ class MovieboxProvider : MainAPI() {
 
     override var mainUrl = "https://moviebox.ph"
     override var name = "MovieBox"
-    override var lang = "id"
+    override var lang = "en"
 
     override val instantLinkLoading = true
     override val hasMainPage = true
