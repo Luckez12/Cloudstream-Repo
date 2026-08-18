@@ -1,0 +1,300 @@
+name: Repair CloudStream Foundation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cloudstream-foundation-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Backup current foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cloudstream-repair-backup/gradle/wrapper"
+
+          cp build.gradle.kts "$RUNNER_TEMP/cloudstream-repair-backup/build.gradle.kts.before"
+          cp gradle/wrapper/gradle-wrapper.properties \
+            "$RUNNER_TEMP/cloudstream-repair-backup/gradle/wrapper/gradle-wrapper.properties.before"
+
+      - name: Repair CloudStream Gradle foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > build.gradle.kts <<'KOTLIN'
+          import com.android.build.gradle.BaseExtension
+          import com.lagradost.cloudstream3.gradle.CloudstreamExtension
+          import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+          import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven("https://jitpack.io")
+              }
+
+              dependencies {
+                  classpath("com.android.tools.build:gradle:8.7.3")
+                  classpath("com.github.recloudstream:gradle:-SNAPSHOT")
+                  classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.0")
+              }
+          }
+
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven("https://jitpack.io")
+              }
+          }
+
+          fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) =
+              extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
+
+          fun Project.android(configuration: BaseExtension.() -> Unit) =
+              extensions.getByName<BaseExtension>("android").configuration()
+
+          subprojects {
+              apply(plugin = "com.android.library")
+              apply(plugin = "kotlin-android")
+              apply(plugin = "com.lagradost.cloudstream3.gradle")
+
+              cloudstream {
+                  setRepo(System.getenv("GITHUB_REPOSITORY") ?: "Luckez12/Cloudstream-Repo")
+              }
+
+              android {
+                  namespace = "com.luckez.cloudstream"
+
+                  defaultConfig {
+                      minSdk = 21
+                      compileSdkVersion(35)
+                      targetSdk = 35
+                  }
+
+                  compileOptions {
+                      sourceCompatibility = JavaVersion.VERSION_1_8
+                      targetCompatibility = JavaVersion.VERSION_1_8
+                  }
+
+                  tasks.withType<KotlinJvmCompile> {
+                      compilerOptions {
+                          jvmTarget.set(JvmTarget.JVM_1_8)
+                          freeCompilerArgs.addAll(
+                              "-Xno-call-assertions",
+                              "-Xno-param-assertions",
+                              "-Xno-receiver-assertions"
+                          )
+                      }
+                  }
+              }
+
+              dependencies {
+                  val cloudstream by configurations
+                  val implementation by configurations
+
+                  cloudstream("com.lagradost:cloudstream3:pre-release")
+                  implementation(kotlin("stdlib"))
+                  implementation("com.github.Blatzar:NiceHttp:0.4.11")
+                  implementation("org.jsoup:jsoup:1.18.3")
+                  implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
+              }
+          }
+
+          tasks.register<Delete>("clean") {
+              delete(rootProject.layout.buildDirectory)
+          }
+          KOTLIN
+
+          cat > gradle/wrapper/gradle-wrapper.properties <<'PROPS'
+          distributionBase=GRADLE_USER_HOME
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.12-bin.zip
+          distributionPath=wrapper/dists
+          zipStorePath=wrapper/dists
+          zipStoreBase=GRADLE_USER_HOME
+          PROPS
+
+          chmod +x gradlew
+
+          grep -Fq 'com.android.tools.build:gradle:8.7.3' build.gradle.kts
+          grep -Fq 'com.github.recloudstream:gradle:-SNAPSHOT' build.gradle.kts
+          grep -Fq 'kotlin-gradle-plugin:2.1.0' build.gradle.kts
+          grep -Fq 'JvmTarget.JVM_1_8' build.gradle.kts
+          grep -Fq 'jackson-module-kotlin:2.13.1' build.gradle.kts
+          grep -Fq 'gradle-8.12-bin.zip' gradle/wrapper/gradle-wrapper.properties
+
+      - name: Save repair diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cloudstream-repair-diagnose"
+          git diff -- build.gradle.kts gradle/wrapper/gradle-wrapper.properties \
+            > "$RUNNER_TEMP/cloudstream-repair-diagnose/repair.diff"
+
+      - name: Foundation smoke test
+        id: smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cloudstream-repair-diagnose"
+
+          {
+            echo "Java:"
+            java -version
+            echo
+            echo "Gradle:"
+            ./gradlew --version
+          } > "$RUNNER_TEMP/cloudstream-repair-diagnose/environment.txt" 2>&1
+
+          set +e
+          ./gradlew tasks --no-daemon --stacktrace \
+            2>&1 | tee "$RUNNER_TEMP/cloudstream-repair-diagnose/foundation.log"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "$status" > "$RUNNER_TEMP/cloudstream-repair-diagnose/foundation-exit-code.txt"
+
+      - name: Commit repaired foundation
+        if: steps.smoke.outputs.exit_code == '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add build.gradle.kts gradle/wrapper/gradle-wrapper.properties
+
+          if git diff --cached --quiet; then
+            echo "Foundation already matches the repair baseline."
+          else
+            git commit -m "Repair CloudStream build foundation [skip ci]"
+            git push origin HEAD:main
+          fi
+
+      - name: Full provider build
+        id: build
+        if: steps.smoke.outputs.exit_code == '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cloudstream-repair-diagnose"
+
+          set +e
+          ./gradlew make makePluginsJson --no-daemon --stacktrace \
+            2>&1 | tee "$RUNNER_TEMP/cloudstream-repair-diagnose/provider-build.log"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "$status" > "$RUNNER_TEMP/cloudstream-repair-diagnose/provider-build-exit-code.txt"
+
+      - name: Create repair summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DIAG="$RUNNER_TEMP/cloudstream-repair-diagnose"
+          mkdir -p "$DIAG"
+
+          {
+            echo "CLOUDSTREAM FOUNDATION REPAIR"
+            echo "============================="
+            echo
+            echo "Repository: ${GITHUB_REPOSITORY}"
+            echo "Commit checked out: ${GITHUB_SHA}"
+            echo
+            echo "Applied baseline:"
+            echo "AGP: 8.7.3"
+            echo "Gradle wrapper: 8.12"
+            echo "Kotlin Gradle plugin: 2.1.0"
+            echo "JVM bytecode target: 1.8"
+            echo "JDK runner: 17"
+            echo "CloudStream Gradle plugin: -SNAPSHOT"
+            echo "Jackson Kotlin: 2.13.1"
+            echo
+            echo "Foundation smoke exit code: ${{ steps.smoke.outputs.exit_code || 'not-run' }}"
+            echo "Provider build exit code: ${{ steps.build.outputs.exit_code || 'not-run' }}"
+          } > "$DIAG/summary.txt"
+
+          cp build.gradle.kts "$DIAG/build.gradle.kts.after" || true
+          cp gradle/wrapper/gradle-wrapper.properties "$DIAG/gradle-wrapper.properties.after" || true
+
+          cp -a "$RUNNER_TEMP/cloudstream-repair-backup"/. "$DIAG/" || true
+
+          for log in "$DIAG/foundation.log" "$DIAG/provider-build.log"; do
+            if [[ -f "$log" ]]; then
+              grep -nE \
+                '(^e: |FAILURE:|What went wrong:|Caused by:|Could not|Cannot|Unresolved reference|error:|Exception)' \
+                "$log" | tail -n 300 >> "$DIAG/error-candidates.txt" || true
+            fi
+          done
+
+      - name: Upload repair diagnose
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudstream-foundation-repair-diagnose
+          path: ${{ runner.temp }}/cloudstream-repair-diagnose
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload built providers
+        if: steps.build.outputs.exit_code == '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudstream-repair-cs3
+          path: |
+            **/build/*.cs3
+            build/plugins.json
+            repo.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Final repair result
+        if: always()
+        shell: bash
+        run: |
+          smoke="${{ steps.smoke.outputs.exit_code || '999' }}"
+          build="${{ steps.build.outputs.exit_code || '999' }}"
+
+          if [[ "$smoke" != "0" ]]; then
+            echo "::error::Foundation smoke test failed. Download cloudstream-foundation-repair-diagnose."
+            exit 1
+          fi
+
+          if [[ "$build" != "0" ]]; then
+            echo "::error::Foundation was repaired, but provider compilation still failed. Download cloudstream-foundation-repair-diagnose."
+            exit 1
+          fi
+
+          echo "CloudStream foundation repaired and all providers built successfully."
