@@ -1,1 +1,406 @@
+name: CloudStream Build
 
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cloudstream-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4.0.1
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.6.1'
+          cache-provider: basic
+
+      - name: Configure Git
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bootstrap clean CloudStream foundation
+        id: bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BOOTSTRAPPED=false
+
+          if [[ ! -f build.gradle.kts || ! -f settings.gradle.kts || ! -f repo.json || ! -f gradlew ]]; then
+            echo "CloudStream foundation is missing. Creating clean foundation."
+
+            cat > settings.gradle.kts <<'EOF'
+          rootProject.name = "CloudstreamPlugins"
+
+          val disabled = listOf<String>()
+
+          File(rootDir, ".").eachDir { dir ->
+              if (!disabled.contains(dir.name) && File(dir, "build.gradle.kts").exists()) {
+                  include(dir.name)
+              }
+          }
+
+          fun File.eachDir(block: (File) -> Unit) {
+              listFiles()?.filter { it.isDirectory }?.forEach { block(it) }
+          }
+          EOF
+
+            cat > build.gradle.kts <<'EOF'
+          import com.android.build.api.dsl.LibraryExtension
+          import com.lagradost.cloudstream3.gradle.CloudstreamExtension
+          import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+          import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven("https://jitpack.io")
+              }
+              dependencies {
+                  classpath("com.android.tools.build:gradle:9.1.1")
+                  classpath("com.github.recloudstream:gradle:master-SNAPSHOT")
+                  classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.0")
+              }
+          }
+
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven("https://jitpack.io")
+              }
+          }
+
+          fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) =
+              extensions.getByType<CloudstreamExtension>().configuration()
+
+          fun Project.android(configuration: LibraryExtension.() -> Unit) =
+              extensions.getByType<LibraryExtension>().configuration()
+
+          subprojects {
+              apply(plugin = "com.android.library")
+              apply(plugin = "com.lagradost.cloudstream3.gradle")
+
+              cloudstream {
+                  setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/Luckez12/Cloudstream-Repo")
+                  authors = listOf("Luckez12")
+              }
+
+              android {
+                  namespace = "com.luckez12.cloudstream"
+                  compileSdk = 35
+
+                  defaultConfig {
+                      minSdk = 21
+                  }
+
+                  compileOptions {
+                      sourceCompatibility = JavaVersion.VERSION_17
+                      targetCompatibility = JavaVersion.VERSION_17
+                  }
+
+                  tasks.withType<KotlinJvmCompile>().configureEach {
+                      compilerOptions {
+                          jvmTarget.set(JvmTarget.JVM_17)
+                          freeCompilerArgs.addAll(
+                              "-Xno-call-assertions",
+                              "-Xno-param-assertions",
+                              "-Xno-receiver-assertions"
+                          )
+                      }
+                  }
+              }
+
+              dependencies {
+                  add("cloudstream", "com.lagradost:cloudstream3:pre-release")
+
+                  add("implementation", kotlin("stdlib"))
+                  add("implementation", "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+                  add("implementation", "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+                  add("implementation", "org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+
+                  add("implementation", "com.github.Blatzar:NiceHttp:0.4.18")
+                  add("implementation", "com.squareup.okhttp3:okhttp:5.4.0")
+                  add("implementation", "org.jsoup:jsoup:1.22.2")
+
+                  add("implementation", "com.fasterxml.jackson.module:jackson-module-kotlin:2.22.1")
+                  add("implementation", "com.fasterxml.jackson.core:jackson-databind:2.22.1")
+                  add("implementation", "com.google.code.gson:gson:2.14.0")
+
+                  add("implementation", "com.faendir.rhino:rhino-android:1.6.0")
+                  add("implementation", "app.cash.quickjs:quickjs-android:0.9.2")
+
+                  add("implementation", "me.xdrop:fuzzywuzzy:1.4.0")
+                  add("implementation", "androidx.core:core-ktx:1.19.0")
+              }
+          }
+
+          tasks.register<Delete>("clean") {
+              delete(rootProject.layout.buildDirectory)
+          }
+          EOF
+
+            cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=false
+          android.buildFeatures.buildConfig=true
+          org.gradle.caching=true
+          EOF
+
+            cat > repo.json <<'EOF'
+          {
+            "name": "Luckez12 CloudStream Repo",
+            "description": "CloudStream extensions maintained by Luckez12",
+            "manifestVersion": 1,
+            "pluginLists": [
+              "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/plugins.json"
+            ]
+          }
+          EOF
+
+            cat > .gitignore <<'EOF'
+          .gradle/
+          .idea/
+          local.properties
+          **/build/
+          build/
+          *.iml
+          .DS_Store
+          EOF
+
+            cat > README.md <<'EOF'
+          # Luckez12 CloudStream Repo
+
+          CloudStream extension repository maintained by Luckez12.
+
+          Repository URL for CloudStream:
+
+          `https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/main/repo.json`
+          EOF
+
+            rm -f d.kt
+
+            rm -rf .wrapper-bootstrap
+            mkdir -p .wrapper-bootstrap
+            cat > .wrapper-bootstrap/settings.gradle.kts <<'EOF'
+          rootProject.name = "wrapper-bootstrap"
+          EOF
+            touch .wrapper-bootstrap/build.gradle.kts
+
+            (
+              cd .wrapper-bootstrap
+              gradle wrapper --gradle-version 9.6.1 --distribution-type bin
+            )
+
+            mkdir -p gradle/wrapper
+            cp .wrapper-bootstrap/gradlew ./gradlew
+            cp .wrapper-bootstrap/gradlew.bat ./gradlew.bat
+            cp .wrapper-bootstrap/gradle/wrapper/gradle-wrapper.jar ./gradle/wrapper/gradle-wrapper.jar
+            cp .wrapper-bootstrap/gradle/wrapper/gradle-wrapper.properties ./gradle/wrapper/gradle-wrapper.properties
+            rm -rf .wrapper-bootstrap
+            chmod +x gradlew
+
+            BOOTSTRAPPED=true
+          else
+            chmod +x gradlew
+            echo "Existing CloudStream foundation detected."
+          fi
+
+          echo "bootstrapped=$BOOTSTRAPPED" >> "$GITHUB_OUTPUT"
+
+      - name: Validate foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --version
+          ./gradlew tasks --no-daemon
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("repo.json").read_text())
+          assert data["manifestVersion"] == 1
+          assert data["pluginLists"] == [
+              "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/plugins.json"
+          ]
+          print("repo.json validation passed")
+          PY
+
+      - name: Commit foundation when first created
+        if: steps.bootstrap.outputs.bootstrapped == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No foundation changes to commit."
+          else
+            git commit -m "Bootstrap CloudStream repository foundation"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Detect provider modules
+        id: modules
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t MODULES < <(
+            find . \
+              -mindepth 2 \
+              -maxdepth 2 \
+              -type f \
+              -name build.gradle.kts \
+              -not -path './.git/*' \
+              -printf '%h\n' |
+            sed 's#^\./##' |
+            sort -u
+          )
+
+          if [[ ${#MODULES[@]} -eq 0 ]]; then
+            echo "No provider modules are present yet."
+            echo "has_modules=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Provider modules:"
+            printf '  %s\n' "${MODULES[@]}"
+            echo "has_modules=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build provider modules
+        if: steps.modules.outputs.has_modules == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew make makePluginsJson --no-daemon
+
+      - name: Prepare published repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PUBLISH_DIR="$RUNNER_TEMP/cloudstream-publish"
+          rm -rf "$PUBLISH_DIR"
+          mkdir -p "$PUBLISH_DIR"
+
+          if [[ "${{ steps.modules.outputs.has_modules }}" == "true" ]]; then
+            while IFS= read -r -d '' file; do
+              cp "$file" "$PUBLISH_DIR/"
+            done < <(find . -type f -path '*/build/*.cs3' -print0)
+
+            if [[ ! -f build/plugins.json ]]; then
+              echo "::error::Gradle build completed but build/plugins.json was not generated."
+              exit 1
+            fi
+
+            cp build/plugins.json "$PUBLISH_DIR/plugins.json"
+
+            CS3_COUNT="$(find "$PUBLISH_DIR" -maxdepth 1 -type f -name '*.cs3' | wc -l)"
+            if [[ "$CS3_COUNT" -eq 0 ]]; then
+              echo "::error::Provider modules were detected but no .cs3 files were generated."
+              exit 1
+            fi
+          else
+            printf '[]\n' > "$PUBLISH_DIR/plugins.json"
+          fi
+
+          cp repo.json "$PUBLISH_DIR/repo.json"
+
+          python3 - "$PUBLISH_DIR" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          json.loads((root / "repo.json").read_text())
+          plugins = json.loads((root / "plugins.json").read_text())
+          if not isinstance(plugins, list):
+              raise SystemExit("plugins.json must contain a JSON list")
+          print(f"Publish validation passed with {len(plugins)} plugin entries")
+          PY
+
+      - name: Publish builds branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PUBLISH_DIR="$RUNNER_TEMP/cloudstream-publish"
+          BUILDS_DIR="$RUNNER_TEMP/cloudstream-builds"
+
+          rm -rf "$BUILDS_DIR"
+          git fetch origin builds || true
+
+          if git show-ref --verify --quiet refs/remotes/origin/builds; then
+            echo "Existing builds branch detected."
+            git worktree add -B builds "$BUILDS_DIR" origin/builds
+          else
+            echo "Creating builds branch for the first time."
+            git worktree add --detach "$BUILDS_DIR" HEAD
+            (
+              cd "$BUILDS_DIR"
+              git switch --orphan builds
+            )
+          fi
+
+          (
+            cd "$BUILDS_DIR"
+
+            find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+            cp -a "$PUBLISH_DIR"/. .
+
+            git add -A
+
+            if git diff --cached --quiet; then
+              echo "Published files are unchanged."
+              exit 0
+            fi
+
+            git commit -m "Build ${GITHUB_SHA}"
+            git push origin builds --force
+          )
+
+      - name: Stage 1 summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## CloudStream repository status"
+            echo
+            echo "* Repository: \`${GITHUB_REPOSITORY}\`"
+            echo "* Source branch: \`${GITHUB_REF_NAME}\`"
+            echo "* Foundation created this run: \`${{ steps.bootstrap.outputs.bootstrapped || 'unknown' }}\`"
+            echo "* Provider modules present: \`${{ steps.modules.outputs.has_modules || 'unknown' }}\`"
+            echo "* CloudStream repo URL: \`https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/main/repo.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
