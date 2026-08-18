@@ -1,20 +1,23 @@
-package com.anichin
+package com.AnichinV2
 
-import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Element
+import java.net.URLEncoder
 
-class AnichinProvider : MainAPI() {
-    companion object {
-        var context: android.content.Context? = null
-    }
+class AnichinV2 : MainAPI() {
+
     override var mainUrl = "https://anichin.moe"
-    override var name = "Anichin"
+    override var name = "Anichin V2"
     override val hasMainPage = true
     override var lang = "id"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.Anime)
+
+    override val supportedTypes = setOf(
+        TvType.Movie,
+        TvType.Anime
+    )
 
     override val mainPage = mainPageOf(
         "anime/?order=update" to "Latest Update",
@@ -24,9 +27,61 @@ class AnichinProvider : MainAPI() {
         "anime/?type=movie&order=update" to "Movie"
     )
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.get("${mainUrl}/${request.data}&page=$page").document
-        val home = document.select("div.listupd > article").mapNotNull { it.toSearchResult() }
+    private val fastVideoHosts = setOf(
+        "ok.ru",
+        "odnoklassniki",
+        "rumble.com"
+    )
+
+    private fun isFastVideoHost(url: String): Boolean {
+        return fastVideoHosts.any { host ->
+            url.contains(host, ignoreCase = true)
+        }
+    }
+
+    private fun Element.getImageUrl(): String? {
+        val imageUrl = listOf(
+            attr("data-src"),
+            attr("data-lazy-src"),
+            attr("data-original"),
+            attr("src")
+        ).firstOrNull {
+            it.isNotBlank() &&
+                !it.startsWith("data:", ignoreCase = true)
+        }
+
+        if (imageUrl != null) return imageUrl
+
+        val srcSet = listOf(
+            attr("data-srcset"),
+            attr("srcset")
+        ).firstOrNull { it.isNotBlank() } ?: return null
+
+        return srcSet
+            .split(",")
+            .lastOrNull()
+            ?.trim()
+            ?.split(" ")
+            ?.firstOrNull()
+            ?.takeIf {
+                it.isNotBlank() &&
+                    !it.startsWith("data:", ignoreCase = true)
+            }
+    }
+
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse {
+
+        val document = app.get(
+            "${mainUrl}/${request.data}&page=$page"
+        ).document
+
+        val home = document
+            .select("div.listupd > article")
+            .mapNotNull { it.toSearchResult() }
+
         return newHomePageResponse(
             list = HomePageList(
                 name = request.name,
@@ -38,68 +93,209 @@ class AnichinProvider : MainAPI() {
     }
 
     private fun Element.toSearchResult(): SearchResponse {
-        val title = this.select("div.bsx > a").attr("title").trim()
-        val href = fixUrl(this.select("div.bsx > a").attr("href"))
-        val posterUrl = fixUrlNull(this.select("div.bsx > a img").attr("src"))
-        return newAnimeSearchResponse(title, href, TvType.Anime) {
+
+        val title = select("div.bsx > a")
+            .attr("title")
+            .trim()
+
+        val href = fixUrl(
+            select("div.bsx > a")
+                .attr("href")
+        )
+
+        val posterUrl = selectFirst("div.bsx > a img")
+            ?.getImageUrl()
+            ?.let { fixUrlNull(it) }
+
+        return newAnimeSearchResponse(
+            title,
+            href,
+            TvType.Anime
+        ) {
             this.posterUrl = posterUrl
         }
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
+    override suspend fun search(
+        query: String
+    ): List<SearchResponse> {
+
         val searchResponse = mutableListOf<SearchResponse>()
-        for (i in 1..3) {
-            val document = app.get("${mainUrl}/page/$i/?s=$query").document
-            val results = document.select("div.listupd > article").mapNotNull { it.toSearchResult() }
+        val searchQuery = URLEncoder.encode(query, "UTF-8")
+
+        for (page in 1..3) {
+
+            val document = app.get(
+                "${mainUrl}/page/$page/?s=$searchQuery"
+            ).document
+
+            val results = document
+                .select("div.listupd > article")
+                .mapNotNull { it.toSearchResult() }
+
             if (results.isEmpty()) break
+
             searchResponse.addAll(results)
         }
+
         return searchResponse.distinctBy { it.url }
     }
 
-    override suspend fun load(url: String): LoadResponse {
-        val document = app.get(fixUrl(url)).document
-        val title = document.selectFirst("h1.entry-title")?.text()?.trim().toString()
-        var poster = document.select("div.ime > img").attr("src")
-        val description = document.selectFirst("div.entry-content")?.text()?.trim()
-        val type = document.selectFirst(".spe")?.text().orEmpty()
-        val tvType = if (type.contains("Movie", true)) TvType.Movie else TvType.TvSeries
-        if (poster.isEmpty()) {
-            poster = document.selectFirst("meta[property=og:image]")?.attr("content").orEmpty()
+    override suspend fun load(
+        url: String
+    ): LoadResponse {
+
+        val document = app.get(
+            fixUrl(url)
+        ).document
+
+        val title = document
+            .selectFirst("h1.entry-title")
+            ?.text()
+            ?.trim()
+            .orEmpty()
+
+        val poster = (
+            document
+                .selectFirst("div.thumb img, div.ime img, img.wp-post-image")
+                ?.getImageUrl()
+                ?: document
+                    .selectFirst("meta[property=og:image]")
+                    ?.attr("content")
+                    ?.trim()
+        ).orEmpty()
+
+        val description = document
+            .selectFirst("div.entry-content")
+            ?.text()
+            ?.trim()
+
+        val type = document
+            .selectFirst(".spe")
+            ?.text()
+            .orEmpty()
+
+        val tvType = if (type.contains("Movie", true)) {
+            TvType.Movie
+        } else {
+            TvType.TvSeries
         }
 
         return if (tvType == TvType.TvSeries) {
-            val episodes = document.select(".eplister li").map { ep ->
-                val link = fixUrl(ep.selectFirst("a")?.attr("href").orEmpty())
-                val epTitle = ep.selectFirst(".epl-title")?.text()?.trim().orEmpty()
-                val epSub = ep.selectFirst(".epl-sub span")?.text()?.trim().orEmpty()
-                val epDate = ep.selectFirst(".epl-date")?.text()?.trim().orEmpty()
 
-                val cleanTitle = epTitle
-                    .replace(Regex("Episode\\s*\\d+\\s*Subtitle Indonesia", RegexOption.IGNORE_CASE), "")
-                    .replace("Subtitle Indonesia", "")
-                    .trim()
+            val episodes = document
+                .select(".eplister li")
+                .map { episodeElement ->
 
-                val name = "— $cleanTitle $epSub Indonesia".trim()
-                val desc = if (epDate.isNotEmpty()) "Rilis: $epDate" else null
+                    val link = fixUrl(
+                        episodeElement
+                            .selectFirst("a")
+                            ?.attr("href")
+                            .orEmpty()
+                    )
 
-                newEpisode(link) {
-                    this.name = name
-                    this.posterUrl = fixUrlNull(poster)
-                    this.description = desc
+                    val episodeTitle = episodeElement
+                        .selectFirst(".epl-title")
+                        ?.text()
+                        ?.trim()
+                        .orEmpty()
+
+                    val episodeSub = episodeElement
+                        .selectFirst(".epl-sub span")
+                        ?.text()
+                        ?.trim()
+                        .orEmpty()
+
+                    val episodeDate = episodeElement
+                        .selectFirst(".epl-date")
+                        ?.text()
+                        ?.trim()
+                        .orEmpty()
+
+                    val episodePoster = episodeElement
+                        .selectFirst("a img")
+                        ?.getImageUrl()
+                        ?.let { fixUrlNull(it) }
+                        ?: fixUrlNull(poster)
+
+                    val cleanTitle = episodeTitle
+                        .replace(
+                            Regex(
+                                "Episode\\s*\\d+\\s*Subtitle Indonesia",
+                                RegexOption.IGNORE_CASE
+                            ),
+                            ""
+                        )
+                        .replace(
+                            "Subtitle Indonesia",
+                            ""
+                        )
+                        .trim()
+
+                    val episodeName =
+                        "- $cleanTitle $episodeSub Indonesia".trim()
+
+                    val episodeDescription =
+                        episodeDate
+                            .takeIf { it.isNotEmpty() }
+                            ?.let { "Rilis: $it" }
+
+                    newEpisode(link) {
+                        this.name = episodeName
+                        this.posterUrl = episodePoster
+                        this.description = episodeDescription
+                    }
                 }
-            }.reversed()
+                .reversed()
 
-            newTvSeriesLoadResponse(title, url, TvType.Anime, episodes) {
+            newTvSeriesLoadResponse(
+                title,
+                url,
+                TvType.Anime,
+                episodes
+            ) {
                 this.posterUrl = fixUrlNull(poster)
                 this.plot = description
             }
+
         } else {
-            val movieHref = document.selectFirst(".eplister li > a")?.attr("href")?.let { fixUrl(it) } ?: url
-            newMovieLoadResponse(title, movieHref, TvType.Movie, movieHref) {
+
+            val movieHref = document
+                .selectFirst(".eplister li > a")
+                ?.attr("href")
+                ?.let { fixUrl(it) }
+                ?: url
+
+            newMovieLoadResponse(
+                title,
+                movieHref,
+                TvType.Movie,
+                movieHref
+            ) {
                 this.posterUrl = fixUrlNull(poster)
                 this.plot = description
             }
+        }
+    }
+
+    private suspend fun safeLoadExtractor(
+        url: String,
+        referer: String,
+        loadedUrls: MutableSet<String>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        if (!loadedUrls.add(url)) return
+
+        runCatching {
+            loadExtractor(
+                url,
+                referer,
+                subtitleCallback,
+                callback
+            )
+        }.onFailure {
+            // ignore failed extractor
         }
     }
 
@@ -109,16 +305,145 @@ class AnichinProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(fixUrl(data)).document
-        document.select(".mobius option").forEach { server ->
-            val base64 = server.attr("value")
-            if (base64.isNotBlank()) {
-                val decoded = base64Decode(base64)
-                val doc = Jsoup.parse(decoded)
-                val href = fixUrl(doc.select("iframe").attr("src"))
-                loadExtractor(href, subtitleCallback, callback)
+
+        val episodeUrl = fixUrl(data)
+        val document = app.get(episodeUrl).document
+        val loadedUrls = mutableSetOf<String>()
+        val secondScanCandidates = linkedMapOf<String, String>()
+
+        /*
+         * Scan 1:
+         * Immediate fast scan.
+         * OkRu, Odnoklassniki and Rumble are loaded as soon as they are found.
+         * This part must stay light so playback can start faster.
+         */
+        document.select(".mobius option").forEach optionLoop@ { option ->
+
+            val encodedValue = option.attr("value").trim()
+            if (encodedValue.isBlank()) return@optionLoop
+
+            val decodedDocument = runCatching {
+                Jsoup.parse(base64Decode(encodedValue))
+            }.getOrNull() ?: return@optionLoop
+
+            val iframeUrl = decodedDocument
+                .selectFirst("iframe[src]")
+                ?.attr("src")
+                ?.trim()
+                .orEmpty()
+
+            if (iframeUrl.isBlank()) return@optionLoop
+
+            val streamUrl = fixUrl(iframeUrl)
+
+            if (isFastVideoHost(streamUrl)) {
+                safeLoadExtractor(
+                    streamUrl,
+                    episodeUrl,
+                    loadedUrls,
+                    subtitleCallback,
+                    callback
+                )
+                return@optionLoop
+            }
+
+            val streamDocument = runCatching {
+                app.get(
+                    streamUrl,
+                    headers = mapOf(
+                        "Referer" to episodeUrl,
+                        "Origin" to mainUrl,
+                        "User-Agent" to USER_AGENT
+                    )
+                ).document
+            }.getOrNull() ?: return@optionLoop
+
+            val playerUrls = streamDocument
+                .select("iframe[src]")
+                .mapNotNull { iframe ->
+                    iframe.attr("src")
+                        .trim()
+                        .takeIf { it.isNotBlank() }
+                        ?.let { fixUrl(it) }
+                }
+                .distinct()
+
+            playerUrls.forEach playerLoop@ { playerUrl ->
+
+                if (isFastVideoHost(playerUrl)) {
+                    safeLoadExtractor(
+                        playerUrl,
+                        streamUrl,
+                        loadedUrls,
+                        subtitleCallback,
+                        callback
+                    )
+                    return@playerLoop
+                }
+
+                secondScanCandidates[playerUrl] = streamUrl
+
+                /*
+                 * One light nested check only.
+                 * This keeps the old fast behavior for OkRu/Rumble hidden inside one wrapper.
+                 * Non-fast nested URLs are saved for Scan 2, not extracted here.
+                 */
+                val nestedDocument = runCatching {
+                    app.get(
+                        playerUrl,
+                        headers = mapOf(
+                            "Referer" to streamUrl,
+                            "User-Agent" to USER_AGENT
+                        )
+                    ).document
+                }.getOrNull() ?: return@playerLoop
+
+                nestedDocument
+                    .select("iframe[src]")
+                    .mapNotNull { nested ->
+                        nested.attr("src")
+                            .trim()
+                            .takeIf { it.isNotBlank() }
+                            ?.let { fixUrl(it) }
+                    }
+                    .distinct()
+                    .forEach nestedLoop@ { nestedUrl ->
+
+                        if (isFastVideoHost(nestedUrl)) {
+                            safeLoadExtractor(
+                                nestedUrl,
+                                playerUrl,
+                                loadedUrls,
+                                subtitleCallback,
+                                callback
+                            )
+                            return@nestedLoop
+                        }
+
+                        secondScanCandidates[nestedUrl] = playerUrl
+                    }
             }
         }
+
+        /*
+         * Scan 2:
+         * Direct player scan only.
+         * No deep crawling, no raw HTML crawling, no background coroutine.
+         * This follows the working AnichinX style that brings back Dood and StreamRuby.
+         */
+        secondScanCandidates
+            .entries
+            .take(12)
+            .forEach { (url, referer) ->
+                safeLoadExtractor(
+                    url,
+                    referer,
+                    loadedUrls,
+                    subtitleCallback,
+                    callback
+                )
+            }
+
         return true
     }
 }
