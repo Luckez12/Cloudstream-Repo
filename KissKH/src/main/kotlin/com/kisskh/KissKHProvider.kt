@@ -1,4 +1,4 @@
-package com.luckez12.kisskh
+package com.kisskh
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.lagradost.cloudstream3.*
