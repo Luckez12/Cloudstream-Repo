@@ -296,17 +296,48 @@ class AnichinProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        if (!loadedUrls.add(url)) return
+        val shouldLoad = synchronized(loadedUrls) {
+            loadedUrls.add(url)
+        }
+        if (!shouldLoad) return
+
+        val lowerQualityLinks = mutableListOf<ExtractorLink>()
+        var hasHdLink = false
 
         runCatching {
             loadExtractor(
                 url,
                 referer,
-                subtitleCallback,
-                callback
-            )
+                subtitleCallback
+            ) { link ->
+                if (link.quality >= Qualities.P720.value) {
+                    hasHdLink = true
+                    synchronized(callback) {
+                        callback(link)
+                    }
+                } else {
+                    lowerQualityLinks.add(link)
+                }
+            }
         }.onFailure {
-            // ignore failed extractor
+            // Ignore a failed extractor and continue scanning other servers.
+        }
+
+        /*
+         * Quality rule:
+         * If this server has 720p or better, hide its lower variants.
+         * If it has no 720p+ link, keep only its best available fallback.
+         * Unknown-quality links are preserved when they are the only result.
+         */
+        if (!hasHdLink && lowerQualityLinks.isNotEmpty()) {
+            val bestFallbackQuality = lowerQualityLinks.maxOf { it.quality }
+            lowerQualityLinks
+                .filter { it.quality == bestFallbackQuality }
+                .forEach { link ->
+                    synchronized(callback) {
+                        callback(link)
+                    }
+                }
         }
     }
 
@@ -322,138 +353,164 @@ class AnichinProvider : MainAPI() {
         val loadedUrls = mutableSetOf<String>()
         val secondScanCandidates = linkedMapOf<String, String>()
 
-        /*
-         * Scan 1:
-         * Immediate fast scan.
-         * OkRu, Odnoklassniki, Rumble and Dailymotion are loaded as soon as they are found.
-         * This part must stay light so playback can start faster.
-         */
-        document.select(".mobius option").forEach optionLoop@ { option ->
-
-            val encodedValue = option.attr("value").trim()
-            if (encodedValue.isBlank()) return@optionLoop
-
-            val decodedDocument = runCatching {
-                Jsoup.parse(base64Decode(encodedValue))
-            }.getOrNull() ?: return@optionLoop
-
-            val iframeUrl = decodedDocument
-                .selectFirst("iframe[src]")
-                ?.attr("src")
-                ?.trim()
-                .orEmpty()
-
-            if (iframeUrl.isBlank()) return@optionLoop
-
-            val streamUrl = fixUrl(iframeUrl)
-
-            if (isFastVideoHost(streamUrl)) {
-                safeLoadExtractor(
-                    streamUrl,
-                    episodeUrl,
-                    loadedUrls,
-                    subtitleCallback,
-                    callback
-                )
-                return@optionLoop
-            }
-
-            val streamDocument = runCatching {
-                app.get(
-                    streamUrl,
-                    headers = mapOf(
-                        "Referer" to episodeUrl,
-                        "Origin" to mainUrl,
-                        "User-Agent" to USER_AGENT
-                    )
-                ).document
-            }.getOrNull() ?: return@optionLoop
-
-            val playerUrls = streamDocument
-                .select("iframe[src]")
-                .mapNotNull { iframe ->
-                    iframe.attr("src")
-                        .trim()
-                        .takeIf { it.isNotBlank() }
-                        ?.let { fixUrl(it) }
+        fun addSecondScanCandidate(url: String, referer: String) {
+            synchronized(secondScanCandidates) {
+                if (!secondScanCandidates.containsKey(url)) {
+                    secondScanCandidates[url] = referer
                 }
-                .distinct()
-
-            playerUrls.forEach playerLoop@ { playerUrl ->
-
-                if (isFastVideoHost(playerUrl)) {
-                    safeLoadExtractor(
-                        playerUrl,
-                        streamUrl,
-                        loadedUrls,
-                        subtitleCallback,
-                        callback
-                    )
-                    return@playerLoop
-                }
-
-                secondScanCandidates[playerUrl] = streamUrl
-
-                /*
-                 * One light nested check only.
-                 * This keeps fast behavior for supported hosts hidden inside one wrapper.
-                 * Non-fast nested URLs are saved for Scan 2, not extracted here.
-                 */
-                val nestedDocument = runCatching {
-                    app.get(
-                        playerUrl,
-                        headers = mapOf(
-                            "Referer" to streamUrl,
-                            "User-Agent" to USER_AGENT
-                        )
-                    ).document
-                }.getOrNull() ?: return@playerLoop
-
-                nestedDocument
-                    .select("iframe[src]")
-                    .mapNotNull { nested ->
-                        nested.attr("src")
-                            .trim()
-                            .takeIf { it.isNotBlank() }
-                            ?.let { fixUrl(it) }
-                    }
-                    .distinct()
-                    .forEach nestedLoop@ { nestedUrl ->
-
-                        if (isFastVideoHost(nestedUrl)) {
-                            safeLoadExtractor(
-                                nestedUrl,
-                                playerUrl,
-                                loadedUrls,
-                                subtitleCallback,
-                                callback
-                            )
-                            return@nestedLoop
-                        }
-
-                        secondScanCandidates[nestedUrl] = playerUrl
-                    }
             }
         }
 
         /*
-         * Scan 2:
-         * Direct player scan only.
-         * No deep crawling, no raw HTML crawling, no background coroutine.
-         * This follows the working AnichinX style that brings back Dood and StreamRuby.
+         * Decode every Mobius option first. This part is local and cheap.
+         * Network work is then executed in small concurrent batches.
          */
-        secondScanCandidates
-            .entries
-            .sortedBy { secondScanPriority(it.key) }
-            .take(12)
-            .forEach { (url, referer) ->
-                safeLoadExtractor(
-                    url,
-                    referer,
-                    loadedUrls,
-                    subtitleCallback,
-                    callback
-                )
+        val streamUrls = document
+            .select(".mobius option")
+            .mapNotNull { option ->
+                val encodedValue = option.attr("value").trim()
+                if (encodedValue.isBlank()) return@mapNotNull null
+
+                val decodedDocument = runCatching {
+                    Jsoup.parse(base64Decode(encodedValue))
+                }.getOrNull() ?: return@mapNotNull null
+
+                decodedDocument
+                    .selectFirst("iframe[src]")
+                    ?.attr("src")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { fixUrl(it) }
+            }
+            .distinct()
+
+        /*
+         * Scan 1:
+         * Fast hosts first, then wrapper hosts.
+         * Four concurrent jobs keeps latency down without flooding the site.
+         */
+        streamUrls
+            .sortedBy { streamUrl ->
+                if (isFastVideoHost(streamUrl)) 0 else 1
+            }
+            .chunked(4)
+            .forEach { batch ->
+                batch.apmap { streamUrl ->
+
+                    if (isFastVideoHost(streamUrl)) {
+                        safeLoadExtractor(
+                            streamUrl,
+                            episodeUrl,
+                            loadedUrls,
+                            subtitleCallback,
+                            callback
+                        )
+                        return@apmap
+                    }
+
+                    val streamDocument = runCatching {
+                        app.get(
+                            streamUrl,
+                            headers = mapOf(
+                                "Referer" to episodeUrl,
+                                "Origin" to mainUrl,
+                                "User-Agent" to USER_AGENT
+                            )
+                        ).document
+                    }.getOrNull() ?: return@apmap
+
+                    val playerUrls = streamDocument
+                        .select("iframe[src]")
+                        .mapNotNull { iframe ->
+                            iframe.attr("src")
+                                .trim()
+                                .takeIf { it.isNotBlank() }
+                                ?.let { fixUrl(it) }
+                        }
+                        .distinct()
+
+                    playerUrls.forEach playerLoop@ { playerUrl ->
+
+                        if (isFastVideoHost(playerUrl)) {
+                            safeLoadExtractor(
+                                playerUrl,
+                                streamUrl,
+                                loadedUrls,
+                                subtitleCallback,
+                                callback
+                            )
+                            return@playerLoop
+                        }
+
+                        addSecondScanCandidate(playerUrl, streamUrl)
+
+                        /*
+                         * One nested check only.
+                         * Keeping this depth protects loading time while still
+                         * finding supported hosts hidden behind one extra iframe.
+                         */
+                        val nestedDocument = runCatching {
+                            app.get(
+                                playerUrl,
+                                headers = mapOf(
+                                    "Referer" to streamUrl,
+                                    "User-Agent" to USER_AGENT
+                                )
+                            ).document
+                        }.getOrNull() ?: return@playerLoop
+
+                        nestedDocument
+                            .select("iframe[src]")
+                            .mapNotNull { nested ->
+                                nested.attr("src")
+                                    .trim()
+                                    .takeIf { it.isNotBlank() }
+                                    ?.let { fixUrl(it) }
+                            }
+                            .distinct()
+                            .forEach nestedLoop@ { nestedUrl ->
+
+                                if (isFastVideoHost(nestedUrl)) {
+                                    safeLoadExtractor(
+                                        nestedUrl,
+                                        playerUrl,
+                                        loadedUrls,
+                                        subtitleCallback,
+                                        callback
+                                    )
+                                    return@nestedLoop
+                                }
+
+                                addSecondScanCandidate(nestedUrl, playerUrl)
+                            }
+                    }
+                }
+            }
+
+        /*
+         * Scan 2:
+         * Keep every discovered candidate. Dood and StreamRuby retain priority,
+         * but the old hard limit of 12 has been removed.
+         * Extractors run in controlled batches of four.
+         */
+        val secondScanSnapshot = synchronized(secondScanCandidates) {
+            secondScanCandidates.entries
+                .map { it.key to it.value }
+        }
+
+        secondScanSnapshot
+            .sortedBy { (url, _) -> secondScanPriority(url) }
+            .chunked(4)
+            .forEach { batch ->
+                batch.apmap { (url, referer) ->
+                    safeLoadExtractor(
+                        url,
+                        referer,
+                        loadedUrls,
+                        subtitleCallback,
+                        callback
+                    )
+                }
             }
 
         return true
