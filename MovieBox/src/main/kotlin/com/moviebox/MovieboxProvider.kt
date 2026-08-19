@@ -177,6 +177,8 @@ class MovieboxProvider : MainAPI() {
                     ?.data
                     ?.items
                     .orEmpty()
+            } catch (error: CancellationException) {
+                throw error
             } catch (_: Throwable) {
                 emptyList()
             }
@@ -203,6 +205,8 @@ class MovieboxProvider : MainAPI() {
                     headers = commonHeaders,
                     referer = "$host/"
                 ).parsedSafe<MediaDetail>()?.data
+            } catch (error: CancellationException) {
+                throw error
             } catch (_: Throwable) {
                 null
             }
@@ -260,6 +264,8 @@ class MovieboxProvider : MainAPI() {
                 ?.data
                 ?.items
                 ?.map { it.toSearchResponse(this) }
+        } catch (error: CancellationException) {
+            throw error
         } catch (_: Throwable) {
             null
         }
