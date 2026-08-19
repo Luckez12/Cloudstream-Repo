@@ -63,5 +63,27 @@
         "description": "MovieBox \u2014 Streaming Movie Subtitle Indonesia",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/MovieBox.cs3",
         "name": "MovieBox"
+    },
+    {
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://45.11.57.243&size=%size%",
+        "fileHash": "sha256-9cdb9224984bc0bd56dae573e21e330fd05df66e41081fb8e6d95931b4654f3f",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
+        "fileSize": 42820,
+        "status": 1,
+        "language": "id",
+        "authors": [
+            "Luckez"
+        ],
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "version": 1,
+        "internalName": "OppaDrama",
+        "description": "OppaDrama \u2014 Streaming Drama Korean, Movie and TV Series",
+        "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/OppaDrama.cs3",
+        "name": "OppaDrama"
     }
 ]
