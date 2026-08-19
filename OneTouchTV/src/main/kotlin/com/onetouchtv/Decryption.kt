@@ -8,12 +8,13 @@ import javax.crypto.spec.SecretKeySpec
 
 private val AES_KEY = "im72charPasswordofdInitVectorStm".toByteArray(Charsets.UTF_8)
 private val AES_IV = "im72charPassword".toByteArray(Charsets.UTF_8)
+private val WHITESPACE_REGEX = Regex("\\s+")
 
 private fun normalizeCustomAlphabet(input: String): String {
     return input
         .replace("-_.", "/")
         .replace("@", "+")
-        .replace(Regex("\\s+"), "")
+        .replace(WHITESPACE_REGEX, "")
 }
 
 private fun base64ToBytes(input: String): ByteArray {

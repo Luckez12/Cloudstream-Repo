@@ -7,12 +7,17 @@ import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
 import java.net.URLEncoder
 import java.util.Locale
 
 class OneTouchTV : MainAPI() {
+    companion object {
+        private const val RECOMMENDATION_CACHE_MS = 15 * 60 * 1000L
+
+        @Volatile
+        private var recommendationCache: Pair<Long, List<SearchResponse>>? = null
+    }
+
     override var mainUrl = base64Decode("aHR0cHM6Ly9hcGkzLmRldmNvcnAubWU=")
     override var name = "OneTouchTV"
     override var lang = "en"
@@ -85,14 +90,16 @@ class OneTouchTV : MainAPI() {
                     ?: "unknown"
             }
             .mapNotNull { (country, items) ->
-                if (items.isEmpty()) return@mapNotNull null
+                val responses = items.mapNotNull(::toSearchResponse)
+                if (responses.isEmpty()) return@mapNotNull null
+
                 val title = country.replaceFirstChar { char ->
                     if (char.isLowerCase()) char.titlecase(Locale.ROOT)
                     else char.toString()
                 }
                 HomePageList(
                     title,
-                    items.map(::toSearchResponse),
+                    responses,
                     isHorizontalImages = false,
                 )
             }
@@ -164,10 +171,13 @@ class OneTouchTV : MainAPI() {
             ?.takeIf { it.isNotBlank() && it != "null" }
             ?: data.image.orEmpty()
 
-        val actors = data.actors.map { actor ->
+        val actors = data.actors.mapNotNull { actor ->
+            val actorName = actor.name?.trim().orEmpty()
+            if (actorName.isBlank()) return@mapNotNull null
+
             ActorData(
                 Actor(
-                    actor.name.orEmpty(),
+                    actorName,
                     actor.image.orEmpty(),
                 ),
             )
@@ -179,13 +189,16 @@ class OneTouchTV : MainAPI() {
             }
         }
 
-        val episodes = data.episodes.mapNotNull { item ->
-            val identifier = item.identifier ?: return@mapNotNull null
-            val playId = item.playId ?: return@mapNotNull null
-            newEpisode("$mainUrl/vod/$identifier/episode/$playId") {
-                name = "Episode ${item.episode ?: "?"}"
+        val episodes = data.episodes
+            .distinctBy { it.identifier to it.playId }
+            .mapNotNull { item ->
+                val identifier = item.identifier?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val playId = item.playId?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                newEpisode("$mainUrl/vod/$identifier/episode/$playId") {
+                    name = "Episode ${item.episode ?: "?"}"
+                }
             }
-        }.reversed()
+            .reversed()
 
         val recommendations = loadRecommendations()
 
@@ -208,26 +221,40 @@ class OneTouchTV : MainAPI() {
     }
 
     private suspend fun loadRecommendations(): List<SearchResponse> {
+        val now = System.currentTimeMillis()
+        recommendationCache?.let { (cachedAt, cachedItems) ->
+            if (now - cachedAt < RECOMMENDATION_CACHE_MS) {
+                return cachedItems
+            }
+        }
+
         return try {
             val decrypted = getDecrypted("$mainUrl/vod/top")
             val top = parseJson<TopResponse>(decrypted)
-            (top.day.orEmpty() + top.week.orEmpty() + top.month.orEmpty())
+            val recommendations = (top.day.orEmpty() + top.week.orEmpty() + top.month.orEmpty())
                 .distinctBy { it.id ?: it._id ?: it.title }
                 .mapNotNull { item ->
                     val id = item.id ?: item._id ?: return@mapNotNull null
                     newTvSeriesSearchResponse(
                         item.title?.ifBlank { "Unknown Title" } ?: "Unknown Title",
                         "$mainUrl/vod/$id/detail",
-                        TvType.Movie,
+                        if (item.type.equals("movie", ignoreCase = true)) {
+                            TvType.Movie
+                        } else {
+                            TvType.TvSeries
+                        },
                     ) {
                         posterUrl = item.image
                     }
                 }
+
+            recommendationCache = now to recommendations
+            recommendations
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
             log("recommendations failed: ${error.message}")
-            emptyList()
+            recommendationCache?.second.orEmpty()
         }
     }
 
@@ -236,7 +263,7 @@ class OneTouchTV : MainAPI() {
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-    ): Boolean = coroutineScope {
+    ): Boolean {
         val decrypted = getDecrypted(data)
         val (sources, tracks) = try {
             parseSourcesAndTracks(decrypted)
@@ -246,42 +273,46 @@ class OneTouchTV : MainAPI() {
             )
         }
 
-        launch {
-            tracks.forEach { track ->
-                val file = track.file.takeIf { it.isNotBlank() } ?: return@forEach
-                subtitleCallback(
-                    newSubtitleFile(
-                        track.name.ifBlank { "Unknown" },
-                        file,
-                    ),
-                )
-            }
+        val uniqueTracks = tracks
+            .filter { it.file.isNotBlank() }
+            .distinctBy { it.file to it.name }
+
+        uniqueTracks.forEach { track ->
+            subtitleCallback(
+                newSubtitleFile(
+                    track.name.ifBlank { "Unknown" },
+                    track.file,
+                ),
+            )
         }
 
-        launch {
-            sources.forEach { source ->
-                val streamUrl = source.url.takeIf { it.isNotBlank() } ?: return@forEach
-                val label = source.name.ifBlank { "Source" }
-                callback(
-                    newExtractorLink(
-                        label,
-                        label,
-                        streamUrl,
-                        INFER_TYPE,
-                    ) {
-                        quality = getQualityFromName(source.quality)
-                        headers = source.headers
-                    },
-                )
-            }
+        val uniqueSources = sources
+            .filter { it.url.isNotBlank() }
+            .distinctBy { it.url to it.headers }
+
+        uniqueSources.forEach { source ->
+            val label = source.name.ifBlank { "Source" }
+            callback(
+                newExtractorLink(
+                    label,
+                    label,
+                    source.url,
+                    INFER_TYPE,
+                ) {
+                    quality = getQualityFromName(
+                        source.quality.ifBlank { source.name },
+                    )
+                    headers = source.headers
+                },
+            )
         }
 
-        log("loadLinks sources=${sources.size} subtitles=${tracks.size}")
-        sources.isNotEmpty()
+        log("loadLinks sources=${uniqueSources.size} subtitles=${uniqueTracks.size}")
+        return uniqueSources.isNotEmpty()
     }
 
-    private fun toSearchResponse(item: HomeItem): SearchResponse {
-        val id = item.id2 ?: item.id.orEmpty()
+    private fun toSearchResponse(item: HomeItem): SearchResponse? {
+        val id = (item.id2 ?: item.id)?.takeIf { it.isNotBlank() } ?: return null
         return newTvSeriesSearchResponse(
             item.title?.ifBlank { "Unknown Title" } ?: "Unknown Title",
             "$mainUrl/vod/$id/detail",
