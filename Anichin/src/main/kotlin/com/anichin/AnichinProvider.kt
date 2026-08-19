@@ -4,6 +4,9 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.net.URLEncoder
 
 class AnichinProvider : MainAPI() {
@@ -395,7 +398,9 @@ class AnichinProvider : MainAPI() {
             }
             .chunked(4)
             .forEach { batch ->
-                batch.apmap { streamUrl ->
+                coroutineScope {
+                    batch.map { streamUrl ->
+                        async {
 
                     if (isFastVideoHost(streamUrl)) {
                         safeLoadExtractor(
@@ -405,7 +410,7 @@ class AnichinProvider : MainAPI() {
                             subtitleCallback,
                             callback
                         )
-                        return@apmap
+                        return@async
                     }
 
                     val streamDocument = runCatching {
@@ -417,7 +422,7 @@ class AnichinProvider : MainAPI() {
                                 "User-Agent" to USER_AGENT
                             )
                         ).document
-                    }.getOrNull() ?: return@apmap
+                    }.getOrNull() ?: return@async
 
                     val playerUrls = streamDocument
                         .select("iframe[src]")
@@ -484,6 +489,8 @@ class AnichinProvider : MainAPI() {
                                 addSecondScanCandidate(nestedUrl, playerUrl)
                             }
                     }
+                        }
+                    }.awaitAll()
                 }
             }
 
@@ -502,14 +509,18 @@ class AnichinProvider : MainAPI() {
             .sortedBy { (url, _) -> secondScanPriority(url) }
             .chunked(4)
             .forEach { batch ->
-                batch.apmap { (url, referer) ->
-                    safeLoadExtractor(
-                        url,
-                        referer,
-                        loadedUrls,
-                        subtitleCallback,
-                        callback
-                    )
+                coroutineScope {
+                    batch.map { (url, referer) ->
+                        async {
+                            safeLoadExtractor(
+                                url,
+                                referer,
+                                loadedUrls,
+                                subtitleCallback,
+                                callback
+                            )
+                        }
+                    }.awaitAll()
                 }
             }
 
