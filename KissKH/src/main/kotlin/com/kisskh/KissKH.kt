@@ -17,6 +17,7 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.net.URLEncoder
 import java.util.ArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 
 class KissKH : MainAPI() {
     override var mainUrl = "https://kisskh.id"
@@ -184,7 +185,7 @@ class KissKH : MainAPI() {
         val videoKey = keys.getOrNull(0).orEmpty()
         val subtitleKey = keys.getOrNull(1).orEmpty()
 
-        var streamFound = false
+        val streamFound = AtomicBoolean(false)
         var subtitleFound = false
 
         if (videoKey.isNotBlank()) {
@@ -202,14 +203,14 @@ class KissKH : MainAPI() {
             }
 
             source?.let {
-                Log.d(TAG, "Video=${it.video}")
-                Log.d(TAG, "ThirdParty=${it.thirdParty}")
-
-                listOfNotNull(it.video, it.thirdParty)
+                val sourceLinks = listOfNotNull(it.video, it.thirdParty)
                     .map { link -> link.trim() }
                     .filter { link -> link.isNotBlank() }
                     .distinct()
-                    .amap { link ->
+
+                Log.d(TAG, "Video sources=${sourceLinks.size}")
+
+                sourceLinks.amap { link ->
                         safeApiCall {
                             when {
                                 link.contains(".m3u8", ignoreCase = true) -> {
@@ -218,8 +219,10 @@ class KissKH : MainAPI() {
                                         fixUrl(link),
                                         referer = "$mainUrl/",
                                         headers = mapOf("Origin" to mainUrl)
-                                    ).forEach(callback)
-                                    streamFound = true
+                                    ).forEach { extractedLink ->
+                                        streamFound.set(true)
+                                        callback(extractedLink)
+                                    }
                                 }
 
                                 link.contains(".mp4", ignoreCase = true) -> {
@@ -237,17 +240,18 @@ class KissKH : MainAPI() {
                                             )
                                         }
                                     )
-                                    streamFound = true
+                                    streamFound.set(true)
                                 }
 
                                 link.startsWith("http", ignoreCase = true) -> {
                                     loadExtractor(
                                         link,
                                         "$mainUrl/",
-                                        subtitleCallback,
-                                        callback
-                                    )
-                                    streamFound = true
+                                        subtitleCallback
+                                    ) { extractedLink ->
+                                        streamFound.set(true)
+                                        callback(extractedLink)
+                                    }
                                 }
                             }
                         }
@@ -279,7 +283,7 @@ class KissKH : MainAPI() {
             Log.e(TAG, "Subtitle kkey is empty")
         }
 
-        return streamFound || subtitleFound
+        return streamFound.get() || subtitleFound
     }
 
     private val chunkRegex by lazy { Regex("^\\d+$", RegexOption.MULTILINE) }
