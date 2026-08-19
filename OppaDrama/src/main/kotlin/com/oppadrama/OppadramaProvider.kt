@@ -13,7 +13,7 @@ import java.util.Base64
 class OppadramaProvider : MainAPI() {
 
     override var mainUrl = "http://45.11.57.192"
-    override var name = "OppaDrama"
+    override var name = "OppaDrama 👾"
     override var lang = "id"
     override val hasMainPage = true
 
