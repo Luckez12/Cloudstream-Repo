@@ -9,7 +9,7 @@ import java.net.URLEncoder
 class AnichinProvider: MainAPI() {
 
     override var mainUrl = "https://anichin.moe"
-    override var name = "Anichin V2"
+    override var name = "Anichin 👾"
     override val hasMainPage = true
     override var lang = "id"
     override val hasDownloadSupport = true
