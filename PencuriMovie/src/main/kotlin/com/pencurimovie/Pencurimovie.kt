@@ -24,7 +24,7 @@ class Pencurimovie : MainAPI() {
 
     private var directUrl: String? = null
 
-    override var name = "PencuriMovie"
+    override var name = "PencuriMovie 👾"
     override val hasMainPage = true
     override var lang = "ms"
     override val hasDownloadSupport = true
