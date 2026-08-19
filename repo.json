@@ -1,6 +1,6 @@
 {
   "name": "Luckez CloudStream Repo",
-  "description": "CloudStream extensions maintained by Luckez12",
+  "description": "CloudStream extensions maintained by Luckez",
   "manifestVersion": 1,
   "pluginLists": [
     "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/plugins.json"
