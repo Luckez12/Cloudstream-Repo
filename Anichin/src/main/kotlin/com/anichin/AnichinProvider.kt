@@ -1,21 +1,15 @@
-package com.anichin
+package com.AnichinV2
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
 import java.net.URLEncoder
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 
-class AnichinProvider : MainAPI() {
+class AnichinV2 : MainAPI() {
 
     override var mainUrl = "https://anichin.moe"
-    override var name = "Anichin"
+    override var name = "Anichin V2"
     override val hasMainPage = true
     override var lang = "id"
     override val hasDownloadSupport = true
@@ -36,26 +30,12 @@ class AnichinProvider : MainAPI() {
     private val fastVideoHosts = setOf(
         "ok.ru",
         "odnoklassniki",
-        "rumble.com",
-        "dailymotion.com",
-        "geo.dailymotion.com",
-        "rubyvidhub.com",
-        "streamruby.com",
-        "streamruby.net"
+        "rumble.com"
     )
 
     private fun isFastVideoHost(url: String): Boolean {
         return fastVideoHosts.any { host ->
             url.contains(host, ignoreCase = true)
-        }
-    }
-
-    private fun streamPriority(url: String): Int {
-        val lower = url.lowercase()
-        return when {
-            isFastVideoHost(url) -> 0
-            "dood" in lower || "streamruby" in lower -> 1
-            else -> 2
         }
     }
 
@@ -108,7 +88,7 @@ class AnichinProvider : MainAPI() {
                 list = home,
                 isHorizontalImages = false
             ),
-            hasNext = home.isNotEmpty()
+            hasNext = true
         )
     }
 
@@ -298,253 +278,25 @@ class AnichinProvider : MainAPI() {
         }
     }
 
-    private fun isAcceptedQuality(link: ExtractorLink): Boolean {
-        return link.quality == Qualities.Unknown.value ||
-            link.quality >= Qualities.P720.value
-    }
-
-    /**
-     * First-valid-source rule:
-     * - 720p and above are accepted immediately.
-     * - Unknown quality is accepted because some HLS/direct links do not expose
-     *   a resolution before the player reads the manifest.
-     * - Known qualities below 720p are dropped completely.
-     *
-     * Returns true only when this extractor wins the first-source race.
-     */
     private suspend fun safeLoadExtractor(
         url: String,
         referer: String,
         loadedUrls: MutableSet<String>,
-        winner: AtomicBoolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val shouldLoad = synchronized(loadedUrls) {
-            loadedUrls.add(url)
-        }
-        if (!shouldLoad || winner.get()) return false
-
-        val emitted = AtomicBoolean(false)
+    ) {
+        if (!loadedUrls.add(url)) return
 
         runCatching {
             loadExtractor(
                 url,
                 referer,
-                subtitleCallback
-            ) { link ->
-                if (
-                    isAcceptedQuality(link) &&
-                    winner.compareAndSet(false, true)
-                ) {
-                    emitted.set(true)
-                    synchronized(callback) {
-                        callback(link)
-                    }
-                }
-            }
-        }.onFailure {
-            // Ignore failed/unsupported extractors and continue to the next URL.
-        }
-
-        return emitted.get()
-    }
-
-    /**
-     * Scan one Mobius stream path.
-     *
-     * The URL itself is offered to CloudStream's extractor first. If that
-     * already resolves to a playable source, no wrapper/nested request is made.
-     * Only unresolved URLs are opened as HTML to discover iframe targets.
-     */
-    private suspend fun scanStreamUrl(
-        streamUrl: String,
-        episodeUrl: String,
-        loadedUrls: MutableSet<String>,
-        winner: AtomicBoolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        if (winner.get()) return true
-
-        if (
-            safeLoadExtractor(
-                streamUrl,
-                episodeUrl,
-                loadedUrls,
-                winner,
                 subtitleCallback,
                 callback
             )
-        ) {
-            return true
+        }.onFailure {
+            // ignore failed extractor
         }
-
-        if (winner.get()) return true
-
-        val streamDocument = runCatching {
-            app.get(
-                streamUrl,
-                headers = mapOf(
-                    "Referer" to episodeUrl,
-                    "Origin" to mainUrl,
-                    "User-Agent" to USER_AGENT
-                )
-            ).document
-        }.getOrNull() ?: return false
-
-        val playerUrls = streamDocument
-            .select("iframe[src]")
-            .mapNotNull { iframe ->
-                iframe.attr("src")
-                    .trim()
-                    .takeIf { it.isNotBlank() }
-                    ?.let { fixUrl(it) }
-            }
-            .distinct()
-            .sortedBy { streamPriority(it) }
-
-        for (playerUrl in playerUrls) {
-            if (winner.get()) return true
-
-            /*
-             * Try the extractor BEFORE manually opening the player page.
-             * This removes the old duplicate request path for Dood,
-             * StreamRuby, Ok.ru, Rumble, Dailymotion and any other host
-             * already supported by CloudStream.
-             */
-            if (
-                safeLoadExtractor(
-                    playerUrl,
-                    streamUrl,
-                    loadedUrls,
-                    winner,
-                    subtitleCallback,
-                    callback
-                )
-            ) {
-                return true
-            }
-
-            if (winner.get()) return true
-
-            /*
-             * Unknown/unsupported player only:
-             * one nested iframe check, no deep crawl.
-             */
-            val nestedDocument = runCatching {
-                app.get(
-                    playerUrl,
-                    headers = mapOf(
-                        "Referer" to streamUrl,
-                        "User-Agent" to USER_AGENT
-                    )
-                ).document
-            }.getOrNull() ?: continue
-
-            val nestedUrls = nestedDocument
-                .select("iframe[src]")
-                .mapNotNull { nested ->
-                    nested.attr("src")
-                        .trim()
-                        .takeIf { it.isNotBlank() }
-                        ?.let { fixUrl(it) }
-                }
-                .distinct()
-                .sortedBy { streamPriority(it) }
-
-            for (nestedUrl in nestedUrls) {
-                if (winner.get()) return true
-
-                if (
-                    safeLoadExtractor(
-                        nestedUrl,
-                        playerUrl,
-                        loadedUrls,
-                        winner,
-                        subtitleCallback,
-                        callback
-                    )
-                ) {
-                    return true
-                }
-            }
-        }
-
-        return winner.get()
-    }
-
-    /**
-     * Real concurrency limit, not fixed batches.
-     *
-     * At most four workers are active. As soon as one worker finishes a failed
-     * path, it immediately takes the next URL. A slow server therefore does not
-     * block the other queued servers.
-     *
-     * The first accepted source cancels the remaining workers so loadLinks can
-     * finish immediately and hand playback back to CloudStream.
-     */
-    private suspend fun findFirstPlayable(
-        streamUrls: List<String>,
-        episodeUrl: String,
-        loadedUrls: MutableSet<String>,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean = coroutineScope {
-        if (streamUrls.isEmpty()) return@coroutineScope false
-
-        val queue = Channel<String>(Channel.UNLIMITED)
-        streamUrls.forEach { queue.trySend(it) }
-        queue.close()
-
-        val winner = AtomicBoolean(false)
-        val completed = AtomicInteger(0)
-        val result = CompletableDeferred<Boolean>()
-
-        val workerCount = minOf(4, streamUrls.size)
-
-        val workers = List(workerCount) {
-            launch {
-                for (streamUrl in queue) {
-                    if (winner.get() || result.isCompleted) break
-
-                    val found = runCatching {
-                        scanStreamUrl(
-                            streamUrl,
-                            episodeUrl,
-                            loadedUrls,
-                            winner,
-                            subtitleCallback,
-                            callback
-                        )
-                    }.getOrDefault(false)
-
-                    val done = completed.incrementAndGet()
-
-                    if (found || winner.get()) {
-                        result.complete(true)
-                        break
-                    }
-
-                    if (done >= streamUrls.size) {
-                        result.complete(false)
-                        break
-                    }
-                }
-            }
-        }
-
-        val found = result.await()
-
-        if (found) {
-            workers.forEach { it.cancel() }
-        }
-
-        workers.forEach { worker ->
-            runCatching { worker.join() }
-        }
-
-        found
     }
 
     override suspend fun loadLinks(
@@ -557,38 +309,141 @@ class AnichinProvider : MainAPI() {
         val episodeUrl = fixUrl(data)
         val document = app.get(episodeUrl).document
         val loadedUrls = mutableSetOf<String>()
+        val secondScanCandidates = linkedMapOf<String, String>()
 
         /*
-         * Mobius decoding is local and cheap. Decode everything first, then put
-         * direct/known hosts at the front of the worker queue.
+         * Scan 1:
+         * Immediate fast scan.
+         * OkRu, Odnoklassniki and Rumble are loaded as soon as they are found.
+         * This part must stay light so playback can start faster.
          */
-        val streamUrls = document
-            .select(".mobius option")
-            .mapNotNull { option ->
-                val encodedValue = option.attr("value").trim()
-                if (encodedValue.isBlank()) return@mapNotNull null
+        document.select(".mobius option").forEach optionLoop@ { option ->
 
-                val decodedDocument = runCatching {
-                    Jsoup.parse(base64Decode(encodedValue))
-                }.getOrNull() ?: return@mapNotNull null
+            val encodedValue = option.attr("value").trim()
+            if (encodedValue.isBlank()) return@optionLoop
 
-                decodedDocument
-                    .selectFirst("iframe[src]")
-                    ?.attr("src")
-                    ?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { fixUrl(it) }
+            val decodedDocument = runCatching {
+                Jsoup.parse(base64Decode(encodedValue))
+            }.getOrNull() ?: return@optionLoop
+
+            val iframeUrl = decodedDocument
+                .selectFirst("iframe[src]")
+                ?.attr("src")
+                ?.trim()
+                .orEmpty()
+
+            if (iframeUrl.isBlank()) return@optionLoop
+
+            val streamUrl = fixUrl(iframeUrl)
+
+            if (isFastVideoHost(streamUrl)) {
+                safeLoadExtractor(
+                    streamUrl,
+                    episodeUrl,
+                    loadedUrls,
+                    subtitleCallback,
+                    callback
+                )
+                return@optionLoop
             }
-            .distinct()
-            .sortedBy { streamPriority(it) }
 
-        return findFirstPlayable(
-            streamUrls,
-            episodeUrl,
-            loadedUrls,
-            subtitleCallback,
-            callback
-        )
+            val streamDocument = runCatching {
+                app.get(
+                    streamUrl,
+                    headers = mapOf(
+                        "Referer" to episodeUrl,
+                        "Origin" to mainUrl,
+                        "User-Agent" to USER_AGENT
+                    )
+                ).document
+            }.getOrNull() ?: return@optionLoop
+
+            val playerUrls = streamDocument
+                .select("iframe[src]")
+                .mapNotNull { iframe ->
+                    iframe.attr("src")
+                        .trim()
+                        .takeIf { it.isNotBlank() }
+                        ?.let { fixUrl(it) }
+                }
+                .distinct()
+
+            playerUrls.forEach playerLoop@ { playerUrl ->
+
+                if (isFastVideoHost(playerUrl)) {
+                    safeLoadExtractor(
+                        playerUrl,
+                        streamUrl,
+                        loadedUrls,
+                        subtitleCallback,
+                        callback
+                    )
+                    return@playerLoop
+                }
+
+                secondScanCandidates[playerUrl] = streamUrl
+
+                /*
+                 * One light nested check only.
+                 * This keeps the old fast behavior for OkRu/Rumble hidden inside one wrapper.
+                 * Non-fast nested URLs are saved for Scan 2, not extracted here.
+                 */
+                val nestedDocument = runCatching {
+                    app.get(
+                        playerUrl,
+                        headers = mapOf(
+                            "Referer" to streamUrl,
+                            "User-Agent" to USER_AGENT
+                        )
+                    ).document
+                }.getOrNull() ?: return@playerLoop
+
+                nestedDocument
+                    .select("iframe[src]")
+                    .mapNotNull { nested ->
+                        nested.attr("src")
+                            .trim()
+                            .takeIf { it.isNotBlank() }
+                            ?.let { fixUrl(it) }
+                    }
+                    .distinct()
+                    .forEach nestedLoop@ { nestedUrl ->
+
+                        if (isFastVideoHost(nestedUrl)) {
+                            safeLoadExtractor(
+                                nestedUrl,
+                                playerUrl,
+                                loadedUrls,
+                                subtitleCallback,
+                                callback
+                            )
+                            return@nestedLoop
+                        }
+
+                        secondScanCandidates[nestedUrl] = playerUrl
+                    }
+            }
+        }
+
+        /*
+         * Scan 2:
+         * Direct player scan only.
+         * No deep crawling, no raw HTML crawling, no background coroutine.
+         * This follows the working AnichinX style that brings back Dood and StreamRuby.
+         */
+        secondScanCandidates
+            .entries
+            .take(12)
+            .forEach { (url, referer) ->
+                safeLoadExtractor(
+                    url,
+                    referer,
+                    loadedUrls,
+                    subtitleCallback,
+                    callback
+                )
+            }
+
+        return true
     }
-
 }
