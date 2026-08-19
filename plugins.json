@@ -1,5 +1,26 @@
 [
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=4khdhub.one&sz=%size%",
+        "fileHash": "sha256-4150b94b317543a2e728fdc5483608adb99c013d8e3aa43f7d77ae419a6d140c",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
+        "fileSize": 76364,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "Luckez"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "4KHDHub",
+        "description": "4KHDHub movies and series provider",
+        "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/4KHDHub.cs3",
+        "name": "4KHDHub"
+    },
+    {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://anichin.club&size=%size%",
         "fileHash": "sha256-5791a78ccd07bf593336e2946a21dd8cf893a14a9db00cffba49e8f8031ff1e4",
         "apiVersion": 1,
