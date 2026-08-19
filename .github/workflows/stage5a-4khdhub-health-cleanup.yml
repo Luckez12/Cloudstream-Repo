@@ -1,0 +1,97 @@
+name: Stage 5A 4KHDHub Health Cleanup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stage5a-4khdhub-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Harden 4KHDHub redirect logging
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("4KHDHub/src/main/kotlin/com/fourkhdhub/RedirectUtils.kt")
+          text = path.read_text(encoding="utf-8")
+
+          old1 = 'println("[4KHDHub] redirect page failed: ${error.message}")'
+          new1 = 'println("[4KHDHub] redirect page failed")'
+
+          old2 = '''println(
+              "[4KHDHub] redirect decode failed: ${error.message}",
+          )'''
+          new2 = '''println(
+              "[4KHDHub] redirect decode failed",
+          )'''
+
+          if old1 not in text:
+              raise SystemExit("Expected redirect page log pattern not found")
+          if old2 not in text:
+              raise SystemExit("Expected redirect decode log pattern not found")
+
+          text = text.replace(old1, new1, 1)
+          text = text.replace(old2, new2, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Validate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff -- 4KHDHub/src/main/kotlin/com/fourkhdhub/RedirectUtils.kt
+
+          if grep -Fq 'redirect page failed: ${error.message}' \
+            4KHDHub/src/main/kotlin/com/fourkhdhub/RedirectUtils.kt; then
+            echo "::error::Sensitive redirect error detail still present"
+            exit 1
+          fi
+
+          if grep -Fq 'redirect decode failed: ${error.message}' \
+            4KHDHub/src/main/kotlin/com/fourkhdhub/RedirectUtils.kt; then
+            echo "::error::Sensitive decode error detail still present"
+            exit 1
+          fi
+
+      - name: Verify 4KHDHub build
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew :4KHDHub:assembleDebug --build-cache --no-daemon
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add 4KHDHub/src/main/kotlin/com/fourkhdhub/RedirectUtils.kt
+          git commit -m "Harden 4KHDHub redirect logging"
+          git push origin HEAD:main
