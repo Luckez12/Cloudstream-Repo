@@ -1,0 +1,114 @@
+name: Apply Stage 4 Cleanup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stage4-cleanup-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply-cleanup:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Apply Anichin metadata cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > Anichin/build.gradle.kts <<'EOF'
+          version = 1
+
+          cloudstream {
+              description = "Anichin — Streaming Donghua Subtitle Indonesia"
+              language = "id"
+              authors = listOf("Luckez")
+              status = 1
+
+              tvTypes = listOf(
+                  "Anime",
+                  "Movie",
+              )
+
+              iconUrl = "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://anichin.club&size=%size%"
+          }
+          EOF
+
+      - name: Update README
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > README.md <<'EOF'
+          # Luckez12 CloudStream Repo
+
+          CloudStream extension repository maintained by Luckez12.
+
+          ## Repository URL
+
+          Add this URL to CloudStream:
+
+          `https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/main/repo.json`
+
+          ## Providers
+
+          This repository contains independent CloudStream provider modules. Each provider lives in its own top-level folder and has its own `build.gradle.kts`.
+
+          Current modules include:
+
+          - 4KHDHub
+          - Anichin
+          - KissKH
+          - MovieBox
+          - OneTouchTV
+          - OppaDrama
+          - PencuriMovie
+
+          ## Development
+
+          Provider-specific metadata and dependencies should stay inside the corresponding provider module whenever practical.
+
+          GitHub Actions in this repository are intended only for repository CI/CD tasks such as building, validating, packaging, and publishing the CloudStream extensions.
+          EOF
+
+      - name: Show changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff -- Anichin/build.gradle.kts README.md
+
+      - name: Verify Anichin build
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew :Anichin:assembleDebug --build-cache --no-daemon
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add Anichin/build.gradle.kts README.md
+          git commit -m "Cleanup Anichin metadata and README"
+          git push origin HEAD:main
