@@ -4,10 +4,13 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import java.net.URLEncoder
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class AnichinProvider : MainAPI() {
 
@@ -35,7 +38,10 @@ class AnichinProvider : MainAPI() {
         "odnoklassniki",
         "rumble.com",
         "dailymotion.com",
-        "geo.dailymotion.com"
+        "geo.dailymotion.com",
+        "rubyvidhub.com",
+        "streamruby.com",
+        "streamruby.net"
     )
 
     private fun isFastVideoHost(url: String): Boolean {
@@ -44,11 +50,11 @@ class AnichinProvider : MainAPI() {
         }
     }
 
-    private fun secondScanPriority(url: String): Int {
+    private fun streamPriority(url: String): Int {
         val lower = url.lowercase()
         return when {
-            "dood" in lower -> 0
-            "streamruby" in lower -> 1
+            isFastVideoHost(url) -> 0
+            "dood" in lower || "streamruby" in lower -> 1
             else -> 2
         }
     }
@@ -292,20 +298,34 @@ class AnichinProvider : MainAPI() {
         }
     }
 
+    private fun isAcceptedQuality(link: ExtractorLink): Boolean {
+        return link.quality == Qualities.Unknown.value ||
+            link.quality >= Qualities.P720.value
+    }
+
+    /**
+     * First-valid-source rule:
+     * - 720p and above are accepted immediately.
+     * - Unknown quality is accepted because some HLS/direct links do not expose
+     *   a resolution before the player reads the manifest.
+     * - Known qualities below 720p are dropped completely.
+     *
+     * Returns true only when this extractor wins the first-source race.
+     */
     private suspend fun safeLoadExtractor(
         url: String,
         referer: String,
         loadedUrls: MutableSet<String>,
+        winner: AtomicBoolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ) {
+    ): Boolean {
         val shouldLoad = synchronized(loadedUrls) {
             loadedUrls.add(url)
         }
-        if (!shouldLoad) return
+        if (!shouldLoad || winner.get()) return false
 
-        val lowerQualityLinks = mutableListOf<ExtractorLink>()
-        var hasHdLink = false
+        val emitted = AtomicBoolean(false)
 
         runCatching {
             loadExtractor(
@@ -313,35 +333,218 @@ class AnichinProvider : MainAPI() {
                 referer,
                 subtitleCallback
             ) { link ->
-                if (link.quality >= Qualities.P720.value) {
-                    hasHdLink = true
+                if (
+                    isAcceptedQuality(link) &&
+                    winner.compareAndSet(false, true)
+                ) {
+                    emitted.set(true)
                     synchronized(callback) {
                         callback(link)
                     }
-                } else {
-                    lowerQualityLinks.add(link)
                 }
             }
         }.onFailure {
-            // Ignore a failed extractor and continue scanning other servers.
+            // Ignore failed/unsupported extractors and continue to the next URL.
         }
 
-        /*
-         * Quality rule:
-         * If this server has 720p or better, hide its lower variants.
-         * If it has no 720p+ link, keep only its best available fallback.
-         * Unknown-quality links are preserved when they are the only result.
-         */
-        if (!hasHdLink && lowerQualityLinks.isNotEmpty()) {
-            val bestFallbackQuality = lowerQualityLinks.maxOf { it.quality }
-            lowerQualityLinks
-                .filter { it.quality == bestFallbackQuality }
-                .forEach { link ->
-                    synchronized(callback) {
-                        callback(link)
+        return emitted.get()
+    }
+
+    /**
+     * Scan one Mobius stream path.
+     *
+     * The URL itself is offered to CloudStream's extractor first. If that
+     * already resolves to a playable source, no wrapper/nested request is made.
+     * Only unresolved URLs are opened as HTML to discover iframe targets.
+     */
+    private suspend fun scanStreamUrl(
+        streamUrl: String,
+        episodeUrl: String,
+        loadedUrls: MutableSet<String>,
+        winner: AtomicBoolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        if (winner.get()) return true
+
+        if (
+            safeLoadExtractor(
+                streamUrl,
+                episodeUrl,
+                loadedUrls,
+                winner,
+                subtitleCallback,
+                callback
+            )
+        ) {
+            return true
+        }
+
+        if (winner.get()) return true
+
+        val streamDocument = runCatching {
+            app.get(
+                streamUrl,
+                headers = mapOf(
+                    "Referer" to episodeUrl,
+                    "Origin" to mainUrl,
+                    "User-Agent" to USER_AGENT
+                )
+            ).document
+        }.getOrNull() ?: return false
+
+        val playerUrls = streamDocument
+            .select("iframe[src]")
+            .mapNotNull { iframe ->
+                iframe.attr("src")
+                    .trim()
+                    .takeIf { it.isNotBlank() }
+                    ?.let { fixUrl(it) }
+            }
+            .distinct()
+            .sortedBy { streamPriority(it) }
+
+        for (playerUrl in playerUrls) {
+            if (winner.get()) return true
+
+            /*
+             * Try the extractor BEFORE manually opening the player page.
+             * This removes the old duplicate request path for Dood,
+             * StreamRuby, Ok.ru, Rumble, Dailymotion and any other host
+             * already supported by CloudStream.
+             */
+            if (
+                safeLoadExtractor(
+                    playerUrl,
+                    streamUrl,
+                    loadedUrls,
+                    winner,
+                    subtitleCallback,
+                    callback
+                )
+            ) {
+                return true
+            }
+
+            if (winner.get()) return true
+
+            /*
+             * Unknown/unsupported player only:
+             * one nested iframe check, no deep crawl.
+             */
+            val nestedDocument = runCatching {
+                app.get(
+                    playerUrl,
+                    headers = mapOf(
+                        "Referer" to streamUrl,
+                        "User-Agent" to USER_AGENT
+                    )
+                ).document
+            }.getOrNull() ?: continue
+
+            val nestedUrls = nestedDocument
+                .select("iframe[src]")
+                .mapNotNull { nested ->
+                    nested.attr("src")
+                        .trim()
+                        .takeIf { it.isNotBlank() }
+                        ?.let { fixUrl(it) }
+                }
+                .distinct()
+                .sortedBy { streamPriority(it) }
+
+            for (nestedUrl in nestedUrls) {
+                if (winner.get()) return true
+
+                if (
+                    safeLoadExtractor(
+                        nestedUrl,
+                        playerUrl,
+                        loadedUrls,
+                        winner,
+                        subtitleCallback,
+                        callback
+                    )
+                ) {
+                    return true
+                }
+            }
+        }
+
+        return winner.get()
+    }
+
+    /**
+     * Real concurrency limit, not fixed batches.
+     *
+     * At most four workers are active. As soon as one worker finishes a failed
+     * path, it immediately takes the next URL. A slow server therefore does not
+     * block the other queued servers.
+     *
+     * The first accepted source cancels the remaining workers so loadLinks can
+     * finish immediately and hand playback back to CloudStream.
+     */
+    private suspend fun findFirstPlayable(
+        streamUrls: List<String>,
+        episodeUrl: String,
+        loadedUrls: MutableSet<String>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean = coroutineScope {
+        if (streamUrls.isEmpty()) return@coroutineScope false
+
+        val queue = Channel<String>(Channel.UNLIMITED)
+        streamUrls.forEach { queue.trySend(it) }
+        queue.close()
+
+        val winner = AtomicBoolean(false)
+        val completed = AtomicInteger(0)
+        val result = CompletableDeferred<Boolean>()
+
+        val workerCount = minOf(4, streamUrls.size)
+
+        val workers = List(workerCount) {
+            launch {
+                for (streamUrl in queue) {
+                    if (winner.get() || result.isCompleted) break
+
+                    val found = runCatching {
+                        scanStreamUrl(
+                            streamUrl,
+                            episodeUrl,
+                            loadedUrls,
+                            winner,
+                            subtitleCallback,
+                            callback
+                        )
+                    }.getOrDefault(false)
+
+                    val done = completed.incrementAndGet()
+
+                    if (found || winner.get()) {
+                        result.complete(true)
+                        break
+                    }
+
+                    if (done >= streamUrls.size) {
+                        result.complete(false)
+                        break
                     }
                 }
+            }
         }
+
+        val found = result.await()
+
+        if (found) {
+            workers.forEach { it.cancel() }
+        }
+
+        workers.forEach { worker ->
+            runCatching { worker.join() }
+        }
+
+        found
     }
 
     override suspend fun loadLinks(
@@ -354,19 +557,10 @@ class AnichinProvider : MainAPI() {
         val episodeUrl = fixUrl(data)
         val document = app.get(episodeUrl).document
         val loadedUrls = mutableSetOf<String>()
-        val secondScanCandidates = linkedMapOf<String, String>()
-
-        fun addSecondScanCandidate(url: String, referer: String) {
-            synchronized(secondScanCandidates) {
-                if (!secondScanCandidates.containsKey(url)) {
-                    secondScanCandidates[url] = referer
-                }
-            }
-        }
 
         /*
-         * Decode every Mobius option first. This part is local and cheap.
-         * Network work is then executed in small concurrent batches.
+         * Mobius decoding is local and cheap. Decode everything first, then put
+         * direct/known hosts at the front of the worker queue.
          */
         val streamUrls = document
             .select(".mobius option")
@@ -386,144 +580,15 @@ class AnichinProvider : MainAPI() {
                     ?.let { fixUrl(it) }
             }
             .distinct()
+            .sortedBy { streamPriority(it) }
 
-        /*
-         * Scan 1:
-         * Fast hosts first, then wrapper hosts.
-         * Four concurrent jobs keeps latency down without flooding the site.
-         */
-        streamUrls
-            .sortedBy { streamUrl ->
-                if (isFastVideoHost(streamUrl)) 0 else 1
-            }
-            .chunked(4)
-            .forEach { batch ->
-                coroutineScope {
-                    batch.map { streamUrl ->
-                        async {
-
-                    if (isFastVideoHost(streamUrl)) {
-                        safeLoadExtractor(
-                            streamUrl,
-                            episodeUrl,
-                            loadedUrls,
-                            subtitleCallback,
-                            callback
-                        )
-                        return@async
-                    }
-
-                    val streamDocument = runCatching {
-                        app.get(
-                            streamUrl,
-                            headers = mapOf(
-                                "Referer" to episodeUrl,
-                                "Origin" to mainUrl,
-                                "User-Agent" to USER_AGENT
-                            )
-                        ).document
-                    }.getOrNull() ?: return@async
-
-                    val playerUrls = streamDocument
-                        .select("iframe[src]")
-                        .mapNotNull { iframe ->
-                            iframe.attr("src")
-                                .trim()
-                                .takeIf { it.isNotBlank() }
-                                ?.let { fixUrl(it) }
-                        }
-                        .distinct()
-
-                    playerUrls.forEach playerLoop@ { playerUrl ->
-
-                        if (isFastVideoHost(playerUrl)) {
-                            safeLoadExtractor(
-                                playerUrl,
-                                streamUrl,
-                                loadedUrls,
-                                subtitleCallback,
-                                callback
-                            )
-                            return@playerLoop
-                        }
-
-                        addSecondScanCandidate(playerUrl, streamUrl)
-
-                        /*
-                         * One nested check only.
-                         * Keeping this depth protects loading time while still
-                         * finding supported hosts hidden behind one extra iframe.
-                         */
-                        val nestedDocument = runCatching {
-                            app.get(
-                                playerUrl,
-                                headers = mapOf(
-                                    "Referer" to streamUrl,
-                                    "User-Agent" to USER_AGENT
-                                )
-                            ).document
-                        }.getOrNull() ?: return@playerLoop
-
-                        nestedDocument
-                            .select("iframe[src]")
-                            .mapNotNull { nested ->
-                                nested.attr("src")
-                                    .trim()
-                                    .takeIf { it.isNotBlank() }
-                                    ?.let { fixUrl(it) }
-                            }
-                            .distinct()
-                            .forEach nestedLoop@ { nestedUrl ->
-
-                                if (isFastVideoHost(nestedUrl)) {
-                                    safeLoadExtractor(
-                                        nestedUrl,
-                                        playerUrl,
-                                        loadedUrls,
-                                        subtitleCallback,
-                                        callback
-                                    )
-                                    return@nestedLoop
-                                }
-
-                                addSecondScanCandidate(nestedUrl, playerUrl)
-                            }
-                    }
-                        }
-                    }.awaitAll()
-                }
-            }
-
-        /*
-         * Scan 2:
-         * Keep every discovered candidate. Dood and StreamRuby retain priority,
-         * but the old hard limit of 12 has been removed.
-         * Extractors run in controlled batches of four.
-         */
-        val secondScanSnapshot = synchronized(secondScanCandidates) {
-            secondScanCandidates.entries
-                .map { it.key to it.value }
-        }
-
-        secondScanSnapshot
-            .sortedBy { (url, _) -> secondScanPriority(url) }
-            .chunked(4)
-            .forEach { batch ->
-                coroutineScope {
-                    batch.map { (url, referer) ->
-                        async {
-                            safeLoadExtractor(
-                                url,
-                                referer,
-                                loadedUrls,
-                                subtitleCallback,
-                                callback
-                            )
-                        }
-                    }.awaitAll()
-                }
-            }
-
-        return true
+        return findFirstPlayable(
+            streamUrls,
+            episodeUrl,
+            loadedUrls,
+            subtitleCallback,
+            callback
+        )
     }
+
 }
