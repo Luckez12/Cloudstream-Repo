@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger
 class MovieboxProvider : MainAPI() {
 
     override var mainUrl = "https://moviebox.ph"
-    override var name = "MovieBox"
+    override var name = "MovieBox 👾"
     override var lang = "en"
 
     override val instantLinkLoading = true
