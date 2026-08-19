@@ -7,7 +7,7 @@ import android.content.Context
 @CloudstreamPlugin
 class PencurimoviePlugin: Plugin() {
     override fun load(context: Context) {
-        registerMainAPI(PencurimovieProvider())
+        registerMainAPI(Pencurimovie())
         registerExtractorAPI(Dsvplay())
         registerExtractorAPI(Hglink())
     }
