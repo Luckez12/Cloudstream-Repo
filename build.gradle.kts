@@ -14,6 +14,7 @@ buildscript {
         classpath("com.android.tools.build:gradle:8.7.3")
         classpath("com.github.recloudstream:gradle:-SNAPSHOT")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
+
     }
 }
 
@@ -75,7 +76,9 @@ subprojects {
         implementation("com.github.Blatzar:NiceHttp:0.4.11")
         implementation("org.jsoup:jsoup:1.18.3")
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
-    }
+        implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+  }
 }
 
 tasks.register<Delete>("clean") {
