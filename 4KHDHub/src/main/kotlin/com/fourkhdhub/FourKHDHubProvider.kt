@@ -422,6 +422,7 @@ class FourKHDHubProvider : MainAPI() {
         val emittedUrls = ConcurrentHashMap.newKeySet<String>()
         val firstPassLinks = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         val retryCandidates = Collections.synchronizedList(mutableListOf<ServerTarget>())
+        val emitLock = Any()
 
         val hubCloud = HubCloudExtractor()
         val hubDrive = HubDriveExtractor()
@@ -494,17 +495,19 @@ class FourKHDHubProvider : MainAPI() {
         }
 
         fun emitOrdered(source: List<ExtractorLink>): Int {
-            var emitted = 0
-            source
-                .distinctBy { it.url }
-                .sortedBy { streamPriority(it) }
-                .forEach { link ->
-                    if (emittedUrls.add(link.url)) {
-                        callback(link)
-                        emitted++
+            return synchronized(emitLock) {
+                var emitted = 0
+                source
+                    .distinctBy { it.url }
+                    .sortedBy { streamPriority(it) }
+                    .forEach { link ->
+                        if (emittedUrls.add(link.url)) {
+                            callback(link)
+                            emitted++
+                        }
                     }
-                }
-            return emitted
+                emitted
+            }
         }
 
         targets.amap { target ->

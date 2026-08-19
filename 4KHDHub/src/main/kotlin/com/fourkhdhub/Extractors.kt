@@ -6,10 +6,14 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.extractors.PixelDrain
 import com.lagradost.cloudstream3.extractors.VidHidePro
 import com.lagradost.cloudstream3.extractors.VidStack
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import org.jsoup.nodes.Document
 import java.net.URI
 import java.net.URLDecoder
 import java.util.Collections
@@ -20,6 +24,82 @@ private val extractorBrowserHeaders = mapOf(
     "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language" to "en-US,en;q=0.9",
 )
+
+private data class ExtractorHtmlPage(
+    val document: Document,
+    val html: String,
+)
+
+private val sharedExtractorCloudflareKiller by lazy { CloudflareKiller() }
+private val sharedExtractorCloudflareMutex = Mutex()
+private val extractorCloudflareStatusCodes = setOf(403, 503)
+
+private suspend fun fetchExtractorHtmlPage(
+    url: String,
+    referer: String,
+    timeout: Long,
+): ExtractorHtmlPage {
+    val host = hostOf(url)
+
+    suspend fun challengedRequest(): ExtractorHtmlPage {
+        val response = app.get(
+            url,
+            headers = extractorBrowserHeaders,
+            referer = referer,
+            timeout = timeout,
+            interceptor = sharedExtractorCloudflareKiller,
+        )
+        if (!response.isSuccessful) {
+            val status = response.code
+            response.okhttpResponse.close()
+            throw IllegalStateException("HTTP $status from $host")
+        }
+        return ExtractorHtmlPage(response.document, response.text)
+    }
+
+    if (sharedExtractorCloudflareKiller.savedCookies.containsKey(host)) {
+        try {
+            return challengedRequest()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            log4k("cached extractor Cloudflare request failed host=$host: ${error.message}")
+            sharedExtractorCloudflareKiller.savedCookies.remove(host)
+        }
+    }
+
+    val first = app.get(
+        url,
+        headers = extractorBrowserHeaders,
+        referer = referer,
+        timeout = timeout,
+    )
+    if (first.code !in extractorCloudflareStatusCodes) {
+        if (!first.isSuccessful) {
+            val status = first.code
+            first.okhttpResponse.close()
+            throw IllegalStateException("HTTP $status from $host")
+        }
+        return ExtractorHtmlPage(first.document, first.text)
+    }
+
+    val blockedStatus = first.code
+    first.okhttpResponse.close()
+    log4k("extractor blocked host=$host code=$blockedStatus; trying Cloudflare fallback")
+
+    return sharedExtractorCloudflareMutex.withLock {
+        if (sharedExtractorCloudflareKiller.savedCookies.containsKey(host)) {
+            try {
+                return@withLock challengedRequest()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                sharedExtractorCloudflareKiller.savedCookies.remove(host)
+            }
+        }
+        challengedRequest()
+    }
+}
 
 class HubCloudExtractor : ExtractorApi() {
     override val name = "HubCloud"
@@ -46,12 +126,11 @@ class HubCloudExtractor : ExtractorApi() {
             return
         }
 
-        val response = try {
-            app.get(
+        val page = try {
+            fetchExtractorHtmlPage(
                 target,
-                headers = extractorBrowserHeaders,
-                referer = referer ?: url,
-                timeout = 20L,
+                referer ?: url,
+                20L,
             )
         } catch (error: CancellationException) {
             throw error
@@ -60,8 +139,8 @@ class HubCloudExtractor : ExtractorApi() {
             return
         }
 
-        val document = response.document
-        val html = response.text
+        val document = page.document
+        val html = page.html
         val title = sequenceOf(
             document.selectFirst("div.card-header")?.text(),
             document.title(),
@@ -111,15 +190,20 @@ class HubCloudExtractor : ExtractorApi() {
                     }
 
                     rawHref.contains("hubcdn.fans", ignoreCase = true) -> {
-                        emitDirect(
-                            url = rawHref,
-                            label = "Fast 10Gbps",
-                            referer = "",
-                            quality = quality,
-                            size = size,
-                            emitted = emitted,
-                            callback = collectCallback,
-                        )
+                        val playable = resolveValidatedMediaUrl(rawHref, target)
+                        if (playable != null) {
+                            emitDirect(
+                                url = playable,
+                                label = "Fast 10Gbps",
+                                referer = "",
+                                quality = quality,
+                                size = size,
+                                emitted = emitted,
+                                callback = collectCallback,
+                            )
+                        } else {
+                            log4k("HubCloud rejected non-media HubCDN link host=$hrefHost")
+                        }
                     }
 
                     lower.contains("buzzserver") -> {
@@ -288,14 +372,13 @@ class HubCloudExtractor : ExtractorApi() {
     private suspend fun resolveHubCloudPage(url: String, referer: String?): String {
         if (url.contains("hubcloud.php", ignoreCase = true)) return url
 
-        val response = app.get(
+        val page = fetchExtractorHtmlPage(
             url,
-            headers = extractorBrowserHeaders,
-            referer = referer ?: "",
-            timeout = 15L,
+            referer ?: "",
+            15L,
         )
-        val document = response.document
-        val html = response.text
+        val document = page.document
+        val html = page.html
 
         val downloadElement = document.selectFirst("#download[href]")
         val download = downloadElement?.let { element ->
@@ -553,11 +636,16 @@ class HubCdnExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
     ) {
         if (url.contains("hubcdn.fans", ignoreCase = true)) {
+            val playable = resolveValidatedMediaUrl(url, referer ?: "")
+            if (playable == null) {
+                log4k("HubCDN rejected non-media response host=${hostOf(url)}")
+                return
+            }
             callback(
                 newExtractorLink(
                     source = name,
                     name = "HubCloud • Fast 10Gbps",
-                    url = url,
+                    url = playable,
                     type = INFER_TYPE,
                 ) {
                     this.referer = ""
@@ -696,7 +784,7 @@ private suspend fun dispatchKnownExtractor(
             HubstreamExtractor().getUrl(url, referer, subtitleCallback, callback)
             true
         }
-        url.contains("workers.dev", true) || url.contains("hubcdn.fans", true) || looksLikePlayableUrl(url) -> {
+        url.contains("workers.dev", true) || looksLikePlayableUrl(url) -> {
             callback(
                 newExtractorLink(
                     source = "4KHDHub Direct",
@@ -884,6 +972,45 @@ private suspend fun resolveFinalUrl(
     }
 
     return current
+}
+
+private suspend fun resolveValidatedMediaUrl(
+    input: String,
+    referer: String,
+): String? {
+    val unwrapped = unwrapDownloadWrapper(input) ?: input
+    val finalUrl = resolveFinalUrl(unwrapped, referer) ?: unwrapped
+    if (looksLikePlayableUrl(finalUrl)) return finalUrl
+
+    val response = try {
+        app.head(
+            finalUrl,
+            allowRedirects = true,
+            timeout = 6000L,
+        )
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Throwable) {
+        log4k("direct media probe failed host=${hostOf(finalUrl)}: ${error.message}")
+        return null
+    }
+
+    val status = response.code
+    val contentType = (response.headers["Content-Type"] ?: response.headers["content-type"])
+        .orEmpty().substringBefore(';').trim().lowercase()
+    val disposition = (response.headers["Content-Disposition"] ?: response.headers["content-disposition"])
+        .orEmpty().lowercase()
+    response.okhttpResponse.close()
+
+    val mediaContentType =
+        contentType.startsWith("video/") ||
+            contentType == "application/vnd.apple.mpegurl" ||
+            contentType == "application/x-mpegurl" ||
+            contentType == "application/dash+xml" ||
+            contentType.contains("octet-stream") ||
+            disposition.contains("attachment")
+
+    return if (status in 200..399 && mediaContentType) finalUrl else null
 }
 
 private fun codecLabel(value: String): String? {
