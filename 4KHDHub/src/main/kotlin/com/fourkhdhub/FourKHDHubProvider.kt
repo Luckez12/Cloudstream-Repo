@@ -32,7 +32,7 @@ class FourKHDHubProvider : MainAPI() {
     }
 
     override var mainUrl = "https://4khdhub.one"
-    override var name = "4KHDHub"
+    override var name = "4KHDHub 👾"
     override var lang = "en"
 
     override val hasMainPage = true
