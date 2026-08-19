@@ -8,10 +8,22 @@ Add this URL to CloudStream:
 
 `https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/main/repo.json`
 
-## Repository structure
+## Providers
 
-Each provider should live in its own top-level folder and contain its own
-`build.gradle.kts`.
+This repository contains independent CloudStream provider modules. Each provider lives in its own top-level folder and has its own `build.gradle.kts`.
 
-Provider-specific libraries should be declared inside that provider module instead
-of being added globally to the root project.
+Current modules include:
+
+- 4KHDHub
+- Anichin
+- KissKH
+- MovieBox
+- OneTouchTV
+- OppaDrama
+- PencuriMovie
+
+## Development
+
+Provider-specific metadata and dependencies should stay inside the corresponding provider module whenever practical.
+
+GitHub Actions in this repository are intended only for repository CI/CD tasks such as building, validating, packaging, and publishing the CloudStream extensions.
