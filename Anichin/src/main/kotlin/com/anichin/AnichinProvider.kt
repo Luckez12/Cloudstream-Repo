@@ -9,7 +9,7 @@ import java.net.URLEncoder
 class AnichinProvider : MainAPI() {
 
     override var mainUrl = "https://anichin.moe"
-    override var name = "Anichin V2"
+    override var name = "Anichin"
     override val hasMainPage = true
     override var lang = "id"
     override val hasDownloadSupport = true
@@ -30,12 +30,23 @@ class AnichinProvider : MainAPI() {
     private val fastVideoHosts = setOf(
         "ok.ru",
         "odnoklassniki",
-        "rumble.com"
+        "rumble.com",
+        "dailymotion.com",
+        "geo.dailymotion.com"
     )
 
     private fun isFastVideoHost(url: String): Boolean {
         return fastVideoHosts.any { host ->
             url.contains(host, ignoreCase = true)
+        }
+    }
+
+    private fun secondScanPriority(url: String): Int {
+        val lower = url.lowercase()
+        return when {
+            "dood" in lower -> 0
+            "streamruby" in lower -> 1
+            else -> 2
         }
     }
 
@@ -88,7 +99,7 @@ class AnichinProvider : MainAPI() {
                 list = home,
                 isHorizontalImages = false
             ),
-            hasNext = true
+            hasNext = home.isNotEmpty()
         )
     }
 
@@ -314,7 +325,7 @@ class AnichinProvider : MainAPI() {
         /*
          * Scan 1:
          * Immediate fast scan.
-         * OkRu, Odnoklassniki and Rumble are loaded as soon as they are found.
+         * OkRu, Odnoklassniki, Rumble and Dailymotion are loaded as soon as they are found.
          * This part must stay light so playback can start faster.
          */
         document.select(".mobius option").forEach optionLoop@ { option ->
@@ -385,7 +396,7 @@ class AnichinProvider : MainAPI() {
 
                 /*
                  * One light nested check only.
-                 * This keeps the old fast behavior for OkRu/Rumble hidden inside one wrapper.
+                 * This keeps fast behavior for supported hosts hidden inside one wrapper.
                  * Non-fast nested URLs are saved for Scan 2, not extracted here.
                  */
                 val nestedDocument = runCatching {
@@ -433,6 +444,7 @@ class AnichinProvider : MainAPI() {
          */
         secondScanCandidates
             .entries
+            .sortedBy { secondScanPriority(it.key) }
             .take(12)
             .forEach { (url, referer) ->
                 safeLoadExtractor(
