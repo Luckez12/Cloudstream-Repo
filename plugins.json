@@ -33,8 +33,7 @@
         ],
         "tvTypes": [
             "Anime",
-            "AnimeMovie",
-            "Cartoon"
+            "Movie"
         ],
         "version": 1,
         "internalName": "Anichin",
