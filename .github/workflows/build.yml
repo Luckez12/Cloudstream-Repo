@@ -34,36 +34,44 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Setup Gradle 8.12
+      - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: "8.12"
 
       - name: Validate repository foundation
         shell: bash
         run: |
           set -euo pipefail
-
           test -f build.gradle.kts
           test -f settings.gradle.kts
           test -f gradle.properties
           test -f repo.json
+          test -f gradlew
+          test -f gradle/wrapper/gradle-wrapper.properties
+
+          chmod +x gradlew
+
+          grep -Fq 'com.android.tools.build:gradle:8.7.3' build.gradle.kts
+          grep -Fq 'com.github.recloudstream:gradle:-SNAPSHOT' build.gradle.kts
+          grep -Fq 'kotlin-gradle-plugin:2.3.0' build.gradle.kts
+          grep -Fq 'JvmTarget.JVM_1_8' build.gradle.kts
+          grep -Fq 'jackson-module-kotlin:2.13.1' build.gradle.kts
+          grep -Fq 'kotlinx-coroutines-core:1.10.2' build.gradle.kts
+          grep -Fq 'kotlinx-coroutines-android:1.10.2' build.gradle.kts
+          grep -Fq 'gradle-8.12-bin.zip' gradle/wrapper/gradle-wrapper.properties
 
           python3 - <<'PY'
           import json
           from pathlib import Path
 
           repo = json.loads(Path("repo.json").read_text(encoding="utf-8"))
-
           assert repo["manifestVersion"] == 1
           assert repo["pluginLists"] == [
               "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/plugins.json"
           ]
-
-          print("repo.json validation passed")
+          print("Repository foundation validation passed.")
           PY
 
-          gradle tasks --no-daemon
+          ./gradlew --version
 
       - name: Detect provider modules
         id: modules
@@ -93,14 +101,59 @@ jobs:
             echo "has_modules=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build and verify providers
+      - name: Clean build providers
+        id: build
         if: steps.modules.outputs.has_modules == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          gradle make makePluginsJson ensureJarCompatibility --no-daemon
+
+          DIAG="$RUNNER_TEMP/cloudstream-build-diagnose"
+          mkdir -p "$DIAG"
+
+          set +e
+          ./gradlew clean make makePluginsJson \
+            --no-daemon \
+            --no-build-cache \
+            --refresh-dependencies \
+            --stacktrace \
+            2>&1 | tee "$DIAG/build.log"
+
+          status=${PIPESTATUS[0]}
+          set -e
+
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "$status" > "$DIAG/build-exit-code.txt"
+
+          exit "$status"
+
+      - name: Verify jar compatibility
+        id: compatibility
+        if: steps.modules.outputs.has_modules == 'true' && steps.build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DIAG="$RUNNER_TEMP/cloudstream-build-diagnose"
+          mkdir -p "$DIAG"
+
+          set +e
+          ./gradlew ensureJarCompatibility \
+            --no-daemon \
+            --no-build-cache \
+            --stacktrace \
+            2>&1 | tee "$DIAG/compatibility.log"
+
+          status=${PIPESTATUS[0]}
+          set -e
+
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "$status" > "$DIAG/compatibility-exit-code.txt"
+
+          exit "$status"
 
       - name: Prepare published repository
+        if: steps.modules.outputs.has_modules != 'true' || steps.compatibility.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -110,18 +163,23 @@ jobs:
           mkdir -p "$PUBLISH_DIR"
 
           if [[ "${{ steps.modules.outputs.has_modules }}" == "true" ]]; then
-            if [[ ! -f build/plugins.json ]]; then
-              echo "::error::build/plugins.json was not generated."
-              exit 1
-            fi
+            test -f build/plugins.json
 
-            find . -type f \( -path "*/build/*.cs3" -o -path "*/build/*.jar" \) \
+            find . \
+              -type f \
+              \( -path "*/build/*.cs3" -o -path "*/build/*.jar" \) \
               -exec cp {} "$PUBLISH_DIR/" \;
 
-            CS3_COUNT="$(find "$PUBLISH_DIR" -maxdepth 1 -type f -name "*.cs3" | wc -l)"
+            CS3_COUNT="$(
+              find "$PUBLISH_DIR" \
+                -maxdepth 1 \
+                -type f \
+                -name "*.cs3" |
+              wc -l
+            )"
 
             if [[ "$CS3_COUNT" -eq 0 ]]; then
-              echo "::error::Provider modules were detected but no .cs3 files were generated."
+              echo "::error::Build passed but no .cs3 files were generated."
               exit 1
             fi
 
@@ -138,17 +196,17 @@ jobs:
           from pathlib import Path
 
           root = Path(sys.argv[1])
-
           json.loads((root / "repo.json").read_text(encoding="utf-8"))
           plugins = json.loads((root / "plugins.json").read_text(encoding="utf-8"))
 
           if not isinstance(plugins, list):
               raise SystemExit("plugins.json must contain a JSON list")
 
-          print(f"Publish validation passed with {len(plugins)} plugin entries")
+          print(f"Publish validation passed with {len(plugins)} plugin entries.")
           PY
 
       - name: Publish builds branch
+        if: steps.modules.outputs.has_modules != 'true' || steps.compatibility.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -166,7 +224,6 @@ jobs:
             git worktree add -B builds "$BUILDS_DIR" origin/builds
           else
             git worktree add --detach "$BUILDS_DIR" HEAD
-
             (
               cd "$BUILDS_DIR"
               git switch --orphan builds
@@ -176,7 +233,12 @@ jobs:
           (
             cd "$BUILDS_DIR"
 
-            find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+            find . \
+              -mindepth 1 \
+              -maxdepth 1 \
+              ! -name .git \
+              -exec rm -rf {} +
+
             cp -a "$PUBLISH_DIR"/. .
 
             git add -A
@@ -190,6 +252,70 @@ jobs:
             git push origin builds --force
           )
 
+      - name: Create diagnose summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DIAG="$RUNNER_TEMP/cloudstream-build-diagnose"
+          mkdir -p "$DIAG"
+
+          {
+            echo "CLOUDSTREAM BUILD DIAGNOSE"
+            echo "=========================="
+            echo
+            echo "Repository: ${GITHUB_REPOSITORY}"
+            echo "Commit: ${GITHUB_SHA}"
+            echo "Branch: ${GITHUB_REF_NAME}"
+            echo
+            echo "Expected foundation:"
+            echo "AGP: 8.7.3"
+            echo "Gradle wrapper: 8.12"
+            echo "Kotlin: 2.3.0"
+            echo "JVM target: 1.8"
+            echo "Jackson: 2.13.1"
+            echo "Coroutines: 1.10.2"
+            echo
+            echo "Build outcome: ${{ steps.build.outcome || 'not-run' }}"
+            echo "Compatibility outcome: ${{ steps.compatibility.outcome || 'not-run' }}"
+          } > "$DIAG/summary.txt"
+
+          cp build.gradle.kts "$DIAG/build.gradle.kts" || true
+          cp gradle/wrapper/gradle-wrapper.properties \
+            "$DIAG/gradle-wrapper.properties" || true
+
+          for log in "$DIAG/build.log" "$DIAG/compatibility.log"; do
+            if [[ -f "$log" ]]; then
+              grep -nE \
+                '(^e: |FAILURE:|What went wrong:|Caused by:|Could not|Cannot|Unresolved reference|error:|Exception|incompatible version)' \
+                "$log" |
+                tail -n 500 \
+                >> "$DIAG/error-candidates.txt" || true
+            fi
+          done
+
+      - name: Upload diagnose
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudstream-build-diagnose
+          path: ${{ runner.temp }}/cloudstream-build-diagnose
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload CS3 artifacts
+        if: steps.modules.outputs.has_modules == 'true' && steps.compatibility.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudstream-cs3
+          path: |
+            **/build/*.cs3
+            build/plugins.json
+            repo.json
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Summary
         if: always()
         shell: bash
@@ -199,5 +325,7 @@ jobs:
             echo
             echo "* Source branch: \`${GITHUB_REF_NAME}\`"
             echo "* Providers present: \`${{ steps.modules.outputs.has_modules || 'unknown' }}\`"
+            echo "* Build: \`${{ steps.build.outcome || 'not-run' }}\`"
+            echo "* Jar compatibility: \`${{ steps.compatibility.outcome || 'not-run' }}\`"
             echo "* Repo URL: \`https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/main/repo.json\`"
           } >> "$GITHUB_STEP_SUMMARY"
