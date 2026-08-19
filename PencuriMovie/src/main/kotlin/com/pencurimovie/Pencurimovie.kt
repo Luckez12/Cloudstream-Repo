@@ -5,6 +5,9 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.json.JSONObject
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -331,35 +334,40 @@ class Pencurimovie : MainAPI() {
 
         val foundStream = AtomicBoolean(false)
 
-        // Resolve all discovered servers. No quality/server filter is applied here.
-        embedUrls.apmap { embedUrl ->
-            val finalUrl = followRedirect(embedUrl, maxHops = 5)
+        // Resolve all discovered servers concurrently without the deprecated apmap.
+        coroutineScope {
+            embedUrls.map { embedUrl ->
+                async {
+                    val finalUrl = followRedirect(embedUrl, maxHops = 5)
 
-            val matched = loadExtractor(
-                finalUrl,
-                data,
-                subtitleCallback
-            ) { link ->
-                foundStream.set(true)
-                callback(link)
-            }
-
-            // Some PencuriMovie entries point to an intermediate page instead of a
-            // registered extractor. If so, inspect one nested iframe and try again.
-            if (!matched) {
-                val nestedUrl = findNestedEmbed(finalUrl, data)
-                if (!nestedUrl.isNullOrBlank() && nestedUrl != finalUrl) {
-                    val nestedFinal = followRedirect(nestedUrl, maxHops = 4)
-                    loadExtractor(
-                        nestedFinal,
+                    val matched = loadExtractor(
                         finalUrl,
+                        data,
                         subtitleCallback
                     ) { link ->
                         foundStream.set(true)
                         callback(link)
                     }
+
+                    // Some PencuriMovie entries point to an intermediate page instead
+                    // of a registered extractor. If so, inspect one nested iframe and
+                    // try again.
+                    if (!matched) {
+                        val nestedUrl = findNestedEmbed(finalUrl, data)
+                        if (!nestedUrl.isNullOrBlank() && nestedUrl != finalUrl) {
+                            val nestedFinal = followRedirect(nestedUrl, maxHops = 4)
+                            loadExtractor(
+                                nestedFinal,
+                                finalUrl,
+                                subtitleCallback
+                            ) { link ->
+                                foundStream.set(true)
+                                callback(link)
+                            }
+                        }
+                    }
                 }
-            }
+            }.awaitAll()
         }
 
         return foundStream.get()
