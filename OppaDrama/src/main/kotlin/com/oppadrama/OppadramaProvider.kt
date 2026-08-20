@@ -308,14 +308,30 @@ class OppadramaProvider : MainAPI() {
             } ?: false
 
             if (gotFirstLink) {
-                // Keep a small grace period so a second/third fast server can join.
+                // A playable source exists. Give other fast mirrors a short chance,
+                // then stop expensive work such as a lingering WebView probe.
                 delay(COLLECT_AFTER_FIRST_LINK_MS)
-            }
+                jobs.forEach { job ->
+                    if (job.isActive) job.cancel()
+                }
+                jobs.joinAll()
+            } else {
+                /*
+                 * Reliability phase. Do NOT cancel the race just because no server
+                 * answered during the fast window. Some CloudStream extractors can
+                 * legitimately take longer on a cold DNS/TLS path. Let the existing
+                 * jobs finish for a bounded compatibility window first.
+                 */
+                Log.i(TAG, "OPPA_FAST_RACE_SLOW_FALLBACK = servers=${sortedServers.size}")
+                withTimeoutOrNull(SLOW_FALLBACK_WAIT_MS) {
+                    jobs.joinAll()
+                }
 
-            jobs.forEach { job ->
-                if (job.isActive) job.cancel()
+                jobs.forEach { job ->
+                    if (job.isActive) job.cancel()
+                }
+                jobs.joinAll()
             }
-            jobs.joinAll()
 
             Log.i(
                 TAG,
@@ -930,7 +946,8 @@ class OppadramaProvider : MainAPI() {
     companion object {
         private const val TAG = "OppaDrama"
         private const val DEFAULT_SITE_URL = "http://45.11.57.188"
-        private const val SERVER_RACE_TIMEOUT_MS = 20000L
+        private const val SERVER_RACE_TIMEOUT_MS = 14000L
+        private const val SLOW_FALLBACK_WAIT_MS = 18000L
         private const val COLLECT_AFTER_FIRST_LINK_MS = 2200L
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 Chrome/139.0 Mobile Safari/537.36"
