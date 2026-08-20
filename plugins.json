@@ -109,10 +109,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://45.11.57.243&size=%size%",
-        "fileHash": "sha256-383ad16cadfaf8baf5addea6be418f63beb04e360ad993d9388beb9c52b2b0b8",
+        "fileHash": "sha256-2cb08be46d24dc00690f9bf6f60259c6a9efff02a359f8365753cf830c6a0ba0",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 42831,
+        "fileSize": 48200,
         "status": 1,
         "language": "id",
         "authors": [
