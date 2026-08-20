@@ -322,11 +322,15 @@ class OneTouchTV : MainAPI() {
         }
     }
 
-    private fun getStatus(status: String): ShowStatus {
+    private fun getStatus(status: String): ShowStatus? {
         return when {
             status.equals("Finished Airing", ignoreCase = true) -> ShowStatus.Completed
-            status.equals("ongoing", ignoreCase = true) -> ShowStatus.Ongoing
-            else -> ShowStatus.Completed
+            status.equals("Completed", ignoreCase = true) -> ShowStatus.Completed
+            status.equals("Ended", ignoreCase = true) -> ShowStatus.Completed
+            status.equals("Ongoing", ignoreCase = true) -> ShowStatus.Ongoing
+            status.equals("Currently Airing", ignoreCase = true) -> ShowStatus.Ongoing
+            status.equals("Returning Series", ignoreCase = true) -> ShowStatus.Ongoing
+            else -> null
         }
     }
 }
