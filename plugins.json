@@ -43,10 +43,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://kisskh.id/&size=256",
-        "fileHash": "sha256-482780b41d495701f3770195bc32520c11a0b070c79530313e98438c9134bec8",
+        "fileHash": "sha256-0cdf4800fae6f2bd44187375ec4aaa850ed0bf17d1a9fe739d354efe333080b8",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 34275,
+        "fileSize": 35381,
         "status": 1,
         "language": "en",
         "authors": [
