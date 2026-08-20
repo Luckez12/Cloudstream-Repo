@@ -41,8 +41,8 @@ class MovieboxProvider : MainAPI() {
     private val h5ApiUrl = "https://h5-api.aoneroom.com"
 
     /*
-     * H5 web mirrors. Requests that still live on /wefeed-h5-bff/web are tried
-     * in order so a blocked/dead mirror does not kill the whole provider.
+     * H5 web mirrors. Latency-sensitive endpoints race these mirrors in
+     * parallel so a slow/dead domain does not hold up the provider.
      */
     private val webHosts = listOf(
         "https://moviebox.ph",
@@ -52,17 +52,19 @@ class MovieboxProvider : MainAPI() {
     )
 
     /*
-     * Fast race strategy for playback:
-     * all compatible H5 mirrors are queried in parallel and the first host
-     * that returns at least one valid stream URL wins. Remaining requests
-     * are cancelled immediately. The winning host is remembered so normal
-     * search/detail requests can prefer it later.
+     * Fast mirror strategy:
+     * search, detail and playback query compatible H5 mirrors in parallel.
+     * The first valid response wins and the winning host is remembered as a
+     * preferred seed for later requests.
      */
     @Volatile
     private var preferredWebHost: String? = null
 
+    private val searchRaceTimeoutMs = 4_000L
+    private val detailRaceTimeoutMs = 4_500L
     private val playRaceTimeoutMs = 5_500L
     private val captionRaceTimeoutMs = 3_000L
+    private val recommendationTimeoutMs = 600L
 
     private fun orderedWebHosts(seedHost: String? = null): List<String> = buildList {
         seedHost?.takeIf { it.isNotBlank() }?.let { add(it) }
@@ -154,71 +156,150 @@ class MovieboxProvider : MainAPI() {
         )
     }
 
+    private data class SearchRaceResult(
+        val host: String,
+        val items: List<Items>
+    )
+
+    private data class DetailRaceResult(
+        val host: String,
+        val detail: MediaDetail.Data
+    )
+
+    private suspend fun raceSearchHosts(query: String): SearchRaceResult? = coroutineScope {
+        val hosts = orderedWebHosts()
+        if (hosts.isEmpty()) return@coroutineScope null
+
+        val requestJson = mapOf(
+            "keyword" to query.trim(),
+            "page" to 1,
+            "perPage" to 24,
+            "subjectType" to 0
+        ).toJson()
+
+        val winner = CompletableDeferred<SearchRaceResult?>()
+        val remaining = AtomicInteger(hosts.size)
+        val jobs = hosts.map { host ->
+            launch {
+                try {
+                    val requestBody = requestJson.toRequestBody(RequestBodyTypes.JSON.toMediaTypeOrNull())
+                    val items = app.post(
+                        "$host/wefeed-h5-bff/web/subject/search",
+                        headers = commonHeaders,
+                        referer = "$host/",
+                        requestBody = requestBody
+                    ).parsedSafe<Media>()
+                        ?.data
+                        ?.items
+                        .orEmpty()
+
+                    if (items.isNotEmpty()) {
+                        winner.complete(SearchRaceResult(host, items))
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Throwable) {
+                    // Ignore a dead/slow mirror. Another parallel mirror may win.
+                } finally {
+                    if (remaining.decrementAndGet() == 0) {
+                        winner.complete(null)
+                    }
+                }
+            }
+        }
+
+        val result = withTimeoutOrNull(searchRaceTimeoutMs) {
+            winner.await()
+        }
+
+        jobs.forEach { job ->
+            if (job.isActive) job.cancel()
+        }
+
+        result
+    }
+
+    private suspend fun raceDetailHosts(subjectId: String): DetailRaceResult? = coroutineScope {
+        val hosts = orderedWebHosts()
+        if (hosts.isEmpty()) return@coroutineScope null
+
+        val winner = CompletableDeferred<DetailRaceResult?>()
+        val remaining = AtomicInteger(hosts.size)
+        val jobs = hosts.map { host ->
+            launch {
+                try {
+                    val detail = app.get(
+                        "$host/wefeed-h5-bff/web/subject/detail?subjectId=$subjectId",
+                        headers = commonHeaders,
+                        referer = "$host/"
+                    ).parsedSafe<MediaDetail>()?.data
+
+                    if (detail?.subject != null) {
+                        winner.complete(DetailRaceResult(host, detail))
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Throwable) {
+                    // Ignore a dead/slow mirror. Another parallel mirror may win.
+                } finally {
+                    if (remaining.decrementAndGet() == 0) {
+                        winner.complete(null)
+                    }
+                }
+            }
+        }
+
+        val result = withTimeoutOrNull(detailRaceTimeoutMs) {
+            winner.await()
+        }
+
+        jobs.forEach { job ->
+            if (job.isActive) job.cancel()
+        }
+
+        result
+    }
+
+    private suspend fun loadRecommendationsFast(
+        subjectId: String,
+        host: String
+    ): List<SearchResponse>? = withTimeoutOrNull(recommendationTimeoutMs) {
+        try {
+            app.get(
+                "$host/wefeed-h5-bff/web/subject/detail-rec?subjectId=$subjectId&page=1&perPage=12",
+                headers = commonHeaders,
+                referer = "$host/"
+            ).parsedSafe<Media>()
+                ?.data
+                ?.items
+                ?.map { it.toSearchResponse(this@MovieboxProvider) }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
 
-        val requestBody = mapOf(
-            "keyword" to query.trim(),
-            "page" to 1,
-            "perPage" to 24,
-            "subjectType" to 0
-        ).toJson().toRequestBody(RequestBodyTypes.JSON.toMediaTypeOrNull())
-
-        for (host in orderedWebHosts()) {
-            val result = try {
-                app.post(
-                    "$host/wefeed-h5-bff/web/subject/search",
-                    headers = commonHeaders,
-                    referer = "$host/",
-                    requestBody = requestBody
-                ).parsedSafe<Media>()
-                    ?.data
-                    ?.items
-                    .orEmpty()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Throwable) {
-                emptyList()
-            }
-
-            if (result.isNotEmpty()) {
-                return result.map { it.toSearchResponse(this) }
-            }
-        }
-
-        return emptyList()
+        val result = raceSearchHosts(query) ?: return emptyList()
+        preferredWebHost = result.host
+        return result.items.map { it.toSearchResponse(this) }
     }
 
     override suspend fun load(url: String): LoadResponse {
         val id = url.substringAfterLast("/").substringBefore("?")
         if (id.isBlank()) throw ErrorLoadingException("Invalid MovieBox subject id")
 
-        var selectedHost: String? = null
-        var document: MediaDetail.Data? = null
+        val detailResult = raceDetailHosts(id)
+            ?: throw ErrorLoadingException("MovieBox detail unavailable")
+        val selectedHost = detailResult.host
+        val detail = detailResult.detail
+        preferredWebHost = selectedHost
 
-        for (host in orderedWebHosts()) {
-            val parsed = try {
-                app.get(
-                    "$host/wefeed-h5-bff/web/subject/detail?subjectId=$id",
-                    headers = commonHeaders,
-                    referer = "$host/"
-                ).parsedSafe<MediaDetail>()?.data
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Throwable) {
-                null
-            }
-
-            if (parsed?.subject != null) {
-                selectedHost = host
-                document = parsed
-                break
-            }
-        }
-
-        val detail = document ?: throw ErrorLoadingException("MovieBox detail unavailable")
         val subject = detail.subject ?: throw ErrorLoadingException("MovieBox subject missing")
 
         val title = subject.title.orEmpty().ifBlank { "MovieBox" }
@@ -254,21 +335,12 @@ class MovieboxProvider : MainAPI() {
             }
             ?.distinctBy { it.actor }
 
-        val recommendationHost = selectedHost ?: mainUrl
-        val recommendations = try {
-            app.get(
-                "$recommendationHost/wefeed-h5-bff/web/subject/detail-rec?subjectId=$id&page=1&perPage=12",
-                headers = commonHeaders,
-                referer = "$recommendationHost/"
-            ).parsedSafe<Media>()
-                ?.data
-                ?.items
-                ?.map { it.toSearchResponse(this) }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Throwable) {
-            null
-        }
+        /*
+         * Recommendations are optional UI data. Keep them on a very short
+         * best-effort timeout so they never turn into a multi-second blocker
+         * after the critical detail race has already succeeded.
+         */
+        val recommendations = loadRecommendationsFast(id, selectedHost)
 
         return if (tvType == TvType.TvSeries) {
             val episodes = detail.resource
