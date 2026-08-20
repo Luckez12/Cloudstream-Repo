@@ -8,7 +8,6 @@ import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
-import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
@@ -17,6 +16,7 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.net.URLEncoder
 import java.util.ArrayList
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 class KissKH : MainAPI() {
@@ -146,9 +146,27 @@ class KissKH : MainAPI() {
         return if (number % 1.0 == 0.0) number.toInt().toString() else number.toString()
     }
 
-    private fun getLanguage(str: String): String = when (str.trim()) {
-        "Indonesia" -> "Indonesian"
-        else -> str.trim()
+    private fun getAllowedSubtitleLanguage(label: String?): String? {
+        val value = label?.trim()?.lowercase().orEmpty()
+        if (value.isBlank()) return null
+
+        fun hasWord(word: String): Boolean =
+            Regex("(^|[^a-z])${Regex.escape(word)}([^a-z]|$)").containsMatchIn(value)
+
+        return when {
+            value == "en" || value.startsWith("en-") || value.startsWith("en_") ||
+                hasWord("english") || hasWord("eng") -> "English"
+
+            value == "ms" || value.startsWith("ms-") || value.startsWith("ms_") ||
+                value == "msa" || value == "may" || value == "malaysia" ||
+                value.contains("bahasa melayu") || hasWord("melayu") || hasWord("malay") -> "Malay"
+
+            value == "id" || value.startsWith("id-") || value.startsWith("id_") ||
+                value == "ind" || value == "indonesia" || value == "indonesian" ||
+                value.contains("bahasa indonesia") || hasWord("indonesian") || hasWord("indonesia") -> "Indonesian"
+
+            else -> null
+        }
     }
 
     private fun inferQuality(url: String): Int = when {
@@ -168,27 +186,38 @@ class KissKH : MainAPI() {
 
         Log.d(TAG, "loadLinks episodeId=$episodeId")
 
-        val keyUrls = listOf(
-            "$VIDEO_KEY_API$episodeId&version=$KISSKH_VERSION",
-            "$SUBTITLE_KEY_API$episodeId&version=$KISSKH_VERSION"
-        )
+        val streamFound = AtomicBoolean(false)
+        val subtitleFound = AtomicBoolean(false)
+        val seenSubtitles = ConcurrentHashMap.newKeySet<String>()
 
-        val keys = keyUrls.amap { url ->
-            try {
-                app.get(url, timeout = 8000).parsedSafe<Key>()?.key.orEmpty()
-            } catch (e: Exception) {
-                Log.e(TAG, "kkey request failed: ${e.message}")
-                ""
-            }
+        fun emitSubtitle(subtitle: SubtitleFile) {
+            val language = getAllowedSubtitleLanguage(subtitle.lang) ?: return
+            val url = subtitle.url.trim().takeIf { it.isNotBlank() } ?: return
+            val dedupeKey = "${language.lowercase()}|$url"
+            if (!seenSubtitles.add(dedupeKey)) return
+
+            subtitle.lang = language
+            subtitle.url = url
+            subtitleCallback(subtitle)
+            subtitleFound.set(true)
         }
 
-        val videoKey = keys.getOrNull(0).orEmpty()
-        val subtitleKey = keys.getOrNull(1).orEmpty()
+        suspend fun loadVideoPipeline() {
+            val videoKey = try {
+                app.get(
+                    "$VIDEO_KEY_API$episodeId&version=$KISSKH_VERSION",
+                    timeout = 8000
+                ).parsedSafe<Key>()?.key.orEmpty()
+            } catch (e: Exception) {
+                Log.e(TAG, "Video kkey request failed: ${e.message}")
+                ""
+            }
 
-        val streamFound = AtomicBoolean(false)
-        var subtitleFound = false
+            if (videoKey.isBlank()) {
+                Log.e(TAG, "Video kkey is empty")
+                return
+            }
 
-        if (videoKey.isNotBlank()) {
             val kkey = URLEncoder.encode(videoKey, "UTF-8")
             val episodeNumber = formatEpisodeNumber(loadData.eps)
             val slug = getTitle(loadData.title.orEmpty())
@@ -200,68 +229,85 @@ class KissKH : MainAPI() {
             } catch (e: Exception) {
                 Log.e(TAG, "Video API failed: ${e.message}")
                 null
-            }
+            } ?: return
 
-            source?.let {
-                val sourceLinks = listOfNotNull(it.video, it.thirdParty)
-                    .map { link -> link.trim() }
-                    .filter { link -> link.isNotBlank() }
-                    .distinct()
+            val sourceLinks = listOfNotNull(source.video, source.thirdParty)
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
 
-                Log.d(TAG, "Video sources=${sourceLinks.size}")
+            Log.d(TAG, "Video sources=${sourceLinks.size}")
 
-                sourceLinks.amap { link ->
-                        safeApiCall {
-                            when {
-                                link.contains(".m3u8", ignoreCase = true) -> {
-                                    M3u8Helper.generateM3u8(
-                                        name,
-                                        fixUrl(link),
-                                        referer = "$mainUrl/",
-                                        headers = mapOf("Origin" to mainUrl)
-                                    ).forEach { extractedLink ->
-                                        streamFound.set(true)
-                                        callback(extractedLink)
-                                    }
-                                }
-
-                                link.contains(".mp4", ignoreCase = true) -> {
-                                    callback.invoke(
-                                        newExtractorLink(
-                                            name,
-                                            name,
-                                            url = fixUrl(link),
-                                            INFER_TYPE
-                                        ) {
-                                            quality = inferQuality(link)
-                                            headers = mapOf(
-                                                "Referer" to "$mainUrl/",
-                                                "Origin" to mainUrl
-                                            )
-                                        }
+            sourceLinks.amap { link ->
+                safeApiCall {
+                    when {
+                        link.contains(".m3u8", ignoreCase = true) -> {
+                            callback(
+                                newExtractorLink(
+                                    name,
+                                    name,
+                                    url = fixUrl(link),
+                                    INFER_TYPE
+                                ) {
+                                    quality = inferQuality(link)
+                                    headers = mapOf(
+                                        "Referer" to "$mainUrl/",
+                                        "Origin" to mainUrl
                                     )
-                                    streamFound.set(true)
                                 }
+                            )
+                            streamFound.set(true)
+                        }
 
-                                link.startsWith("http", ignoreCase = true) -> {
-                                    loadExtractor(
-                                        link,
-                                        "$mainUrl/",
-                                        subtitleCallback
-                                    ) { extractedLink ->
-                                        streamFound.set(true)
-                                        callback(extractedLink)
-                                    }
+                        link.contains(".mp4", ignoreCase = true) -> {
+                            callback(
+                                newExtractorLink(
+                                    name,
+                                    name,
+                                    url = fixUrl(link),
+                                    INFER_TYPE
+                                ) {
+                                    quality = inferQuality(link)
+                                    headers = mapOf(
+                                        "Referer" to "$mainUrl/",
+                                        "Origin" to mainUrl
+                                    )
                                 }
+                            )
+                            streamFound.set(true)
+                        }
+
+                        link.startsWith("http", ignoreCase = true) -> {
+                            loadExtractor(
+                                link,
+                                "$mainUrl/",
+                                ::emitSubtitle
+                            ) { extractedLink ->
+                                streamFound.set(true)
+                                callback(extractedLink)
                             }
                         }
                     }
+                }
             }
-        } else {
-            Log.e(TAG, "Video kkey is empty")
         }
 
-        if (subtitleKey.isNotBlank()) {
+        suspend fun loadSubtitlePipeline() {
+            val subtitleKey = try {
+                app.get(
+                    "$SUBTITLE_KEY_API$episodeId&version=$KISSKH_VERSION",
+                    timeout = 8000
+                ).parsedSafe<Key>()?.key.orEmpty()
+            } catch (e: Exception) {
+                Log.e(TAG, "Subtitle kkey request failed: ${e.message}")
+                ""
+            }
+
+            if (subtitleKey.isBlank()) {
+                Log.e(TAG, "Subtitle kkey is empty")
+                return
+            }
+
             val kkey = URLEncoder.encode(subtitleKey, "UTF-8")
             val subApi = "$mainUrl/api/Sub/$episodeId?kkey=$kkey"
 
@@ -272,18 +318,22 @@ class KissKH : MainAPI() {
 
                 subtitles.forEach { sub ->
                     val src = sub.src?.trim()?.takeIf { it.isNotBlank() } ?: return@forEach
-                    val language = getLanguage(sub.label ?: "Unknown")
-                    subtitleCallback.invoke(newSubtitleFile(language, fixUrl(src)))
-                    subtitleFound = true
+                    val language = getAllowedSubtitleLanguage(sub.label) ?: return@forEach
+                    emitSubtitle(SubtitleFile(language, fixUrl(src)))
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Subtitle API failed: ${e.message}")
             }
-        } else {
-            Log.e(TAG, "Subtitle kkey is empty")
         }
 
-        return streamFound.get() || subtitleFound
+        listOf("video", "subtitle").amap { pipeline ->
+            when (pipeline) {
+                "video" -> loadVideoPipeline()
+                else -> loadSubtitlePipeline()
+            }
+        }
+
+        return streamFound.get() || subtitleFound.get()
     }
 
     private val chunkRegex by lazy { Regex("^\\d+$", RegexOption.MULTILINE) }
