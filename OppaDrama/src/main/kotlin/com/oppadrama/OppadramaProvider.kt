@@ -6,13 +6,22 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URI
 import java.net.URLEncoder
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class OppadramaProvider : MainAPI() {
 
-    override var mainUrl = "http://45.11.57.192"
+    override var mainUrl = DEFAULT_SITE_URL
     override var name = "OppaDrama 👾"
     override var lang = "id"
     override val hasMainPage = true
@@ -23,7 +32,6 @@ class OppadramaProvider : MainAPI() {
     )
 
     private var humanCookie: String? = null
-    private var checkedAddress = false
 
     private data class ServerMirror(
         val label: String,
@@ -31,13 +39,16 @@ class OppadramaProvider : MainAPI() {
     )
 
 
-    private val headers = mapOf(
-        "User-Agent" to USER_AGENT,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8",
-        "Referer" to "$mainUrl/",
-        "Origin" to mainUrl
-    )
+    private fun browserHeaders(baseUrl: String = mainUrl): Map<String, String> {
+        val base = baseUrl.trimEnd('/')
+        return mapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8",
+            "Referer" to "$base/",
+            "Origin" to base
+        )
+    }
 
     override val mainPage = mainPageOf(
         "series/?status=&type=&order=update" to "Latest Update",
@@ -147,7 +158,6 @@ class OppadramaProvider : MainAPI() {
         val document = getSiteDocument(data)
 
         val serverLinks = linkedMapOf<String, ServerMirror>()
-
         fun addServer(
             label: String,
             rawUrl: String?
@@ -162,7 +172,6 @@ class OppadramaProvider : MainAPI() {
                 .replace("\\s+".toRegex(), " ")
                 .trim()
                 .ifBlank { "Server" }
-
             if (!isRealStreamServer(cleanLabel, fixedUrl)) {
                 Log.i(TAG, "OPPA_SKIP_SERVER = $cleanLabel | $fixedUrl")
                 return
@@ -176,11 +185,6 @@ class OppadramaProvider : MainAPI() {
             }
         }
 
-        /*
-         * OppaDrama stores the current/default player directly here.
-         * Example:
-         * <div id="pembed"><iframe src="https://emturbovid.com/t/..."></iframe></div>
-         */
         document.select("#pembed iframe, div.player-embed iframe")
             .forEach { iframe ->
                 addServer(
@@ -189,11 +193,6 @@ class OppadramaProvider : MainAPI() {
                 )
             }
 
-        /*
-         * OppaDrama server dropdown stores each server as base64 iframe HTML.
-         * Example option value decodes to:
-         * <iframe src="https://emturbovid.com/t/..."></iframe>
-         */
         document.select("select.mirror option[data-index], select.mirror option[value]")
             .forEach { option ->
                 val optionValue = option.attr("value").trim()
@@ -232,78 +231,196 @@ class OppadramaProvider : MainAPI() {
             )
         }
 
-        var foundLinks = false
-
-        for (mirror in sortedServers) {
-            if (
-                mirror.url.contains("abyssplayer", true) ||
-                mirror.url.contains("abyss.to", true) ||
-                mirror.url.contains("hydrax", true)
-            ) {
-                val streams = AbyssWebViewProbe.extractFast(
-                    url = mirror.url,
-                    referer = data
-                )
-
-                streams.forEach { stream ->
-                    val streamHeaders = stream.headers
-                        .toMutableMap()
-                        .cleanVideoHeaders()
-                        .apply {
-                            put("User-Agent", get("User-Agent") ?: USER_AGENT)
-                            put("Accept", get("Accept") ?: "*/*")
-                            put("Referer", get("Referer") ?: mirror.url)
-                        }
-
-                    Log.i(
-                        TAG,
-                        "OPPA_HYDRAX_LINK = ${stream.label} | ${stream.url} | " +
-                            streamHeaders.keys.joinToString(",")
-                    )
-
-                    callback(
-                        newExtractorLink(
-                            source = "Hydrax",
-                            name = "Hydrax ${stream.label}",
-                            url = stream.url
-                        ) {
-                            this.referer = mirror.url
-                            this.quality = getQualityFromName(stream.label)
-                            this.headers = streamHeaders
-                        }
-                    )
-                }
-
-                if (streams.isNotEmpty()) {
-                    foundLinks = true
-                    return true
-                }
-
-                Log.i(TAG, "OPPA_HYDRAX_EMPTY = ${mirror.url}")
-            }
-
-            runCatching {
-                Log.i(TAG, "OPPA_TRY_REAL_EXTRACTOR = ${mirror.label} | ${mirror.url}")
-
-                val loaded = loadExtractor(
-                    mirror.url,
-                    data,
-                    subtitleCallback,
-                    callback
-                )
-
-                if (loaded) {
-                    foundLinks = true
-                }
-            }.onFailure {
-                Log.e(
-                    TAG,
-                    "OPPA_EXTRACTOR_FAILED = ${mirror.label} | ${mirror.url} | ${it.message}"
-                )
-            }
+        if (sortedServers.isEmpty()) {
+            Log.i(TAG, "OPPA_NO_REAL_SERVER = $data")
+            return false
         }
 
-        return foundLinks
+        /*
+         * Fast race strategy:
+         * 1. Standard extractors start concurrently instead of waiting serially.
+         * 2. Hydrax/Abyss runs in one dedicated job to avoid multiple WebViews.
+         * 3. The first playable link opens a short collection window so other
+         *    fast mirrors can still appear, then remaining slow work is cancelled.
+         */
+        return supervisorScope {
+            val foundLinks = AtomicBoolean(false)
+            val raceResult = CompletableDeferred<Boolean>()
+
+            val standardServers = sortedServers.filterNot { it.isHydraxMirror() }
+            val hydraxServers = sortedServers.filter { it.isHydraxMirror() }
+            val totalJobs = standardServers.size + if (hydraxServers.isNotEmpty()) 1 else 0
+            val remainingJobs = AtomicInteger(totalJobs)
+
+            val fastCallback: (ExtractorLink) -> Unit = { link ->
+                foundLinks.set(true)
+                raceResult.complete(true)
+                callback(link)
+            }
+
+            fun jobFinished() {
+                if (remainingJobs.decrementAndGet() == 0) {
+                    raceResult.complete(false)
+                }
+            }
+
+            val jobs = buildList {
+                standardServers.forEach { mirror ->
+                    add(
+                        launch {
+                            try {
+                                resolveStandardMirror(
+                                    mirror = mirror,
+                                    data = data,
+                                    subtitleCallback = subtitleCallback,
+                                    callback = fastCallback
+                                )
+                            } finally {
+                                jobFinished()
+                            }
+                        }
+                    )
+                }
+
+                if (hydraxServers.isNotEmpty()) {
+                    add(
+                        launch {
+                            try {
+                                for (mirror in hydraxServers) {
+                                    val loaded = resolveHydraxMirror(
+                                        mirror = mirror,
+                                        data = data,
+                                        subtitleCallback = subtitleCallback,
+                                        callback = fastCallback
+                                    )
+                                    if (loaded) break
+                                }
+                            } finally {
+                                jobFinished()
+                            }
+                        }
+                    )
+                }
+            }
+
+            val gotFirstLink = withTimeoutOrNull(SERVER_RACE_TIMEOUT_MS) {
+                raceResult.await()
+            } ?: false
+
+            if (gotFirstLink) {
+                // Keep a small grace period so a second/third fast server can join.
+                delay(COLLECT_AFTER_FIRST_LINK_MS)
+            }
+
+            jobs.forEach { job ->
+                if (job.isActive) job.cancel()
+            }
+            jobs.joinAll()
+
+            Log.i(
+                TAG,
+                "OPPA_FAST_RACE_DONE = first=$gotFirstLink | found=${foundLinks.get()} | " +
+                    "servers=${sortedServers.size}"
+            )
+
+            foundLinks.get()
+        }
+    }
+
+    private suspend fun resolveStandardMirror(
+        mirror: ServerMirror,
+        data: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            Log.i(TAG, "OPPA_FAST_EXTRACTOR = ${mirror.label} | ${mirror.url}")
+            loadExtractor(
+                mirror.url,
+                data,
+                subtitleCallback,
+                callback
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            Log.e(
+                TAG,
+                "OPPA_EXTRACTOR_FAILED = ${mirror.label} | ${mirror.url} | ${error.message}"
+            )
+            false
+        }
+    }
+
+    private suspend fun resolveHydraxMirror(
+        mirror: ServerMirror,
+        data: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        try {
+            val streams = AbyssWebViewProbe.extractFast(
+                url = mirror.url,
+                referer = data
+            )
+
+            streams.forEach { stream ->
+                val streamHeaders = stream.headers
+                    .toMutableMap()
+                    .cleanVideoHeaders()
+                    .apply {
+                        put("User-Agent", get("User-Agent") ?: USER_AGENT)
+                        put("Accept", get("Accept") ?: "*/*")
+                        put("Referer", get("Referer") ?: mirror.url)
+                    }
+
+                Log.i(
+                    TAG,
+                    "OPPA_HYDRAX_LINK = ${stream.label} | ${stream.url} | " +
+                        streamHeaders.keys.joinToString(",")
+                )
+
+                callback(
+                    newExtractorLink(
+                        source = "Hydrax",
+                        name = "Hydrax ${stream.label}",
+                        url = stream.url
+                    ) {
+                        this.referer = mirror.url
+                        this.quality = getQualityFromName(stream.label)
+                        this.headers = streamHeaders
+                    }
+                )
+            }
+
+            if (streams.isNotEmpty()) {
+                return true
+            }
+
+            Log.i(TAG, "OPPA_HYDRAX_EMPTY = ${mirror.url}")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            Log.e(
+                TAG,
+                "OPPA_HYDRAX_FAILED = ${mirror.label} | ${mirror.url} | ${error.message}"
+            )
+        }
+
+        // Compatibility fallback for Hydrax mirrors supported by CloudStream itself.
+        return resolveStandardMirror(
+            mirror = mirror,
+            data = data,
+            subtitleCallback = subtitleCallback,
+            callback = callback
+        )
+    }
+
+    private fun ServerMirror.isHydraxMirror(): Boolean {
+        val value = "${label.lowercase()} ${url.lowercase()}"
+        return value.contains("abyssplayer") ||
+            value.contains("abyss.to") ||
+            value.contains("hydrax")
     }
 
     private fun buildMainPageUrl(page: Int, data: String): String {
@@ -326,45 +443,59 @@ class OppadramaProvider : MainAPI() {
     }
 
     private suspend fun getSiteDocument(url: String): Document {
-        ensureAddress()
-        ensureHumanCookie()
-
-        return app.get(
-            normalizeSiteUrl(url),
-            headers = verifiedHeaders(),
-            referer = mainUrl
-        ).document
-    }
-
-    private suspend fun ensureAddress() {
-        if (checkedAddress) return
-        checkedAddress = true
-
-        val resolved = runCatching {
-            val response = app.get(
-                "https://oppa.biz",
-                headers = headers,
-                allowRedirects = false
+        /*
+         * Optimistic fast path: use the current known OppaDrama address directly.
+         * If it has moved, resolve oppa.biz once and retry transparently.
+         */
+        return try {
+            ensureHumanCookie()
+            app.get(
+                normalizeSiteUrl(url),
+                headers = verifiedHeaders(),
+                referer = mainUrl
+            ).document
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (firstError: Throwable) {
+            Log.w(
+                TAG,
+                "OPPA_SITE_FAST_PATH_FAILED = $mainUrl | ${firstError.message}"
             )
 
-            val location = response.headers["Location"]
-                ?: response.headers["location"]
+            refreshAddress()
+            humanCookie = null
+            ensureHumanCookie()
 
-            when {
-                !location.isNullOrBlank() && location.startsWith("http", true) ->
-                    location.trimEnd('/')
+            app.get(
+                normalizeSiteUrl(url),
+                headers = verifiedHeaders(),
+                referer = mainUrl
+            ).document
+        }
+    }
 
-                else -> {
-                    val body = response.text
-                    Regex("""https?://(?:\d{1,3}\.){3}\d{1,3}""")
-                        .find(body)
-                        ?.value
-                        ?.trimEnd('/')
-                }
-            }
-        }.getOrNull()
+    private suspend fun refreshAddress() {
+        val response = app.get(
+            "https://oppa.biz",
+            headers = browserHeaders("https://oppa.biz"),
+            allowRedirects = false
+        )
 
-        if (!resolved.isNullOrBlank()) {
+        val location = response.headers["Location"]
+            ?: response.headers["location"]
+
+        val resolved = when {
+            !location.isNullOrBlank() && location.startsWith("http", true) ->
+                location.trimEnd('/')
+
+            else -> Regex("""https?://(?:\d{1,3}\.){3}\d{1,3}""")
+                .find(response.text)
+                ?.value
+                ?.trimEnd('/')
+        }
+
+        if (!resolved.isNullOrBlank() && !resolved.equals(mainUrl, true)) {
+            Log.i(TAG, "OPPA_ADDRESS_REFRESH = $mainUrl -> $resolved")
             mainUrl = resolved
         }
     }
@@ -374,7 +505,7 @@ class OppadramaProvider : MainAPI() {
 
         val response = app.get(
             "$mainUrl/?verify_human=1",
-            headers = headers,
+            headers = browserHeaders(),
             referer = mainUrl,
             allowRedirects = false
         )
@@ -388,33 +519,31 @@ class OppadramaProvider : MainAPI() {
 
     private fun verifiedHeaders(): Map<String, String> {
         val cookie = humanCookie
+        val headers = browserHeaders()
 
         return if (cookie.isNullOrBlank()) {
             headers
         } else {
-            headers + mapOf(
-                "Cookie" to cookie,
-                "Referer" to "$mainUrl/",
-                "Origin" to mainUrl
-            )
+            headers + mapOf("Cookie" to cookie)
         }
     }
 
     private fun normalizeSiteUrl(url: String): String {
         val value = url.trim()
-
         if (value.startsWith(mainUrl, true)) return value
 
-        return when {
-            value.startsWith("http://45.11.57.192", true) ||
-                value.startsWith("https://oppa.biz", true) ||
-                value.startsWith("http://oppa.biz", true) -> {
-                val uri = URI(value)
-                "$mainUrl${uri.rawPath ?: "/"}${uri.rawQuery?.let { "?$it" } ?: ""}"
-            }
+        return runCatching {
+            val uri = URI(value)
+            val host = uri.host?.lowercase().orEmpty()
+            val isOppaHost = host == "oppa.biz" ||
+                Regex("""^45\.11\.57\.\d{1,3}$""").matches(host)
 
-            else -> value
-        }
+            if (isOppaHost) {
+                "$mainUrl${uri.rawPath ?: "/"}${uri.rawQuery?.let { "?$it" } ?: ""}"
+            } else {
+                value
+            }
+        }.getOrDefault(value)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
@@ -800,6 +929,9 @@ class OppadramaProvider : MainAPI() {
 
     companion object {
         private const val TAG = "OppaDrama"
+        private const val DEFAULT_SITE_URL = "http://45.11.57.188"
+        private const val SERVER_RACE_TIMEOUT_MS = 20000L
+        private const val COLLECT_AFTER_FIRST_LINK_MS = 2200L
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 Chrome/139.0 Mobile Safari/537.36"
     }

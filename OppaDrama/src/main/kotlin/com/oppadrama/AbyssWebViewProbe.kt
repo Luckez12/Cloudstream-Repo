@@ -25,8 +25,8 @@ import kotlin.coroutines.resume
 
 object AbyssWebViewProbe {
 
-    private const val MAX_WAIT_MS = 26000L
-    private const val FINISH_AFTER_FIRST_STREAM_MS = 2500L
+    private const val MAX_WAIT_MS = 14000L
+    private const val FINISH_AFTER_FIRST_STREAM_MS = 900L
 
     data class AbyssStream(
         val label: String,
@@ -199,6 +199,8 @@ object AbyssWebViewProbe {
             }
 
             fun clickWebView() {
+                if (streams.isNotEmpty()) return
+
                 runCatching {
                     val now = SystemClock.uptimeMillis()
                     val x = 540f
@@ -244,7 +246,7 @@ object AbyssWebViewProbe {
 
             @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
             fun setup() {
-                WebView.setWebContentsDebuggingEnabled(true)
+                WebView.setWebContentsDebuggingEnabled(false)
 
                 val cookieManager = CookieManager.getInstance()
                 cookieManager.setAcceptCookie(true)
@@ -372,16 +374,14 @@ object AbyssWebViewProbe {
                 )
 
                 listOf(
-                    1200L,
-                    2400L,
-                    3600L,
+                    650L,
+                    1300L,
+                    2200L,
+                    3400L,
                     5000L,
-                    7200L,
+                    7000L,
                     9500L,
-                    12500L,
-                    15500L,
-                    18500L,
-                    21500L
+                    12000L
                 ).forEach { delay ->
                     handler.postDelayed({
                         clickWebView()
