@@ -2,9 +2,12 @@ package com.anichin
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
@@ -272,25 +275,46 @@ class AnichinProvider : MainAPI() {
     }
 
     /*
-     * Runs work in small batches.
-     * Each batch is fully awaited before the next batch starts, so request
-     * pressure stays bounded instead of launching every server at once.
+     * True rolling bounded concurrency.
+     *
+     * A maximum of [concurrency] jobs may execute at the same time.
+     * As soon as one job finishes, the next waiting item may start
+     * immediately. Scan 2 still cannot begin until this whole function
+     * returns for Scan 1.
      */
     private suspend fun <T> boundedParallelForEach(
         items: List<T>,
         concurrency: Int = 4,
         block: suspend (T) -> Unit
-    ) {
-        items.chunked(concurrency.coerceAtLeast(1)).forEach { batch ->
-            coroutineScope {
-                batch.map { item ->
-                    async {
-                        runCatching {
-                            block(item)
-                        }
+    ) = coroutineScope {
+        val semaphore = Semaphore(concurrency.coerceAtLeast(1))
+
+        items.map { item ->
+            async {
+                semaphore.withPermit {
+                    try {
+                        block(item)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Throwable) {
+                        // A dead host must not cancel the remaining scan.
                     }
-                }.awaitAll()
+                }
             }
+        }.awaitAll()
+
+        Unit
+    }
+
+    private suspend fun <T> tryOrNull(
+        block: suspend () -> T
+    ): T? {
+        return try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
         }
     }
 
@@ -303,22 +327,26 @@ class AnichinProvider : MainAPI() {
     ) {
         if (!loadedUrls.add(url)) return
 
-        runCatching {
+        try {
             loadExtractor(
                 url,
                 referer,
                 subtitleCallback
             ) { link ->
                 /*
-                 * Keep unknown quality because some extractors return an HD
-                 * stream without a reliable numeric quality label.
-                 * Drop only quality that is explicitly known to be below 720p.
+                 * Keep UNKNOWN quality because some extractors expose an HD
+                 * stream without a reliable numeric quality value.
+                 * Drop only streams explicitly identified as 1..719p.
                  */
                 val quality = link.quality
                 if (quality <= 0 || quality >= 720) {
                     callback(link)
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            // Failed extractor: continue with the remaining hosts.
         }
     }
 
@@ -383,8 +411,9 @@ class AnichinProvider : MainAPI() {
 
         /*
          * Scan 1:
-         * Wrapper discovery with bounded parallelism.
-         * Maximum four wrapper requests run together.
+         * Wrapper discovery with rolling bounded parallelism.
+         * Maximum four wrapper requests run together. When one finishes,
+         * the next waiting wrapper starts immediately.
          *
          * Fast hosts found inside a wrapper are emitted immediately.
          * Non-fast player URLs are queued for Scan 2.
@@ -396,7 +425,7 @@ class AnichinProvider : MainAPI() {
             items = wrapperUrls,
             concurrency = 4
         ) { streamUrl ->
-            val streamDocument = runCatching {
+            val streamDocument = tryOrNull {
                 app.get(
                     streamUrl,
                     headers = mapOf(
@@ -405,7 +434,7 @@ class AnichinProvider : MainAPI() {
                         "User-Agent" to USER_AGENT
                     )
                 ).document
-            }.getOrNull() ?: return@boundedParallelForEach
+            } ?: return@boundedParallelForEach
 
             val playerUrls = streamDocument
                 .select("iframe[src]")
@@ -439,7 +468,7 @@ class AnichinProvider : MainAPI() {
                  * One light nested check only.
                  * Non-fast nested URLs are queued for Scan 2.
                  */
-                val nestedDocument = runCatching {
+                val nestedDocument = tryOrNull {
                     app.get(
                         playerUrl,
                         headers = mapOf(
@@ -447,7 +476,7 @@ class AnichinProvider : MainAPI() {
                             "User-Agent" to USER_AGENT
                         )
                     ).document
-                }.getOrNull() ?: return@playerLoop
+                } ?: return@playerLoop
 
                 nestedDocument
                     .select("iframe[src]")
@@ -482,7 +511,7 @@ class AnichinProvider : MainAPI() {
         /*
          * Scan 2 starts only after Scan 1 has completely finished.
          * Direct extractor scan only, maximum 12 candidates.
-         * Four extractors at most run together.
+         * Four extractors at most run together using rolling concurrency.
          */
         val scan2 = synchronized(secondScanCandidates) {
             secondScanCandidates.entries
