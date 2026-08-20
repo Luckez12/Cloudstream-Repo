@@ -24,8 +24,8 @@ class KissKH : MainAPI() {
     override var name = "KissKH 👾"
     override val hasMainPage = true
     override var lang = "en"
-    override val hasQuickSearch = false
-    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama)
+    override val hasQuickSearch = true
+    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime)
 
     override val mainPage = mainPageOf(
         "&type=0&sub=0&country=0&status=0&order=2" to "Latest Releases",
