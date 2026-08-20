@@ -2,11 +2,15 @@ package com.anichin
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
+import java.util.Collections
 
-class AnichinProvider: MainAPI() {
+class AnichinProvider : MainAPI() {
 
     override var mainUrl = "https://anichin.moe"
     override var name = "Anichin 👾"
@@ -49,7 +53,6 @@ class AnichinProvider: MainAPI() {
             it.isNotBlank() &&
                 !it.startsWith("data:", ignoreCase = true)
         }
-
         if (imageUrl != null) return imageUrl
 
         val srcSet = listOf(
@@ -73,7 +76,6 @@ class AnichinProvider: MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-
         val document = app.get(
             "${mainUrl}/${request.data}&page=$page"
         ).document
@@ -93,7 +95,6 @@ class AnichinProvider: MainAPI() {
     }
 
     private fun Element.toSearchResult(): SearchResponse {
-
         val title = select("div.bsx > a")
             .attr("title")
             .trim()
@@ -119,12 +120,10 @@ class AnichinProvider: MainAPI() {
     override suspend fun search(
         query: String
     ): List<SearchResponse> {
-
         val searchResponse = mutableListOf<SearchResponse>()
         val searchQuery = URLEncoder.encode(query, "UTF-8")
 
         for (page in 1..3) {
-
             val document = app.get(
                 "${mainUrl}/page/$page/?s=$searchQuery"
             ).document
@@ -134,7 +133,6 @@ class AnichinProvider: MainAPI() {
                 .mapNotNull { it.toSearchResult() }
 
             if (results.isEmpty()) break
-
             searchResponse.addAll(results)
         }
 
@@ -144,7 +142,6 @@ class AnichinProvider: MainAPI() {
     override suspend fun load(
         url: String
     ): LoadResponse {
-
         val document = app.get(
             fixUrl(url)
         ).document
@@ -182,11 +179,9 @@ class AnichinProvider: MainAPI() {
         }
 
         return if (tvType == TvType.TvSeries) {
-
             val episodes = document
                 .select(".eplister li")
                 .map { episodeElement ->
-
                     val link = fixUrl(
                         episodeElement
                             .selectFirst("a")
@@ -257,9 +252,7 @@ class AnichinProvider: MainAPI() {
                 this.posterUrl = fixUrlNull(poster)
                 this.plot = description
             }
-
         } else {
-
             val movieHref = document
                 .selectFirst(".eplister li > a")
                 ?.attr("href")
@@ -278,6 +271,29 @@ class AnichinProvider: MainAPI() {
         }
     }
 
+    /*
+     * Runs work in small batches.
+     * Each batch is fully awaited before the next batch starts, so request
+     * pressure stays bounded instead of launching every server at once.
+     */
+    private suspend fun <T> boundedParallelForEach(
+        items: List<T>,
+        concurrency: Int = 4,
+        block: suspend (T) -> Unit
+    ) {
+        items.chunked(concurrency.coerceAtLeast(1)).forEach { batch ->
+            coroutineScope {
+                batch.map { item ->
+                    async {
+                        runCatching {
+                            block(item)
+                        }
+                    }
+                }.awaitAll()
+            }
+        }
+    }
+
     private suspend fun safeLoadExtractor(
         url: String,
         referer: String,
@@ -291,11 +307,18 @@ class AnichinProvider: MainAPI() {
             loadExtractor(
                 url,
                 referer,
-                subtitleCallback,
-                callback
-            )
-        }.onFailure {
-            // ignore failed extractor
+                subtitleCallback
+            ) { link ->
+                /*
+                 * Keep unknown quality because some extractors return an HD
+                 * stream without a reliable numeric quality label.
+                 * Drop only quality that is explicitly known to be below 720p.
+                 */
+                val quality = link.quality
+                if (quality <= 0 || quality >= 720) {
+                    callback(link)
+                }
+            }
         }
     }
 
@@ -305,38 +328,50 @@ class AnichinProvider: MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-
         val episodeUrl = fixUrl(data)
         val document = app.get(episodeUrl).document
-        val loadedUrls = mutableSetOf<String>()
-        val secondScanCandidates = linkedMapOf<String, String>()
 
         /*
-         * Scan 1:
-         * Immediate fast scan.
-         * OkRu, Odnoklassniki and Rumble are loaded as soon as they are found.
-         * This part must stay light so playback can start faster.
+         * These collections are touched by several coroutines during Scan 1
+         * and Scan 2, therefore they must be thread safe.
          */
-        document.select(".mobius option").forEach optionLoop@ { option ->
+        val loadedUrls = Collections.synchronizedSet(mutableSetOf<String>())
+        val secondScanCandidates =
+            Collections.synchronizedMap(linkedMapOf<String, String>())
 
-            val encodedValue = option.attr("value").trim()
-            if (encodedValue.isBlank()) return@optionLoop
+        /*
+         * Decode all Mobius entries first. This is local work and avoids
+         * mixing base64 parsing with network scheduling.
+         */
+        val streamUrls = document
+            .select(".mobius option")
+            .mapNotNull { option ->
+                val encodedValue = option.attr("value").trim()
+                if (encodedValue.isBlank()) return@mapNotNull null
 
-            val decodedDocument = runCatching {
-                Jsoup.parse(base64Decode(encodedValue))
-            }.getOrNull() ?: return@optionLoop
+                val decodedDocument = runCatching {
+                    Jsoup.parse(base64Decode(encodedValue))
+                }.getOrNull() ?: return@mapNotNull null
 
-            val iframeUrl = decodedDocument
-                .selectFirst("iframe[src]")
-                ?.attr("src")
-                ?.trim()
-                .orEmpty()
+                val iframeUrl = decodedDocument
+                    .selectFirst("iframe[src]")
+                    ?.attr("src")
+                    ?.trim()
+                    .orEmpty()
 
-            if (iframeUrl.isBlank()) return@optionLoop
+                iframeUrl
+                    .takeIf { it.isNotBlank() }
+                    ?.let { fixUrl(it) }
+            }
+            .distinct()
 
-            val streamUrl = fixUrl(iframeUrl)
-
-            if (isFastVideoHost(streamUrl)) {
+        /*
+         * Fast direct hosts get first priority and are completely handled
+         * before wrapper discovery begins.
+         */
+        streamUrls
+            .filter { isFastVideoHost(it) }
+            .forEach { streamUrl ->
                 safeLoadExtractor(
                     streamUrl,
                     episodeUrl,
@@ -344,9 +379,23 @@ class AnichinProvider: MainAPI() {
                     subtitleCallback,
                     callback
                 )
-                return@optionLoop
             }
 
+        /*
+         * Scan 1:
+         * Wrapper discovery with bounded parallelism.
+         * Maximum four wrapper requests run together.
+         *
+         * Fast hosts found inside a wrapper are emitted immediately.
+         * Non-fast player URLs are queued for Scan 2.
+         * Only one nested iframe level is checked.
+         */
+        val wrapperUrls = streamUrls.filterNot { isFastVideoHost(it) }
+
+        boundedParallelForEach(
+            items = wrapperUrls,
+            concurrency = 4
+        ) { streamUrl ->
             val streamDocument = runCatching {
                 app.get(
                     streamUrl,
@@ -356,7 +405,7 @@ class AnichinProvider: MainAPI() {
                         "User-Agent" to USER_AGENT
                     )
                 ).document
-            }.getOrNull() ?: return@optionLoop
+            }.getOrNull() ?: return@boundedParallelForEach
 
             val playerUrls = streamDocument
                 .select("iframe[src]")
@@ -369,7 +418,6 @@ class AnichinProvider: MainAPI() {
                 .distinct()
 
             playerUrls.forEach playerLoop@ { playerUrl ->
-
                 if (isFastVideoHost(playerUrl)) {
                     safeLoadExtractor(
                         playerUrl,
@@ -381,12 +429,15 @@ class AnichinProvider: MainAPI() {
                     return@playerLoop
                 }
 
-                secondScanCandidates[playerUrl] = streamUrl
+                synchronized(secondScanCandidates) {
+                    if (!secondScanCandidates.containsKey(playerUrl)) {
+                        secondScanCandidates[playerUrl] = streamUrl
+                    }
+                }
 
                 /*
                  * One light nested check only.
-                 * This keeps the old fast behavior for OkRu/Rumble hidden inside one wrapper.
-                 * Non-fast nested URLs are saved for Scan 2, not extracted here.
+                 * Non-fast nested URLs are queued for Scan 2.
                  */
                 val nestedDocument = runCatching {
                     app.get(
@@ -408,7 +459,6 @@ class AnichinProvider: MainAPI() {
                     }
                     .distinct()
                     .forEach nestedLoop@ { nestedUrl ->
-
                         if (isFastVideoHost(nestedUrl)) {
                             safeLoadExtractor(
                                 nestedUrl,
@@ -420,29 +470,38 @@ class AnichinProvider: MainAPI() {
                             return@nestedLoop
                         }
 
-                        secondScanCandidates[nestedUrl] = playerUrl
+                        synchronized(secondScanCandidates) {
+                            if (!secondScanCandidates.containsKey(nestedUrl)) {
+                                secondScanCandidates[nestedUrl] = playerUrl
+                            }
+                        }
                     }
             }
         }
 
         /*
-         * Scan 2:
-         * Direct player scan only.
-         * No deep crawling, no raw HTML crawling, no background coroutine.
-         * This follows the working AnichinX style that brings back Dood and StreamRuby.
+         * Scan 2 starts only after Scan 1 has completely finished.
+         * Direct extractor scan only, maximum 12 candidates.
+         * Four extractors at most run together.
          */
-        secondScanCandidates
-            .entries
-            .take(12)
-            .forEach { (url, referer) ->
-                safeLoadExtractor(
-                    url,
-                    referer,
-                    loadedUrls,
-                    subtitleCallback,
-                    callback
-                )
-            }
+        val scan2 = synchronized(secondScanCandidates) {
+            secondScanCandidates.entries
+                .take(12)
+                .map { it.key to it.value }
+        }
+
+        boundedParallelForEach(
+            items = scan2,
+            concurrency = 4
+        ) { (url, referer) ->
+            safeLoadExtractor(
+                url,
+                referer,
+                loadedUrls,
+                subtitleCallback,
+                callback
+            )
+        }
 
         return true
     }
