@@ -63,10 +63,10 @@
     },
     {
         "iconUrl": "https://movieboxph.app/wp-content/uploads/2025/11/Movie-Box-icon.webp",
-        "fileHash": "sha256-a6d334934d10e25eb02fb54e1bb4ee3122b934c24e54735842ff05df3d067986",
+        "fileHash": "sha256-1573026b28737fc6ba921b78442bce5ac20e0c44c308cb502aa8d1fce70d183e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 44838,
+        "fileSize": 46362,
         "status": 1,
         "language": "en",
         "authors": [
