@@ -64,7 +64,7 @@ class MovieboxProvider : MainAPI() {
     private val detailRaceTimeoutMs = 4_500L
     private val playRaceTimeoutMs = 5_500L
     private val captionRaceTimeoutMs = 3_000L
-    private val recommendationTimeoutMs = 600L
+    private val recommendationTimeoutMs = 350L
 
     private fun orderedWebHosts(seedHost: String? = null): List<String> = buildList {
         seedHost?.takeIf { it.isNotBlank() }?.let { add(it) }
@@ -490,6 +490,53 @@ class MovieboxProvider : MainAPI() {
         result
     }
 
+    private fun allowedSubtitleLanguage(caption: Media.Data.Captions): String? {
+        val values = listOfNotNull(caption.lan, caption.lanName)
+            .map { value ->
+                value.trim()
+                    .lowercase()
+                    .replace('_', '-')
+                    .replace(Regex("\\s+"), " ")
+            }
+            .filter { it.isNotBlank() }
+
+        fun hasCode(vararg codes: String): Boolean = values.any { value ->
+            codes.any { code ->
+                value == code ||
+                    value.startsWith("$code-") ||
+                    value.startsWith("$code ") ||
+                    value.startsWith("$code(") ||
+                    value.startsWith("$code[")
+            }
+        }
+
+        fun hasName(vararg names: String): Boolean = values.any { value ->
+            names.any { name ->
+                Regex("(^|[^a-z])${Regex.escape(name)}([^a-z]|$)")
+                    .containsMatchIn(value)
+            }
+        }
+
+        return when {
+            hasCode("ms", "msa", "may") ||
+                hasName(
+                    "bahasa melayu",
+                    "bahasa malaysia",
+                    "malay",
+                    "melayu",
+                    "malaysian"
+                ) -> "Malay"
+
+            hasCode("en", "eng") ||
+                hasName("english") -> "English"
+
+            hasCode("id", "ind", "in") ||
+                hasName("bahasa indonesia", "indonesian") -> "Indonesian"
+
+            else -> null
+        }
+    }
+
     private suspend fun raceCaptionHosts(
         subjectId: String,
         streamId: String,
@@ -513,8 +560,12 @@ class MovieboxProvider : MainAPI() {
                         ?.data
                         ?.captions
                         .orEmpty()
-                        .filter { !it.url.isNullOrBlank() }
+                        .filter { caption ->
+                            !caption.url.isNullOrBlank() &&
+                                allowedSubtitleLanguage(caption) != null
+                        }
 
+                    // Only a mirror containing EN/MS/ID captions may win.
                     if (captions.isNotEmpty()) {
                         winner.complete(captions)
                     }
@@ -622,14 +673,10 @@ class MovieboxProvider : MainAPI() {
                     .distinctBy { it.url }
                     .forEach { subtitle ->
                         val subtitleUrl = subtitle.url ?: return@forEach
+                        val language = allowedSubtitleLanguage(subtitle) ?: return@forEach
+
                         subtitleCallback.invoke(
-                            newSubtitleFile(
-                                subtitle.lanName
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?: subtitle.lan
-                                    ?: "Unknown",
-                                subtitleUrl
-                            )
+                            newSubtitleFile(language, subtitleUrl)
                         )
                     }
             }
