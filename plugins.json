@@ -85,6 +85,27 @@
         "name": "MovieBox"
     },
     {
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ww03.pencurimovie.bond&size=%size%",
+        "fileHash": "sha256-890b01a42b45e4b789f20422311a0a1c7bb626b0d870c46809362bcb617d5c0d",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
+        "fileSize": 26470,
+        "status": 1,
+        "language": "ms",
+        "authors": [
+            "Luckez"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "MSM21",
+        "description": "MSM21 \u2014 Streaming Movie and TV Series",
+        "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/MSM21.cs3",
+        "name": "MSM21"
+    },
+    {
         "iconUrl": "https://cdn.animaapp.com/projects/6215178219a2fd7886bf5a52/releases/621519ce72dadb5503e24f9f/img/app-icon%401x.png",
         "fileHash": "sha256-a1a3652ebde4b9397c2c043d99109a67e368dd2c3266c933cf3db0b943fa07b1",
         "apiVersion": 1,
