@@ -13,7 +13,7 @@ import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.atomic.AtomicBoolean
 class msm21 : MainAPI() {
-    override var mainUrl = "https://ww21.pencurimovie.sbs"
+    override var mainUrl = "https://pencurimoviesubmalay26.site"
     private var directUrl: String? = null
     override var name = "MSM21 👾"
     override val hasMainPage = true
