@@ -79,7 +79,7 @@ open class Odnoklassniki : ExtractorApi() {
     }
 
     data class OkRuVideo(
-        @JsonProperty("name") val name: String,
-        @JsonProperty("url")  val url: String,
+        @param:JsonProperty("name") val name: String,
+        @param:JsonProperty("url")  val url: String,
     )
 }

@@ -17,6 +17,7 @@ class AnichinPlugin : Plugin() {
         registerExtractorAPI(OkRuHTTP())
 
         registerExtractorAPI(Rumble())
+        registerExtractorAPI(Morencius())
 
         registerExtractorAPI(StreamRuby())
         registerExtractorAPI(StreamRubyCom())

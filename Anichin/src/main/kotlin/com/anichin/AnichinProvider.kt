@@ -8,10 +8,13 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
-import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 class AnichinProvider : MainAPI() {
 
@@ -20,6 +23,7 @@ class AnichinProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "id"
     override val hasDownloadSupport = true
+    override val loadLinksTimeoutMs = 90_000L
 
     override val supportedTypes = setOf(
         TvType.Movie,
@@ -33,18 +37,6 @@ class AnichinProvider : MainAPI() {
         "anime/?status=hiatus&order=update" to "Series Drop/Hiatus",
         "anime/?type=movie&order=update" to "Movie"
     )
-
-    private val fastVideoHosts = setOf(
-        "ok.ru",
-        "odnoklassniki",
-        "rumble.com"
-    )
-
-    private fun isFastVideoHost(url: String): Boolean {
-        return fastVideoHosts.any { host ->
-            url.contains(host, ignoreCase = true)
-        }
-    }
 
     private fun Element.getImageUrl(): String? {
         val imageUrl = listOf(
@@ -79,8 +71,11 @@ class AnichinProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
+        val baseUrl = "$mainUrl/${request.data.trimStart('/')}"
+        val separator = if (baseUrl.contains('?')) "&" else "?"
         val document = app.get(
-            "${mainUrl}/${request.data}&page=$page"
+            "$baseUrl${separator}page=$page",
+            timeout = PAGE_TIMEOUT_SECONDS
         ).document
 
         val home = document
@@ -93,60 +88,64 @@ class AnichinProvider : MainAPI() {
                 list = home,
                 isHorizontalImages = false
             ),
-            hasNext = true
+            hasNext = document.selectFirst(".hpage a.r[href]") != null
         )
     }
 
-    private fun Element.toSearchResult(): SearchResponse {
-        val title = select("div.bsx > a")
-            .attr("title")
-            .trim()
-
-        val href = fixUrl(
-            select("div.bsx > a")
-                .attr("href")
-        )
+    private fun Element.toSearchResult(): SearchResponse? {
+        val anchor = selectFirst("div.bsx > a[href]") ?: return null
+        val title = anchor.attr("title").trim()
+            .ifBlank { selectFirst(".tt, h2")?.text()?.trim().orEmpty() }
+        val href = anchor.attr("href").trim()
+            .takeIf { it.isNotBlank() }
+            ?.let(::fixUrl)
+            ?: return null
+        if (title.isBlank()) return null
 
         val posterUrl = selectFirst("div.bsx > a img")
             ?.getImageUrl()
             ?.let { fixUrlNull(it) }
 
-        return newAnimeSearchResponse(
-            title,
-            href,
-            TvType.Anime
-        ) {
-            this.posterUrl = posterUrl
+        val isMovie = selectFirst(".typez")
+            ?.text()
+            ?.contains("Movie", ignoreCase = true) == true
+
+        return if (isMovie) {
+            newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = posterUrl
+            }
+        } else {
+            newAnimeSearchResponse(title, href, TvType.Anime) {
+                this.posterUrl = posterUrl
+            }
         }
     }
 
     override suspend fun search(
         query: String
-    ): List<SearchResponse> {
-        val searchResponse = mutableListOf<SearchResponse>()
+    ): List<SearchResponse> = coroutineScope {
         val searchQuery = URLEncoder.encode(query, "UTF-8")
 
-        for (page in 1..3) {
-            val document = app.get(
-                "${mainUrl}/page/$page/?s=$searchQuery"
-            ).document
-
-            val results = document
-                .select("div.listupd > article")
-                .mapNotNull { it.toSearchResult() }
-
-            if (results.isEmpty()) break
-            searchResponse.addAll(results)
-        }
-
-        return searchResponse.distinctBy { it.url }
+        (1..MAX_SEARCH_PAGES).map { page ->
+            async {
+                tryOrNull {
+                    app.get(
+                        "$mainUrl/page/$page/?s=$searchQuery",
+                        timeout = PAGE_TIMEOUT_SECONDS
+                    ).document
+                        .select("div.listupd > article")
+                        .mapNotNull { it.toSearchResult() }
+                }.orEmpty()
+            }
+        }.awaitAll().flatten().distinctBy { it.url }
     }
 
     override suspend fun load(
         url: String
     ): LoadResponse {
         val document = app.get(
-            fixUrl(url)
+            fixUrl(url),
+            timeout = PAGE_TIMEOUT_SECONDS
         ).document
 
         val title = document
@@ -154,6 +153,9 @@ class AnichinProvider : MainAPI() {
             ?.text()
             ?.trim()
             .orEmpty()
+        if (title.isBlank()) {
+            throw ErrorLoadingException("Anichin: title not found")
+        }
 
         val poster = (
             document
@@ -175,6 +177,26 @@ class AnichinProvider : MainAPI() {
             ?.text()
             .orEmpty()
 
+        val genres = document.select(".genxed a")
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() }
+
+        val year = RELEASE_YEAR.find(type)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+
+        val showStatus = when {
+            type.contains("Ongoing", ignoreCase = true) -> ShowStatus.Ongoing
+            type.contains("Completed", ignoreCase = true) -> ShowStatus.Completed
+            else -> null
+        }
+
+        val recommendations = document
+            .select("div.listupd > article")
+            .mapNotNull { it.toSearchResult() }
+            .distinctBy { it.url }
+
         val tvType = if (type.contains("Movie", true)) {
             TvType.Movie
         } else {
@@ -182,15 +204,21 @@ class AnichinProvider : MainAPI() {
         }
 
         return if (tvType == TvType.TvSeries) {
+            val seasonNumber = SEASON_NUMBER.find(title)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+
             val episodes = document
                 .select(".eplister li")
-                .map { episodeElement ->
+                .mapNotNull { episodeElement ->
                     val link = fixUrl(
                         episodeElement
                             .selectFirst("a")
                             ?.attr("href")
                             .orEmpty()
                     )
+                    if (link.isBlank()) return@mapNotNull null
 
                     val episodeTitle = episodeElement
                         .selectFirst(".epl-title")
@@ -216,22 +244,26 @@ class AnichinProvider : MainAPI() {
                         ?.let { fixUrlNull(it) }
                         ?: fixUrlNull(poster)
 
-                    val cleanTitle = episodeTitle
-                        .replace(
-                            Regex(
-                                "Episode\\s*\\d+\\s*Subtitle Indonesia",
-                                RegexOption.IGNORE_CASE
-                            ),
-                            ""
-                        )
-                        .replace(
-                            "Subtitle Indonesia",
-                            ""
-                        )
-                        .trim()
+                    val episodeNumber = episodeElement
+                        .selectFirst(".epl-num")
+                        ?.text()
+                        ?.let { EPISODE_NUMBER.find(it)?.value?.toIntOrNull() }
+                        ?: EPISODE_IN_TITLE.find(episodeTitle)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
 
-                    val episodeName =
-                        "- $cleanTitle $episodeSub Indonesia".trim()
+                    val baseEpisodeName = episodeNumber
+                        ?.let { "Episode $it" }
+                        ?: episodeTitle
+                            .replace("Subtitle Indonesia", "", ignoreCase = true)
+                            .trim()
+                            .ifBlank { "Episode" }
+
+                    val episodeName = episodeSub
+                        .takeIf { it.isNotBlank() }
+                        ?.let { "$baseEpisodeName - $it Indonesia" }
+                        ?: baseEpisodeName
 
                     val episodeDescription =
                         episodeDate
@@ -240,6 +272,8 @@ class AnichinProvider : MainAPI() {
 
                     newEpisode(link) {
                         this.name = episodeName
+                        this.season = seasonNumber
+                        this.episode = episodeNumber
                         this.posterUrl = episodePoster
                         this.description = episodeDescription
                     }
@@ -253,7 +287,11 @@ class AnichinProvider : MainAPI() {
                 episodes
             ) {
                 this.posterUrl = fixUrlNull(poster)
+                this.year = year
                 this.plot = description
+                this.tags = genres
+                this.recommendations = recommendations
+                this.showStatus = showStatus
             }
         } else {
             val movieHref = document
@@ -269,22 +307,21 @@ class AnichinProvider : MainAPI() {
                 movieHref
             ) {
                 this.posterUrl = fixUrlNull(poster)
+                this.year = year
                 this.plot = description
+                this.tags = genres
+                this.recommendations = recommendations
             }
         }
     }
 
-    /*
-     * True rolling bounded concurrency.
-     *
-     * A maximum of [concurrency] jobs may execute at the same time.
-     * As soon as one job finishes, the next waiting item may start
-     * immediately. Scan 2 still cannot begin until this whole function
-     * returns for Scan 1.
+    /**
+     * Rolling bounded concurrency. A waiting item starts as soon as one active
+     * item finishes, without waiting for a whole fixed batch.
      */
     private suspend fun <T> boundedParallelForEach(
         items: List<T>,
-        concurrency: Int = 4,
+        concurrency: Int = MAX_PLAYER_CONCURRENCY,
         block: suspend (T) -> Unit
     ) = coroutineScope {
         val semaphore = Semaphore(concurrency.coerceAtLeast(1))
@@ -296,7 +333,7 @@ class AnichinProvider : MainAPI() {
                         block(item)
                     } catch (e: CancellationException) {
                         throw e
-                    } catch (_: Throwable) {
+                    } catch (_: Exception) {
                         // A dead host must not cancel the remaining scan.
                     }
                 }
@@ -313,41 +350,162 @@ class AnichinProvider : MainAPI() {
             block()
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Throwable) {
+        } catch (_: Exception) {
             null
         }
     }
 
-    private suspend fun safeLoadExtractor(
+    private suspend fun fetchDocument(
+        url: String,
+        referer: String
+    ): Document? {
+        return withTimeoutOrNull(PLAYER_REQUEST_TIMEOUT_MS) {
+            tryOrNull {
+                app.get(
+                    url,
+                    headers = mapOf(
+                        "Referer" to referer,
+                        "Origin" to mainUrl,
+                        "User-Agent" to USER_AGENT
+                    ),
+                    timeout = PLAYER_REQUEST_TIMEOUT_SECONDS
+                ).document
+            }
+        }
+    }
+
+    private fun Document.collectPlayerUrls(baseUrl: String): List<String> {
+        return select("iframe[src], iframe[data-src]")
+            .mapNotNull { frame ->
+                frame.attr("data-src")
+                    .ifBlank { frame.attr("src") }
+                    .trim()
+                    .takeIf { it.isNotBlank() }
+                    ?.let { raw ->
+                        if (raw.startsWith("//")) {
+                            "https:$raw"
+                        } else if (raw.startsWith("http://", true) ||
+                            raw.startsWith("https://", true)
+                        ) {
+                            raw
+                        } else {
+                            runCatching {
+                                java.net.URI(baseUrl).resolve(raw).toString()
+                            }.getOrDefault(raw)
+                        }
+                    }
+            }
+            .filter { it.startsWith("http://", true) || it.startsWith("https://", true) }
+            .distinct()
+    }
+
+    private suspend fun tryLoadExtractor(
         url: String,
         referer: String,
-        loadedUrls: MutableSet<String>,
+        attemptedUrls: MutableSet<String>,
+        emittedUrls: MutableSet<String>,
+        foundStream: AtomicBoolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        if (!attemptedUrls.add(url)) return false
+
+        val emitted = AtomicBoolean(false)
+
+        return try {
+            withTimeoutOrNull(EXTRACTOR_TIMEOUT_MS) {
+                loadExtractor(
+                    url,
+                    referer,
+                    subtitleCallback
+                ) { link ->
+                    // Unknown is retained because many HD master playlists do
+                    // not expose a numeric quality before playback begins.
+                    val quality = link.quality
+                    if ((quality <= 0 || quality >= MIN_VIDEO_QUALITY) &&
+                        emittedUrls.add(link.url)
+                    ) {
+                        emitted.set(true)
+                        foundStream.set(true)
+                        callback(link)
+                    }
+                }
+            }
+
+            emitted.get()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private suspend fun resolvePlayerPipeline(
+        wrapperUrl: String,
+        pageUrl: String,
+        attemptedUrls: MutableSet<String>,
+        emittedUrls: MutableSet<String>,
+        foundStream: AtomicBoolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        if (!loadedUrls.add(url)) return
-
-        try {
-            loadExtractor(
-                url,
-                referer,
-                subtitleCallback
-            ) { link ->
-                /*
-                 * Keep UNKNOWN quality because some extractors expose an HD
-                 * stream without a reliable numeric quality value.
-                 * Drop only streams explicitly identified as 1..719p.
-                 */
-                val quality = link.quality
-                if (quality <= 0 || quality >= 720) {
-                    callback(link)
-                }
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            // Failed extractor: continue with the remaining hosts.
+        // Some sites occasionally put the real host directly inside Mobius.
+        if (!isSiteUrl(wrapperUrl)) {
+            val directSuccess = tryLoadExtractor(
+                wrapperUrl,
+                pageUrl,
+                attemptedUrls,
+                emittedUrls,
+                foundStream,
+                subtitleCallback,
+                callback
+            )
+            if (directSuccess) return
         }
+
+        val wrapperDocument = fetchDocument(wrapperUrl, pageUrl) ?: return
+        val playerUrls = wrapperDocument.collectPlayerUrls(wrapperUrl)
+
+        for (playerUrl in playerUrls) {
+            val playerSuccess = tryLoadExtractor(
+                playerUrl,
+                wrapperUrl,
+                attemptedUrls,
+                emittedUrls,
+                foundStream,
+                subtitleCallback,
+                callback
+            )
+            if (playerSuccess) continue
+
+            // Only inspect another iframe level when the direct extractor did
+            // not produce an accepted 720p, higher, or unknown-quality link.
+            val nestedDocument = fetchDocument(playerUrl, wrapperUrl) ?: continue
+            val nestedUrls = nestedDocument.collectPlayerUrls(playerUrl)
+
+            for (nestedUrl in nestedUrls) {
+                tryLoadExtractor(
+                    nestedUrl,
+                    playerUrl,
+                    attemptedUrls,
+                    emittedUrls,
+                    foundStream,
+                    subtitleCallback,
+                    callback
+                )
+            }
+        }
+    }
+
+    private fun isSiteUrl(url: String): Boolean {
+        val siteHost = runCatching { java.net.URI(mainUrl).host }
+            .getOrNull()
+            ?: return false
+        val urlHost = runCatching { java.net.URI(url).host }
+            .getOrNull()
+            ?: return false
+
+        return urlHost.equals(siteHost, ignoreCase = true)
     }
 
     override suspend fun loadLinks(
@@ -357,21 +515,16 @@ class AnichinProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val episodeUrl = fixUrl(data)
-        val document = app.get(episodeUrl).document
+        val document = app.get(
+            episodeUrl,
+            timeout = PAGE_TIMEOUT_SECONDS
+        ).document
 
-        /*
-         * These collections are touched by several coroutines during Scan 1
-         * and Scan 2, therefore they must be thread safe.
-         */
-        val loadedUrls = Collections.synchronizedSet(mutableSetOf<String>())
-        val secondScanCandidates =
-            Collections.synchronizedMap(linkedMapOf<String, String>())
+        val attemptedUrls = ConcurrentHashMap.newKeySet<String>()
+        val emittedUrls = ConcurrentHashMap.newKeySet<String>()
+        val foundStream = AtomicBoolean(false)
 
-        /*
-         * Decode all Mobius entries first. This is local work and avoids
-         * mixing base64 parsing with network scheduling.
-         */
-        val streamUrls = document
+        val players = document
             .select(".mobius option")
             .mapNotNull { option ->
                 val encodedValue = option.attr("value").trim()
@@ -381,157 +534,88 @@ class AnichinProvider : MainAPI() {
                     Jsoup.parse(base64Decode(encodedValue))
                 }.getOrNull() ?: return@mapNotNull null
 
-                val iframeUrl = decodedDocument
+                val wrapperUrl = decodedDocument
                     .selectFirst("iframe[src]")
                     ?.attr("src")
                     ?.trim()
                     .orEmpty()
 
-                iframeUrl
+                wrapperUrl
                     .takeIf { it.isNotBlank() }
-                    ?.let { fixUrl(it) }
+                    ?.let { PlayerOption(option.text().trim(), fixUrl(it)) }
             }
-            .distinct()
+            .distinctBy { it.url }
+            .sortedBy { it.priority() }
+            .take(MAX_PLAYER_OPTIONS)
 
-        /*
-         * Fast direct hosts get first priority and are completely handled
-         * before wrapper discovery begins.
-         */
-        streamUrls
-            .filter { isFastVideoHost(it) }
-            .forEach { streamUrl ->
-                safeLoadExtractor(
-                    streamUrl,
+        if (players.isEmpty()) {
+            val staticPlayers = document.collectPlayerUrls(episodeUrl)
+            boundedParallelForEach(staticPlayers) { playerUrl ->
+                tryLoadExtractor(
+                    playerUrl,
                     episodeUrl,
-                    loadedUrls,
+                    attemptedUrls,
+                    emittedUrls,
+                    foundStream,
                     subtitleCallback,
                     callback
                 )
             }
-
-        /*
-         * Scan 1:
-         * Wrapper discovery with rolling bounded parallelism.
-         * Maximum four wrapper requests run together. When one finishes,
-         * the next waiting wrapper starts immediately.
-         *
-         * Fast hosts found inside a wrapper are emitted immediately.
-         * Non-fast player URLs are queued for Scan 2.
-         * Only one nested iframe level is checked.
-         */
-        val wrapperUrls = streamUrls.filterNot { isFastVideoHost(it) }
-
-        boundedParallelForEach(
-            items = wrapperUrls,
-            concurrency = 4
-        ) { streamUrl ->
-            val streamDocument = tryOrNull {
-                app.get(
-                    streamUrl,
-                    headers = mapOf(
-                        "Referer" to episodeUrl,
-                        "Origin" to mainUrl,
-                        "User-Agent" to USER_AGENT
-                    )
-                ).document
-            } ?: return@boundedParallelForEach
-
-            val playerUrls = streamDocument
-                .select("iframe[src]")
-                .mapNotNull { iframe ->
-                    iframe.attr("src")
-                        .trim()
-                        .takeIf { it.isNotBlank() }
-                        ?.let { fixUrl(it) }
-                }
-                .distinct()
-
-            playerUrls.forEach playerLoop@ { playerUrl ->
-                if (isFastVideoHost(playerUrl)) {
-                    safeLoadExtractor(
-                        playerUrl,
-                        streamUrl,
-                        loadedUrls,
-                        subtitleCallback,
-                        callback
-                    )
-                    return@playerLoop
-                }
-
-                synchronized(secondScanCandidates) {
-                    if (!secondScanCandidates.containsKey(playerUrl)) {
-                        secondScanCandidates[playerUrl] = streamUrl
-                    }
-                }
-
-                /*
-                 * One light nested check only.
-                 * Non-fast nested URLs are queued for Scan 2.
-                 */
-                val nestedDocument = tryOrNull {
-                    app.get(
-                        playerUrl,
-                        headers = mapOf(
-                            "Referer" to streamUrl,
-                            "User-Agent" to USER_AGENT
-                        )
-                    ).document
-                } ?: return@playerLoop
-
-                nestedDocument
-                    .select("iframe[src]")
-                    .mapNotNull { nested ->
-                        nested.attr("src")
-                            .trim()
-                            .takeIf { it.isNotBlank() }
-                            ?.let { fixUrl(it) }
-                    }
-                    .distinct()
-                    .forEach nestedLoop@ { nestedUrl ->
-                        if (isFastVideoHost(nestedUrl)) {
-                            safeLoadExtractor(
-                                nestedUrl,
-                                playerUrl,
-                                loadedUrls,
-                                subtitleCallback,
-                                callback
-                            )
-                            return@nestedLoop
-                        }
-
-                        synchronized(secondScanCandidates) {
-                            if (!secondScanCandidates.containsKey(nestedUrl)) {
-                                secondScanCandidates[nestedUrl] = playerUrl
-                            }
-                        }
-                    }
-            }
+            return foundStream.get()
         }
 
-        /*
-         * Scan 2 starts only after Scan 1 has completely finished.
-         * Direct extractor scan only, maximum 12 candidates.
-         * Four extractors at most run together using rolling concurrency.
-         */
-        val scan2 = synchronized(secondScanCandidates) {
-            secondScanCandidates.entries
-                .take(12)
-                .map { it.key to it.value }
-        }
-
-        boundedParallelForEach(
-            items = scan2,
-            concurrency = 4
-        ) { (url, referer) ->
-            safeLoadExtractor(
-                url,
-                referer,
-                loadedUrls,
+        boundedParallelForEach(players) { player ->
+            resolvePlayerPipeline(
+                player.url,
+                episodeUrl,
+                attemptedUrls,
+                emittedUrls,
+                foundStream,
                 subtitleCallback,
                 callback
             )
         }
 
-        return true
+        return foundStream.get()
+    }
+
+    private fun PlayerOption.priority(): Int {
+        val value = label.lowercase()
+        return when {
+            value.contains("ok.ru") || value.contains("okru") -> 0
+            value.contains("dailymotion") -> 1
+            value.contains("rumble") -> 2
+            value.contains("streamruby") -> 3
+            value.contains("dood") -> 4
+            value.contains("vidhide") || value.contains("vidguard") -> 5
+            else -> 10
+        }
+    }
+
+    private data class PlayerOption(
+        val label: String,
+        val url: String
+    )
+
+    companion object {
+        private const val PAGE_TIMEOUT_SECONDS = 30L
+        private const val PLAYER_REQUEST_TIMEOUT_SECONDS = 15L
+        private const val PLAYER_REQUEST_TIMEOUT_MS = 16_000L
+        private const val EXTRACTOR_TIMEOUT_MS = 15_000L
+        private const val MAX_SEARCH_PAGES = 3
+        private const val MAX_PLAYER_CONCURRENCY = 4
+        private const val MAX_PLAYER_OPTIONS = 12
+        private const val MIN_VIDEO_QUALITY = 720
+
+        private val EPISODE_NUMBER = Regex("\\d+")
+        private val EPISODE_IN_TITLE = Regex(
+            "(?i)Episode\\s*(\\d+)"
+        )
+        private val SEASON_NUMBER = Regex(
+            "(?i)Season\\s*(\\d+)"
+        )
+        private val RELEASE_YEAR = Regex(
+            "(?i)Tanggal\\s+rilis[^0-9]*(?:[A-Za-z]{3}\\s+\\d{1,2},\\s*)?(\\d{4})"
+        )
     }
 }
