@@ -7,14 +7,19 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 class msm21 : MainAPI() {
@@ -55,6 +60,8 @@ class msm21 : MainAPI() {
         mainUrl = try {
             val response = app.get(candidate, timeout = 30L)
             getOrigin(response.url)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             candidate
         }
@@ -347,20 +354,127 @@ class msm21 : MainAPI() {
                 )
             }
 
-        val mirrors = if (options.isNotEmpty()) {
-            fetchMirrors(options, pageUrl)
-        } else {
-            collectStaticMirrors(response.document, pageUrl)
-        }.distinctBy { it.url }
+        val emittedUrls = ConcurrentHashMap.newKeySet<String>()
 
-        if (mirrors.isEmpty()) return false
+        if (options.isEmpty()) {
+            val staticMirrors = collectStaticMirrors(
+                response.document,
+                pageUrl
+            ).distinctBy { it.url }
+            if (staticMirrors.isEmpty()) return false
 
+            val standard = loadStandardMirrors(
+                mirrors = staticMirrors,
+                pageUrl = pageUrl,
+                subtitleCallback = subtitleCallback,
+                callback = callback,
+                emittedUrls = emittedUrls
+            )
+            if (standard.foundStream) return true
+
+            return probeWithWebView(
+                mirrors = standard.unresolved,
+                pageUrl = pageUrl,
+                callback = callback,
+                emittedUrls = emittedUrls,
+                maxMirrors = MAX_WEBVIEW_MIRRORS
+            )
+        }
+
+        // Episod biasanya mempunyai beberapa host native. Ambil semuanya serentak
+        // supaya link pertama boleh dihantar tanpa menunggu player JavaScript.
+        val fastOptions = options
+            .filter { it.isFastNativeOption() }
+            .sortedBy { it.fastPriority() }
+
+        if (fastOptions.isNotEmpty()) {
+            // Setiap host bermula terus. Callback daripada host terpantas boleh
+            // sampai sementara host lain masih melengkapkan senarai server.
+            val nativeResults = coroutineScope {
+                val ajaxSemaphore = Semaphore(AJAX_BATCH_SIZE)
+                fastOptions.take(MAX_FAST_OPTIONS).map { option ->
+                    async {
+                        val fastMirrors = ajaxSemaphore.withPermit {
+                            fetchMirror(option, pageUrl)
+                                .distinctBy { it.url }
+                        }
+                        loadStandardMirrors(
+                            mirrors = fastMirrors,
+                            pageUrl = pageUrl,
+                            subtitleCallback = subtitleCallback,
+                            callback = callback,
+                            emittedUrls = emittedUrls
+                        )
+                    }
+                }.awaitAll()
+            }
+
+            // Semua host native telah dicuba. Jika sekurang-kurangnya satu berjaya,
+            // jangan hidupkan WebView yang lebih berat.
+            if (nativeResults.any { it.foundStream }) return true
+        }
+
+        // Filem lazimnya menggunakan Abyss atau keluarga PlayerX. Proses dua
+        // pilihan pada satu masa dan berhenti sebaik sahaja satu link boleh main.
+        val fallbackOptions = options
+            .sortedBy { it.fallbackPriority() }
+            .take(MAX_FALLBACK_OPTIONS)
+
+        var webViewBudget = MAX_WEBVIEW_MIRRORS
+        val probedUrls = mutableSetOf<String>()
+
+        for (batch in fallbackOptions.chunked(FALLBACK_BATCH_SIZE)) {
+            val mirrors = fetchMirrors(batch, pageUrl)
+                .distinctBy { it.url }
+            if (mirrors.isEmpty()) continue
+
+            val standard = loadStandardMirrors(
+                mirrors = mirrors,
+                pageUrl = pageUrl,
+                subtitleCallback = subtitleCallback,
+                callback = callback,
+                emittedUrls = emittedUrls
+            )
+            if (standard.foundStream) return true
+
+            if (webViewBudget > 0) {
+                val candidates = standard.unresolved
+                    .filter { probedUrls.add(it.url) }
+                    .sortedBy { it.webViewPriority() }
+                    .take(webViewBudget)
+
+                if (probeWithWebView(
+                        mirrors = candidates,
+                        pageUrl = pageUrl,
+                        callback = callback,
+                        emittedUrls = emittedUrls,
+                        maxMirrors = webViewBudget
+                    )
+                ) return true
+
+                webViewBudget -= candidates.size
+            }
+
+            if (webViewBudget <= 0) break
+        }
+
+        invalidateMirrorCache(pageUrl)
+        return false
+    }
+
+    private suspend fun loadStandardMirrors(
+        mirrors: List<EmbedMirror>,
+        pageUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+        emittedUrls: MutableSet<String>
+    ): ExtractionBatchResult = coroutineScope {
         val foundStream = AtomicBoolean(false)
-        val unresolved = coroutineScope {
-            mirrors.map { mirror ->
-                async {
-                    val emitted = AtomicBoolean(false)
-                    try {
+        val unresolved = mirrors.distinctBy { it.url }.map { mirror ->
+            async {
+                val emitted = AtomicBoolean(false)
+                try {
+                    withTimeoutOrNull(STANDARD_EXTRACTOR_TIMEOUT_MS) {
                         loadExtractor(
                             mirror.url,
                             pageUrl,
@@ -368,34 +482,51 @@ class msm21 : MainAPI() {
                         ) { link ->
                             emitted.set(true)
                             foundStream.set(true)
-                            callback(link)
+                            if (emittedUrls.add(link.url)) callback(link)
                         }
-                    } catch (_: Exception) {
-                        false
                     }
-
-                    mirror.takeUnless { emitted.get() }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    false
                 }
-            }.awaitAll().filterNotNull()
-        }
 
-        if (foundStream.get()) return true
+                mirror.takeUnless { emitted.get() }
+            }
+        }.awaitAll().filterNotNull()
 
-        val probeCandidates = unresolved
+        ExtractionBatchResult(
+            foundStream = foundStream.get(),
+            unresolved = unresolved
+        )
+    }
+
+    private suspend fun probeWithWebView(
+        mirrors: List<EmbedMirror>,
+        pageUrl: String,
+        callback: (ExtractorLink) -> Unit,
+        emittedUrls: MutableSet<String>,
+        maxMirrors: Int
+    ): Boolean {
+        for (mirror in mirrors
+            .distinctBy { it.url }
             .sortedBy { it.webViewPriority() }
-            .take(MAX_WEBVIEW_MIRRORS)
-
-        for (mirror in probeCandidates) {
+            .take(maxMirrors)
+        ) {
             val streams = try {
                 MsmWebViewProbe.extractFast(
                     url = mirror.url,
                     referer = pageUrl
                 )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 emptyList()
             }
 
             streams.forEach { stream ->
+                if (!emittedUrls.add(stream.url)) return@forEach
+
                 val headers = stream.headers
                     .filterKeys { key ->
                         key.lowercase() !in BLOCKED_VIDEO_HEADERS
@@ -425,13 +556,12 @@ class msm21 : MainAPI() {
                         this.headers = headers
                     }
                 )
-                foundStream.set(true)
             }
 
-            if (foundStream.get()) break
+            if (streams.isNotEmpty()) return true
         }
 
-        return foundStream.get()
+        return false
     }
 
     private suspend fun fetchMirrors(
@@ -453,6 +583,9 @@ class msm21 : MainAPI() {
         option: PlayerOption,
         pageUrl: String
     ): List<EmbedMirror> {
+        val cacheKey = mirrorCacheKey(option, pageUrl)
+        getCachedMirrors(cacheKey)?.let { return it }
+
         return try {
             val response = app.post(
                 "$mainUrl/wp-admin/admin-ajax.php",
@@ -471,11 +604,63 @@ class msm21 : MainAPI() {
             )
 
             val payload = tryParseJson<ZetaPlayerResponse>(response.text)
-            extractEmbedUrls(payload?.embedUrl.orEmpty(), pageUrl)
+            val mirrors = extractEmbedUrls(payload?.embedUrl.orEmpty(), pageUrl)
                 .map { EmbedMirror(it, option.label) }
+            if (mirrors.isNotEmpty()) cacheMirrors(cacheKey, mirrors)
+            mirrors
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             emptyList()
         }
+    }
+
+    private fun mirrorCacheKey(
+        option: PlayerOption,
+        pageUrl: String
+    ): String = listOf(
+        pageUrl,
+        option.post,
+        option.nume,
+        option.type
+    ).joinToString("|")
+
+    private fun getCachedMirrors(key: String): List<EmbedMirror>? {
+        val cached = MIRROR_CACHE[key] ?: return null
+        if (cached.expiresAt > System.currentTimeMillis()) {
+            return cached.mirrors
+        }
+
+        MIRROR_CACHE.remove(key, cached)
+        return null
+    }
+
+    private fun cacheMirrors(
+        key: String,
+        mirrors: List<EmbedMirror>
+    ) {
+        val now = System.currentTimeMillis()
+
+        if (MIRROR_CACHE.size >= MAX_MIRROR_CACHE_ENTRIES) {
+            MIRROR_CACHE.entries
+                .filter { it.value.expiresAt <= now }
+                .forEach { MIRROR_CACHE.remove(it.key, it.value) }
+        }
+        if (MIRROR_CACHE.size >= MAX_MIRROR_CACHE_ENTRIES) {
+            MIRROR_CACHE.clear()
+        }
+
+        MIRROR_CACHE[key] = CachedMirrors(
+            expiresAt = now + MIRROR_CACHE_TTL_MS,
+            mirrors = mirrors
+        )
+    }
+
+    private fun invalidateMirrorCache(pageUrl: String) {
+        val prefix = "$pageUrl|"
+        MIRROR_CACHE.keys
+            .filter { it.startsWith(prefix) }
+            .forEach(MIRROR_CACHE::remove)
     }
 
     private fun collectStaticMirrors(
@@ -558,6 +743,34 @@ class msm21 : MainAPI() {
             value.contains("abyss") -> 0
             value.contains("playerx") -> 1
             value.contains("veev") -> 2
+            else -> 3
+        }
+    }
+
+    private fun PlayerOption.isFastNativeOption(): Boolean {
+        val value = label.lowercase()
+        return FAST_NATIVE_SERVER_HINTS.any(value::contains)
+    }
+
+    private fun PlayerOption.fastPriority(): Int {
+        val value = label.lowercase()
+        return when {
+            value.contains("fire") || value.contains("wish") -> 0
+            value.contains("playm") -> 1
+            value.contains("byse") -> 2
+            value.contains("voe") -> 3
+            value.contains("mix") -> 4
+            value.contains("dsv") || value.contains("dood") -> 5
+            else -> 6
+        }
+    }
+
+    private fun PlayerOption.fallbackPriority(): Int {
+        val value = label.lowercase()
+        return when {
+            value.contains("abyss") -> 0
+            value.contains("veev") -> 1
+            value.contains("player") || value.contains("ezpla") -> 2
             else -> 3
         }
     }
@@ -666,13 +879,43 @@ class msm21 : MainAPI() {
         val label: String
     )
 
+    private data class ExtractionBatchResult(
+        val foundStream: Boolean,
+        val unresolved: List<EmbedMirror>
+    )
+
+    private data class CachedMirrors(
+        val expiresAt: Long,
+        val mirrors: List<EmbedMirror>
+    )
+
     private data class ZetaPlayerResponse(
         @param:JsonProperty("embed_url") val embedUrl: String? = null
     )
 
     companion object {
         private const val AJAX_BATCH_SIZE = 4
+        private const val MAX_FAST_OPTIONS = 8
+        private const val FALLBACK_BATCH_SIZE = 2
+        private const val MAX_FALLBACK_OPTIONS = 6
         private const val MAX_WEBVIEW_MIRRORS = 3
+        private const val STANDARD_EXTRACTOR_TIMEOUT_MS = 12_000L
+        private const val MIRROR_CACHE_TTL_MS = 90_000L
+        private const val MAX_MIRROR_CACHE_ENTRIES = 80
+
+        private val MIRROR_CACHE = ConcurrentHashMap<String, CachedMirrors>()
+
+        private val FAST_NATIVE_SERVER_HINTS = listOf(
+            "fire",
+            "wish",
+            "byse",
+            "mix",
+            "dsv",
+            "dood",
+            "hgl",
+            "playm",
+            "voe"
+        )
 
         private val YEAR_AT_END = Regex("\\s*\\(((?:19|20)\\d{2})\\)\\s*$")
         private val EPISODE_BADGE = Regex("(?i)EP\\s*(\\d+)")
