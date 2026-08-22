@@ -1,4 +1,4 @@
-package com.pencurimovie
+package com.msm21
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
@@ -12,10 +12,10 @@ import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.atomic.AtomicBoolean
-class Pencurimovie : MainAPI() {
+class msm21 : MainAPI() {
     override var mainUrl = "https://ww21.pencurimovie.sbs"
     private var directUrl: String? = null
-    override var name = "PencuriMovie 👾"
+    override var name = "MSM21 👾"
     override val hasMainPage = true
     override var lang = "ms"
     override val hasDownloadSupport = true
