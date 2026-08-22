@@ -1,4 +1,4 @@
-package com.msm21
+package com.pencurimovie
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
@@ -12,10 +12,10 @@ import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.atomic.AtomicBoolean
-class msm21 : MainAPI() {
-    override var mainUrl = "https://pencurimoviesubmalay26.site"
+class Pencurimovie : MainAPI() {
+    override var mainUrl = "https://ww21.pencurimovie.sbs"
     private var directUrl: String? = null
-    override var name = "MSM21 👾"
+    override var name = "PencuriMovie 👾"
     override val hasMainPage = true
     override var lang = "ms"
     override val hasDownloadSupport = true
@@ -550,4 +550,81 @@ class msm21 : MainAPI() {
             if (!isPencuriMovieHost ||
                 currentUri.host.isNullOrBlank()
             ) {
-                
+                target
+            } else {
+                URI(
+                    currentUri.scheme ?: targetUri.scheme,
+                    targetUri.userInfo,
+                    currentUri.host,
+                    currentUri.port,
+                    targetUri.path,
+                    targetUri.query,
+                    targetUri.fragment
+                ).toString()
+            }
+        } catch (_: Exception) {
+            target
+        }
+    }
+    private fun resolveUrl(base: String, value: String): String {
+        val target = value.trim()
+        if (target.isBlank()) return ""
+        return try {
+            URI(base).resolve(target).toString()
+        } catch (_: Exception) {
+            target
+        }
+    }
+    private fun getOrigin(url: String): String {
+        return try {
+            val uri = URI(url)
+            val scheme = uri.scheme
+                ?: return url.removeSuffix("/")
+            val host = uri.host
+                ?: return url.removeSuffix("/")
+            val port = if (uri.port != -1) ":${uri.port}" else ""
+            "$scheme://$host$port"
+        } catch (_: Exception) {
+            url.removeSuffix("/")
+        }
+    }
+    private fun isNonVideoFrame(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("youtube.com") ||
+            lower.contains("youtu.be") ||
+            lower.contains("google.com/recaptcha") ||
+            lower.contains("doubleclick.net")
+    }
+    private fun Element.getEmbedValues(): List<String> {
+        return listOf(
+            attr("data-src"),
+            attr("src"),
+            attr("data-video"),
+            attr("data-url"),
+            attr("data-embed"),
+            attr("data-link"),
+            attr("data-player"),
+            attr("href")
+        )
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+    }
+    private fun Element.getImageAttr(): String {
+        val srcAttr = attr("src").trim()
+        val dataOriginal = attr("data-original").trim()
+        val dataSrc = attr("data-src").trim()
+        val dataLazySrc = attr("data-lazy-src").trim()
+        return when {
+            srcAttr.isNotBlank() &&
+                !srcAttr.startsWith("data:image") -> srcAttr
+            dataOriginal.isNotBlank() &&
+                !dataOriginal.startsWith("data:image") -> dataOriginal
+            dataSrc.isNotBlank() &&
+                !dataSrc.startsWith("data:image") -> dataSrc
+            dataLazySrc.isNotBlank() &&
+                !dataLazySrc.startsWith("data:image") -> dataLazySrc
+            else -> srcAttr
+        }
+    }
+}
