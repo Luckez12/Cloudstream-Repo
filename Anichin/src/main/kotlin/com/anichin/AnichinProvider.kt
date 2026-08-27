@@ -5,7 +5,10 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
@@ -316,31 +319,63 @@ class AnichinProvider : MainAPI() {
     }
 
     /**
-     * Rolling bounded concurrency. A waiting item starts as soon as one active
-     * item finishes, without waiting for a whole fixed batch.
+     * Runs a bounded group until one item succeeds. After the first success,
+     * keep a short grace period for another ready link, then cancel slow work.
      */
-    private suspend fun <T> boundedParallelForEach(
+    private suspend fun <T> firstSuccessful(
         items: List<T>,
         concurrency: Int = MAX_PLAYER_CONCURRENCY,
-        block: suspend (T) -> Unit
-    ) = coroutineScope {
-        val semaphore = Semaphore(concurrency.coerceAtLeast(1))
+        block: suspend (T) -> Boolean
+    ): Boolean = coroutineScope {
+        if (items.isEmpty()) return@coroutineScope false
 
-        items.map { item ->
-            async {
-                semaphore.withPermit {
+        val semaphore = Semaphore(concurrency.coerceAtLeast(1))
+        val results = Channel<Boolean>(Channel.UNLIMITED)
+
+        val jobs = items.map { item ->
+            launch {
+                val succeeded = semaphore.withPermit {
                     try {
                         block(item)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (_: Exception) {
-                        // A dead host must not cancel the remaining scan.
+                        false
                     }
                 }
-            }
-        }.awaitAll()
 
-        Unit
+                results.trySend(succeeded)
+            }
+        }
+
+        var completed = 0
+        var succeeded = false
+
+        while (completed < jobs.size) {
+            val result = results.receive()
+            completed++
+            if (result) {
+                succeeded = true
+                break
+            }
+        }
+
+        if (succeeded && completed < jobs.size) {
+            withTimeoutOrNull(SUCCESS_GRACE_PERIOD_MS) {
+                while (completed < jobs.size) {
+                    results.receive()
+                    completed++
+                }
+            }
+        }
+
+        jobs.forEach { job ->
+            if (job.isActive) job.cancel()
+        }
+        jobs.joinAll()
+        results.close()
+
+        succeeded
     }
 
     private suspend fun <T> tryOrNull(
@@ -404,7 +439,6 @@ class AnichinProvider : MainAPI() {
         referer: String,
         attemptedUrls: MutableSet<String>,
         emittedUrls: MutableSet<String>,
-        foundStream: AtomicBoolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
@@ -419,14 +453,10 @@ class AnichinProvider : MainAPI() {
                     referer,
                     subtitleCallback
                 ) { link ->
-                    // Unknown is retained because many HD master playlists do
-                    // not expose a numeric quality before playback begins.
-                    val quality = link.quality
-                    if ((quality <= 0 || quality >= MIN_VIDEO_QUALITY) &&
-                        emittedUrls.add(link.url)
-                    ) {
+                    // Keep every available quality. CloudStream can rank the
+                    // links, while SD-only mirrors remain valid fallbacks.
+                    if (emittedUrls.add(link.url)) {
                         emitted.set(true)
-                        foundStream.set(true)
                         callback(link)
                     }
                 }
@@ -445,10 +475,9 @@ class AnichinProvider : MainAPI() {
         pageUrl: String,
         attemptedUrls: MutableSet<String>,
         emittedUrls: MutableSet<String>,
-        foundStream: AtomicBoolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ) {
+    ): Boolean {
         // Some sites occasionally put the real host directly inside Mobius.
         if (!isSiteUrl(wrapperUrl)) {
             val directSuccess = tryLoadExtractor(
@@ -456,14 +485,13 @@ class AnichinProvider : MainAPI() {
                 pageUrl,
                 attemptedUrls,
                 emittedUrls,
-                foundStream,
                 subtitleCallback,
                 callback
             )
-            if (directSuccess) return
+            if (directSuccess) return true
         }
 
-        val wrapperDocument = fetchDocument(wrapperUrl, pageUrl) ?: return
+        val wrapperDocument = fetchDocument(wrapperUrl, pageUrl) ?: return false
         val playerUrls = wrapperDocument.collectPlayerUrls(wrapperUrl)
 
         for (playerUrl in playerUrls) {
@@ -472,29 +500,30 @@ class AnichinProvider : MainAPI() {
                 wrapperUrl,
                 attemptedUrls,
                 emittedUrls,
-                foundStream,
                 subtitleCallback,
                 callback
             )
-            if (playerSuccess) continue
+            if (playerSuccess) return true
 
             // Only inspect another iframe level when the direct extractor did
-            // not produce an accepted 720p, higher, or unknown-quality link.
+            // not produce a playable link.
             val nestedDocument = fetchDocument(playerUrl, wrapperUrl) ?: continue
             val nestedUrls = nestedDocument.collectPlayerUrls(playerUrl)
 
             for (nestedUrl in nestedUrls) {
-                tryLoadExtractor(
+                val nestedSuccess = tryLoadExtractor(
                     nestedUrl,
                     playerUrl,
                     attemptedUrls,
                     emittedUrls,
-                    foundStream,
                     subtitleCallback,
                     callback
                 )
+                if (nestedSuccess) return true
             }
         }
+
+        return false
     }
 
     private fun isSiteUrl(url: String): Boolean {
@@ -522,7 +551,6 @@ class AnichinProvider : MainAPI() {
 
         val attemptedUrls = ConcurrentHashMap.newKeySet<String>()
         val emittedUrls = ConcurrentHashMap.newKeySet<String>()
-        val foundStream = AtomicBoolean(false)
 
         val players = document
             .select(".mobius option")
@@ -550,33 +578,42 @@ class AnichinProvider : MainAPI() {
 
         if (players.isEmpty()) {
             val staticPlayers = document.collectPlayerUrls(episodeUrl)
-            boundedParallelForEach(staticPlayers) { playerUrl ->
+            return firstSuccessful(staticPlayers) { playerUrl ->
                 tryLoadExtractor(
                     playerUrl,
                     episodeUrl,
                     attemptedUrls,
                     emittedUrls,
-                    foundStream,
                     subtitleCallback,
                     callback
                 )
             }
-            return foundStream.get()
         }
 
-        boundedParallelForEach(players) { player ->
+        val preferredPlayers = players.take(FAST_PLAYER_OPTIONS)
+        val preferredSuccess = firstSuccessful(preferredPlayers) { player ->
             resolvePlayerPipeline(
                 player.url,
                 episodeUrl,
                 attemptedUrls,
                 emittedUrls,
-                foundStream,
                 subtitleCallback,
                 callback
             )
         }
+        if (preferredSuccess) return true
 
-        return foundStream.get()
+        val fallbackPlayers = players.drop(FAST_PLAYER_OPTIONS)
+        return firstSuccessful(fallbackPlayers) { player ->
+            resolvePlayerPipeline(
+                player.url,
+                episodeUrl,
+                attemptedUrls,
+                emittedUrls,
+                subtitleCallback,
+                callback
+            )
+        }
     }
 
     private fun PlayerOption.priority(): Int {
@@ -604,8 +641,9 @@ class AnichinProvider : MainAPI() {
         private const val EXTRACTOR_TIMEOUT_MS = 15_000L
         private const val MAX_SEARCH_PAGES = 3
         private const val MAX_PLAYER_CONCURRENCY = 4
+        private const val FAST_PLAYER_OPTIONS = 4
         private const val MAX_PLAYER_OPTIONS = 12
-        private const val MIN_VIDEO_QUALITY = 720
+        private const val SUCCESS_GRACE_PERIOD_MS = 1_500L
 
         private val EPISODE_NUMBER = Regex("\\d+")
         private val EPISODE_IN_TITLE = Regex(
