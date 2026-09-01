@@ -1,6 +1,7 @@
 package com.anichin
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
@@ -20,6 +21,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 class AnichinProvider : MainAPI() {
+
+    private val cloudflareKiller = CloudflareKiller()
 
     override var mainUrl = "https://anichin.moe"
     override var name = "Anichin 👾"
@@ -78,6 +81,7 @@ class AnichinProvider : MainAPI() {
         val separator = if (baseUrl.contains('?')) "&" else "?"
         val document = app.get(
             "$baseUrl${separator}page=$page",
+            interceptor = cloudflareKiller,
             timeout = PAGE_TIMEOUT_SECONDS
         ).document
 
@@ -134,6 +138,7 @@ class AnichinProvider : MainAPI() {
                 tryOrNull {
                     app.get(
                         "$mainUrl/page/$page/?s=$searchQuery",
+                        interceptor = cloudflareKiller,
                         timeout = PAGE_TIMEOUT_SECONDS
                     ).document
                         .select("div.listupd > article")
@@ -148,6 +153,7 @@ class AnichinProvider : MainAPI() {
     ): LoadResponse {
         val document = app.get(
             fixUrl(url),
+            interceptor = cloudflareKiller,
             timeout = PAGE_TIMEOUT_SECONDS
         ).document
 
@@ -403,6 +409,7 @@ class AnichinProvider : MainAPI() {
                         "Origin" to mainUrl,
                         "User-Agent" to USER_AGENT
                     ),
+                    interceptor = cloudflareKiller,
                     timeout = PLAYER_REQUEST_TIMEOUT_SECONDS
                 ).document
             }
@@ -546,6 +553,7 @@ class AnichinProvider : MainAPI() {
         val episodeUrl = fixUrl(data)
         val document = app.get(
             episodeUrl,
+            interceptor = cloudflareKiller,
             timeout = PAGE_TIMEOUT_SECONDS
         ).document
 
