@@ -1,5 +1,6 @@
 package com.anichin
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
@@ -11,6 +12,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
@@ -21,8 +24,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 class AnichinProvider : MainAPI() {
-
-    private val cloudflareKiller = CloudflareKiller()
 
     override var mainUrl = "https://anichin.moe"
     override var name = "Anichin 👾"
@@ -79,11 +80,9 @@ class AnichinProvider : MainAPI() {
     ): HomePageResponse {
         val baseUrl = "$mainUrl/${request.data.trimStart('/')}"
         val separator = if (baseUrl.contains('?')) "&" else "?"
-        val document = app.get(
-            "$baseUrl${separator}page=$page",
-            interceptor = cloudflareKiller,
-            timeout = PAGE_TIMEOUT_SECONDS
-        ).document
+        val document = fetchSiteDocument(
+            "$baseUrl${separator}page=$page"
+        )
 
         val home = document
             .select("div.listupd > article")
@@ -136,11 +135,9 @@ class AnichinProvider : MainAPI() {
         (1..MAX_SEARCH_PAGES).map { page ->
             async {
                 tryOrNull {
-                    app.get(
-                        "$mainUrl/page/$page/?s=$searchQuery",
-                        interceptor = cloudflareKiller,
-                        timeout = PAGE_TIMEOUT_SECONDS
-                    ).document
+                    fetchSiteDocument(
+                        "$mainUrl/page/$page/?s=$searchQuery"
+                    )
                         .select("div.listupd > article")
                         .mapNotNull { it.toSearchResult() }
                 }.orEmpty()
@@ -151,11 +148,7 @@ class AnichinProvider : MainAPI() {
     override suspend fun load(
         url: String
     ): LoadResponse {
-        val document = app.get(
-            fixUrl(url),
-            interceptor = cloudflareKiller,
-            timeout = PAGE_TIMEOUT_SECONDS
-        ).document
+        val document = fetchSiteDocument(fixUrl(url))
 
         val title = document
             .selectFirst("h1.entry-title")
@@ -409,7 +402,6 @@ class AnichinProvider : MainAPI() {
                         "Origin" to mainUrl,
                         "User-Agent" to USER_AGENT
                     ),
-                    interceptor = cloudflareKiller,
                     timeout = PLAYER_REQUEST_TIMEOUT_SECONDS
                 ).document
             }
@@ -551,11 +543,7 @@ class AnichinProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val episodeUrl = fixUrl(data)
-        val document = app.get(
-            episodeUrl,
-            interceptor = cloudflareKiller,
-            timeout = PAGE_TIMEOUT_SECONDS
-        ).document
+        val document = fetchSiteDocument(episodeUrl)
 
         val attemptedUrls = ConcurrentHashMap.newKeySet<String>()
         val emittedUrls = ConcurrentHashMap.newKeySet<String>()
@@ -643,6 +631,16 @@ class AnichinProvider : MainAPI() {
     )
 
     companion object {
+        private const val TAG = "Anichin"
+        private val sharedCloudflareKiller by lazy { CloudflareKiller() }
+        private val sharedCloudflareMutex = Mutex()
+        private val cloudflareStatusCodes = setOf(403, 503)
+        private val SITE_HEADERS = mapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8"
+        )
+
         private const val PAGE_TIMEOUT_SECONDS = 30L
         private const val PLAYER_REQUEST_TIMEOUT_SECONDS = 15L
         private const val PLAYER_REQUEST_TIMEOUT_MS = 16_000L
@@ -663,5 +661,51 @@ class AnichinProvider : MainAPI() {
         private val RELEASE_YEAR = Regex(
             "(?i)Tanggal\\s+rilis[^0-9]*(?:[A-Za-z]{3}\\s+\\d{1,2},\\s*)?(\\d{4})"
         )
+    }
+
+    private suspend fun fetchSiteDocument(url: String): Document {
+        suspend fun requestWithCloudflare(): Document {
+            return app.get(
+                url,
+                headers = SITE_HEADERS,
+                referer = "$mainUrl/",
+                interceptor = sharedCloudflareKiller,
+                timeout = PAGE_TIMEOUT_SECONDS
+            ).document
+        }
+
+        val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
+
+        if (sharedCloudflareKiller.savedCookies.containsKey(host)) {
+            return try {
+                requestWithCloudflare()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                sharedCloudflareKiller.savedCookies.remove(host)
+                requestWithCloudflare()
+            }
+        }
+
+        val response = app.get(
+            url,
+            headers = SITE_HEADERS,
+            referer = "$mainUrl/",
+            timeout = PAGE_TIMEOUT_SECONDS
+        )
+
+        Log.i(TAG, "ANICHIN_HTTP host=$host code=${response.code}")
+
+        if (response.code !in cloudflareStatusCodes) {
+            return response.document
+        }
+
+        response.okhttpResponse.close()
+
+        Log.i(TAG, "ANICHIN_CLOUDFLARE_FALLBACK host=$host")
+
+        return sharedCloudflareMutex.withLock {
+            requestWithCloudflare()
+        }
     }
 }
