@@ -246,14 +246,21 @@ class AnichinProvider : MainAPI() {
                         ?.let { fixUrlNull(it) }
                         ?: fixUrlNull(poster)
 
-                    val episodeNumber = episodeElement
-                        .selectFirst(".epl-num")
-                        ?.text()
-                        ?.let { EPISODE_NUMBER.find(it)?.value?.toIntOrNull() }
-                        ?: EPISODE_IN_TITLE.find(episodeTitle)
+                    // The site occasionally contains a typo in .epl-num
+                    // (for example Episode 574 is labelled as Eps 7574).
+                    // Prefer the title and URL, which remain correct.
+                    val episodeNumber = EPISODE_IN_TITLE.find(episodeTitle)
                             ?.groupValues
                             ?.getOrNull(1)
                             ?.toIntOrNull()
+                        ?: EPISODE_IN_URL.find(link)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+                        ?: episodeElement
+                            .selectFirst(".epl-num")
+                            ?.text()
+                            ?.let { EPISODE_NUMBER.find(it)?.value?.toIntOrNull() }
 
                     val baseEpisodeName = episodeNumber
                         ?.let { "Episode $it" }
@@ -456,6 +463,10 @@ class AnichinProvider : MainAPI() {
                     // links, while SD-only mirrors remain valid fallbacks.
                     if (emittedUrls.add(link.url)) {
                         emitted.set(true)
+                        Log.i(
+                            TAG,
+                            "ANICHIN_STREAM_FOUND source=${link.source} quality=${link.quality}"
+                        )
                         callback(link)
                     }
                 }
@@ -543,6 +554,7 @@ class AnichinProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val episodeUrl = fixUrl(data)
+        Log.i(TAG, "ANICHIN_LINKS_START")
         val document = fetchSiteDocument(episodeUrl)
 
         val attemptedUrls = ConcurrentHashMap.newKeySet<String>()
@@ -571,6 +583,8 @@ class AnichinProvider : MainAPI() {
             .distinctBy { it.url }
             .sortedBy { it.priority() }
             .take(MAX_PLAYER_OPTIONS)
+
+        Log.i(TAG, "ANICHIN_PLAYERS count=${players.size}")
 
         if (players.isEmpty()) {
             val staticPlayers = document.collectPlayerUrls(episodeUrl)
@@ -642,9 +656,9 @@ class AnichinProvider : MainAPI() {
         )
 
         private const val PAGE_TIMEOUT_SECONDS = 30L
-        private const val PLAYER_REQUEST_TIMEOUT_SECONDS = 15L
-        private const val PLAYER_REQUEST_TIMEOUT_MS = 16_000L
-        private const val EXTRACTOR_TIMEOUT_MS = 15_000L
+        private const val PLAYER_REQUEST_TIMEOUT_SECONDS = 8L
+        private const val PLAYER_REQUEST_TIMEOUT_MS = 9_000L
+        private const val EXTRACTOR_TIMEOUT_MS = 10_000L
         private const val MAX_SEARCH_PAGES = 3
         private const val MAX_PLAYER_CONCURRENCY = 4
         private const val FAST_PLAYER_OPTIONS = 4
@@ -654,6 +668,9 @@ class AnichinProvider : MainAPI() {
         private val EPISODE_NUMBER = Regex("\\d+")
         private val EPISODE_IN_TITLE = Regex(
             "(?i)Episode\\s*(\\d+)"
+        )
+        private val EPISODE_IN_URL = Regex(
+            "(?i)(?:episode|eps?)[-/ ]?(\\d+)"
         )
         private val SEASON_NUMBER = Regex(
             "(?i)Season\\s*(\\d+)"
