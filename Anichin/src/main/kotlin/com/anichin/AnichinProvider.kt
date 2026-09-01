@@ -150,11 +150,14 @@ class AnichinProvider : MainAPI() {
     ): LoadResponse {
         val document = fetchSiteDocument(fixUrl(url))
 
-        val title = document
+        val rawTitle = document
             .selectFirst("h1.entry-title")
             ?.text()
             ?.trim()
             .orEmpty()
+        val title = rawTitle
+            .replace(EPISODE_PAGE_SUFFIX, "")
+            .trim(' ', '-', ':', '|')
         if (title.isBlank()) {
             throw ErrorLoadingException("Anichin: title not found")
         }
@@ -228,12 +231,6 @@ class AnichinProvider : MainAPI() {
                         ?.trim()
                         .orEmpty()
 
-                    val episodeSub = episodeElement
-                        .selectFirst(".epl-sub span")
-                        ?.text()
-                        ?.trim()
-                        .orEmpty()
-
                     val episodeDate = episodeElement
                         .selectFirst(".epl-date")
                         ?.text()
@@ -269,18 +266,13 @@ class AnichinProvider : MainAPI() {
                             .trim()
                             .ifBlank { "Episode" }
 
-                    val episodeName = episodeSub
-                        .takeIf { it.isNotBlank() }
-                        ?.let { "$baseEpisodeName - $it Indonesia" }
-                        ?: baseEpisodeName
-
                     val episodeDescription =
                         episodeDate
                             .takeIf { it.isNotEmpty() }
                             ?.let { "Rilis: $it" }
 
                     newEpisode(link) {
-                        this.name = episodeName
+                        this.name = baseEpisodeName
                         this.season = seasonNumber
                         this.episode = episodeNumber
                         this.posterUrl = episodePoster
@@ -671,6 +663,10 @@ class AnichinProvider : MainAPI() {
         )
         private val EPISODE_IN_URL = Regex(
             "(?i)(?:episode|eps?)[-/ ]?(\\d+)"
+        )
+        private val EPISODE_PAGE_SUFFIX = Regex(
+            "(?i)\\s*(?:[-:|]\\s*)?Episode\\s*\\d+" +
+                "(?:\\s*[-:|]?\\s*Sub(?:title)?\\s*Indonesia)?\\s*$"
         )
         private val SEASON_NUMBER = Regex(
             "(?i)Season\\s*(\\d+)"
