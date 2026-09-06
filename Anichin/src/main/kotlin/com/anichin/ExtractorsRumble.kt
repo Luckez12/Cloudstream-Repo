@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.CancellationException
 
 class Rumble : ExtractorApi() {
     override var name = "Rumble"
@@ -19,9 +20,13 @@ class Rumble : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val response = runCatching {
+        val response = try {
             app.get(url, referer = referer ?: "$mainUrl/")
-        }.getOrNull() ?: return
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return
+        }
 
         val normalizedText = response.text
             .replace("\\/", "/")
@@ -38,13 +43,17 @@ class Rumble : ExtractorApi() {
 
         for (hlsUrl in hlsUrls) {
 
-            val playlist = runCatching {
+            val playlist = try {
                 app.get(
                     hlsUrl,
                     referer = url,
                     headers = mapOf("User-Agent" to USER_AGENT)
                 )
-            }.getOrNull() ?: continue
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                continue
+            }
 
             if (!playlist.text.contains("#EXTM3U", ignoreCase = true)) continue
 

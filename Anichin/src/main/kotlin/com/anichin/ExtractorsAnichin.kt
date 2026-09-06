@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.CancellationException
 import java.net.URI
 
 class AnichinStream : ExtractorApi() {
@@ -70,12 +71,16 @@ class AnichinPlayer : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val response = runCatching {
+        val response = try {
             app.get(
                 url,
                 referer = "$mainUrl/"
             )
-        }.getOrNull() ?: return
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return
+        }
 
         response.document
             .select("iframe[src], iframe[data-src]")
@@ -88,13 +93,17 @@ class AnichinPlayer : ExtractorApi() {
             }
             .distinct()
             .forEach { playerUrl ->
-                runCatching {
+                try {
                     loadExtractor(
                         playerUrl,
                         url,
                         subtitleCallback,
                         callback
                     )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // Try remaining nested players.
                 }
             }
     }

@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.getPacked
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.CancellationException
 
 open class StreamRuby : ExtractorApi() {
     override val name = "StreamRuby"
@@ -67,7 +68,7 @@ open class StreamRuby : ExtractorApi() {
     ) {
         val fileCode = getFileCode(url) ?: return
 
-        val response = runCatching {
+        val response = try {
             app.post(
                 "$mainUrl/dl",
                 data = mapOf(
@@ -78,7 +79,11 @@ open class StreamRuby : ExtractorApi() {
                 ),
                 referer = referer ?: url
             )
-        }.getOrNull() ?: return
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return
+        }
 
         val unpacked = runCatching {
             if (!getPacked(response.text).isNullOrEmpty()) {

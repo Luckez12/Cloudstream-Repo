@@ -267,30 +267,11 @@ class AnichinProvider : MainAPI() {
     ): HomePageResponse {
         val items = when (request.name) {
             "Latest Release" -> {
-                if (page == 1) {
-                    val home = app.get(mainUrl).document
-                    val section = findSectionContainer(
-                        home,
-                        "Rilisan Terbaru",
-                        "Latest Release"
-                    )
-
-                    val homepageItems = section?.let {
-                        parseItems(it, "article.bs, .bs")
-                    }.orEmpty()
-
-                    if (homepageItems.isNotEmpty()) {
-                        homepageItems
-                    } else {
-                        parseArchiveItems(
-                            app.get(archiveUrl(1)).document
-                        )
-                    }
-                } else {
-                    parseArchiveItems(
-                        app.get(archiveUrl(page)).document
-                    )
-                }
+                // Use the same update-sorted archive for every page so page 1
+                // and later pages cannot drift into different ordering.
+                parseArchiveItems(
+                    app.get(archiveUrl(page)).document
+                )
             }
 
             "Popular Today" -> {
@@ -411,10 +392,30 @@ class AnichinProvider : MainAPI() {
         }
     }
 
+    private fun seriesSlugFromUrl(
+        seriesUrl: String?
+    ): String? {
+        if (seriesUrl.isNullOrBlank()) return null
+
+        val slug = try {
+            URI(seriesUrl)
+                .path
+                .trim('/')
+                .substringAfterLast('/')
+        } catch (_: Exception) {
+            return null
+        }
+
+        return slug
+            .takeIf { it.isNotBlank() }
+            ?.let { EPISODE_SLUG_SUFFIX.replace(it, "") }
+    }
+
     private fun getParsedEpisodes(
-        doc: Document
+        doc: Document,
+        seriesUrl: String? = null
     ): List<ParsedEpisode> {
-        var anchors = doc.select(
+        val primaryAnchors = doc.select(
             ".eplister li a[href], " +
                 ".eplister a[href], " +
                 ".episodelist a[href], " +
@@ -422,13 +423,61 @@ class AnichinProvider : MainAPI() {
                 ".bixbox.bxcl.epcheck a[href]"
         )
 
-        if (anchors.isEmpty()) {
-            anchors = doc.select("a[href*='-episode-']")
+        val anchors: List<Element> = if (primaryAnchors.isNotEmpty()) {
+            primaryAnchors.toList()
+        } else {
+            // Last-resort fallback is restricted to the current series slug.
+            // This prevents sidebar/recommendation episodes from another title
+            // being injected into this series.
+            val seriesSlug = seriesSlugFromUrl(seriesUrl)
+            if (seriesSlug == null) {
+                emptyList()
+            } else {
+                val contentRoot = doc.selectFirst(
+                    ".postbody, .bigcontent, main, #content"
+                ) ?: doc
+
+                contentRoot
+                    .select(
+                        "a[href*='-episode-'], " +
+                            "a[href*='-subtitle-indonesia']"
+                    )
+                    .filter { anchor ->
+                        val href = absoluteUrl(
+                            seriesUrl ?: mainUrl,
+                            anchor.attr("href")
+                        ) ?: return@filter false
+
+                        val hrefSlug = try {
+                            URI(href)
+                                .path
+                                .trim('/')
+                                .substringAfterLast('/')
+                        } catch (_: Exception) {
+                            return@filter false
+                        }
+
+                        hrefSlug.startsWith(
+                            "$seriesSlug-episode-",
+                            ignoreCase = true
+                        ) ||
+                            hrefSlug.equals(
+                                "$seriesSlug-subtitle-indonesia",
+                                ignoreCase = true
+                            ) ||
+                            hrefSlug.startsWith(
+                                "$seriesSlug-subtitle-indonesia-",
+                                ignoreCase = true
+                            )
+                    }
+            }
         }
 
         return anchors.mapNotNull { anchor ->
-            val href = absoluteUrl(mainUrl, anchor.attr("href"))
-                ?: return@mapNotNull null
+            val href = absoluteUrl(
+                seriesUrl ?: mainUrl,
+                anchor.attr("href")
+            ) ?: return@mapNotNull null
 
             if (!href.startsWith(mainUrl)) return@mapNotNull null
 
@@ -477,9 +526,10 @@ class AnichinProvider : MainAPI() {
 
     private fun getEpisodesFromDocument(
         doc: Document,
-        poster: String?
+        poster: String?,
+        seriesUrl: String? = null
     ): MutableList<Episode> {
-        return getParsedEpisodes(doc)
+        return getParsedEpisodes(doc, seriesUrl)
             .map { parsed ->
                 newEpisode(parsed.data) {
                     name = parsed.name
@@ -609,80 +659,141 @@ class AnichinProvider : MainAPI() {
         return text
     }
 
+    private fun collectFollowingSynopsis(
+        heading: Element,
+        title: String
+    ): String? {
+        val paragraphs = mutableListOf<String>()
+        var node = heading.nextElementSibling()
+
+        repeat(12) {
+            val current = node ?: return@repeat
+            val tag = current.tagName().lowercase()
+            val currentText = current.text().trim()
+
+            if (tag in setOf("h1", "h2", "h3", "h4", "h5")) {
+                node = null
+                return@repeat
+            }
+
+            val rawParagraphs = if (tag == "p") {
+                listOf(current.text())
+            } else {
+                current.select("p").map { it.text() }
+            }
+
+            rawParagraphs
+                .mapNotNull { cleanSynopsisCandidate(it, title) }
+                .forEach(paragraphs::add)
+
+            node = current.nextElementSibling()
+        }
+
+        return paragraphs
+            .distinct()
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString("\n\n")
+    }
+
     private fun extractSynopsis(
         doc: Document,
         title: String
     ): String? {
-        val heading = doc.select("h2, h3, h4, h5")
+        val synopsisHeading = doc.select("h2, h3, h4, h5")
             .firstOrNull {
                 it.text().contains("Sinopsis", ignoreCase = true)
             }
 
-        if (heading != null) {
-            val following = mutableListOf<String>()
-            var node = heading.nextElementSibling()
+        if (synopsisHeading != null) {
+            collectFollowingSynopsis(
+                synopsisHeading,
+                title
+            )?.let { return it }
 
-            repeat(10) {
-                val current = node ?: return@repeat
-
-                val tag = current.tagName().lowercase()
-                val currentText = current.text().trim()
-
-                if (
-                    tag in setOf("h1", "h2", "h3", "h4", "h5") &&
-                    (
-                        currentText.contains("Episode", ignoreCase = true) ||
-                            currentText.contains("History", ignoreCase = true) ||
-                            currentText.contains("Download", ignoreCase = true) ||
-                            currentText.contains("Karakter", ignoreCase = true)
-                        )
-                ) {
-                    node = null
-                    return@repeat
+            // Some templates put a title heading immediately after "Sinopsis".
+            val titleHeading = synopsisHeading
+                .nextElementSibling()
+                ?.takeIf {
+                    it.matches("h2, h3, h4, h5")
                 }
 
-                cleanSynopsisCandidate(currentText, title)?.let {
-                    following.add(it)
-                }
-
-                node = current.nextElementSibling()
+            if (titleHeading != null) {
+                collectFollowingSynopsis(
+                    titleHeading,
+                    title
+                )?.let { return it }
             }
 
-            if (following.isNotEmpty()) {
-                return following.joinToString("\n\n")
-            }
-
-            val container = heading.closest(".bixbox")
-                ?: heading.parent()
+            val container = synopsisHeading.closest(".bixbox")
+                ?: synopsisHeading.parent()
 
             if (container != null) {
-                val candidates = container
-                    .select(".entry-content, .desc, p")
-                    .mapNotNull { cleanSynopsisCandidate(it.text(), title) }
+                val paragraphs = container
+                    .select(".entry-content p, .desc p, p")
+                    .mapNotNull {
+                        cleanSynopsisCandidate(
+                            it.text(),
+                            title
+                        )
+                    }
+                    .distinct()
 
-                if (candidates.isNotEmpty()) {
-                    return candidates.maxByOrNull { it.length }
+                if (paragraphs.isNotEmpty()) {
+                    return paragraphs.joinToString("\n\n")
                 }
             }
         }
 
-        val knownCandidates = doc.select(
+        val knownContainers = doc.select(
             ".bixbox.synp .entry-content, " +
                 ".synp .entry-content, " +
                 ".entry-content[itemprop=description], " +
                 ".synopsis, .sinopsis"
-        ).mapNotNull {
-            cleanSynopsisCandidate(it.text(), title)
+        )
+
+        knownContainers.forEach { container ->
+            val paragraphs = container
+                .select("p")
+                .mapNotNull {
+                    cleanSynopsisCandidate(
+                        it.text(),
+                        title
+                    )
+                }
+                .distinct()
+
+            if (paragraphs.isNotEmpty()) {
+                return paragraphs.joinToString("\n\n")
+            }
+
+            cleanSynopsisCandidate(
+                container.text(),
+                title
+            )?.let { return it }
         }
 
-        if (knownCandidates.isNotEmpty()) {
-            return knownCandidates.maxByOrNull { it.length }
-        }
+        // Movie/episode templates can omit the "Sinopsis" heading and only
+        // show a heading equal to the title followed by multiple paragraphs.
+        doc.select("h2, h3, h4, h5")
+            .firstOrNull { heading ->
+                cleanDetailTitle(heading.text())
+                    .equals(title, ignoreCase = true)
+            }
+            ?.let { heading ->
+                collectFollowingSynopsis(
+                    heading,
+                    title
+                )?.let { return it }
+            }
 
-        // Final fallback only considers real body text. Meta/OG descriptions
-        // are deliberately excluded because Anichin uses SEO copy there.
+        // Final conservative fallback. Never use SEO meta/OG descriptions.
         return doc.select("p")
-            .mapNotNull { cleanSynopsisCandidate(it.text(), title) }
+            .mapNotNull {
+                cleanSynopsisCandidate(
+                    it.text(),
+                    title
+                )
+            }
             .filterNot {
                 it.contains("server streaming", ignoreCase = true) ||
                     it.contains("grup telegram", ignoreCase = true)
@@ -751,8 +862,8 @@ class AnichinProvider : MainAPI() {
             .filterNot { it.contains("Animation", ignoreCase = true) }
             .distinct()
 
-        val parsedEpisodes = getParsedEpisodes(doc)
-        val episodes = getEpisodesFromDocument(doc, poster)
+        val parsedEpisodes = getParsedEpisodes(doc, animeUrl)
+        val episodes = getEpisodesFromDocument(doc, poster, animeUrl)
 
         val isMovie = when {
             typeText?.contains("Movie", ignoreCase = true) == true -> true
@@ -1092,6 +1203,8 @@ class AnichinProvider : MainAPI() {
             withTimeoutOrNull(PLAYER_REQUEST_TIMEOUT_MS) {
                 app.get(url, referer = referer).document
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             null
         }
@@ -1131,11 +1244,7 @@ class AnichinProvider : MainAPI() {
                 loadExtractor(
                     url,
                     referer,
-                    { _ ->
-                        // Anichin streams already contain the intended subtitles.
-                        // Ignore extractor-provided tracks such as Dailymotion
-                        // autogenerated captions.
-                    },
+                    subtitleCallback,
                     wrappedCallback
                 )
             }
@@ -1335,6 +1444,31 @@ class AnichinProvider : MainAPI() {
             }
                 ?: return false
 
+        // Most Anichin videos are hard-subbed. Only expose extractor
+        // subtitles when the episode page explicitly tells viewers to enable
+        // CC, which covers special releases without showing useless generated
+        // tracks on normal episodes.
+        val needsClosedCaptions =
+            document.text().contains(
+                "AKTIFKAN SUB CC",
+                ignoreCase = true
+            )
+
+        val emittedSubtitleUrls:
+            MutableSet<String> =
+            ConcurrentHashMap
+                .newKeySet()
+
+        val effectiveSubtitleCallback:
+            (SubtitleFile) -> Unit = { subtitle ->
+                if (
+                    needsClosedCaptions &&
+                    emittedSubtitleUrls.add(subtitle.url)
+                ) {
+                    subtitleCallback(subtitle)
+                }
+            }
+
         val attemptedUrls:
             MutableSet<String> =
             ConcurrentHashMap
@@ -1362,7 +1496,7 @@ class AnichinProvider : MainAPI() {
                     data,
                     attemptedUrls,
                     emittedUrls,
-                    subtitleCallback,
+                    effectiveSubtitleCallback,
                     callback
                 )
             }
@@ -1376,7 +1510,7 @@ class AnichinProvider : MainAPI() {
                 data,
                 attemptedUrls,
                 emittedUrls,
-                subtitleCallback,
+                effectiveSubtitleCallback,
                 callback
             )
         }
