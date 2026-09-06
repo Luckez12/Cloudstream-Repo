@@ -1,0 +1,238 @@
+name: Apply ZIP Patch
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.zip"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vueo-zip-patch
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[zip-applied]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 2
+
+      - name: Find ZIP patch
+        id: zip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE=""
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ZIP_FILE="$(
+              git diff-tree --no-commit-id --name-only -r HEAD \
+                | grep -Ei '\\.zip$' \
+                | while IFS= read -r candidate; do
+                    if [ -f "$candidate" ]; then
+                      printf '%s\n' "$candidate"
+                    fi
+                  done \
+                | tail -n 1 \
+                || true
+            )"
+          fi
+
+          if [ -z "$ZIP_FILE" ]; then
+            ZIP_FILE="$(
+              find . \
+                -type f \
+                -name '*.zip' \
+                -not -path './.git/*' \
+                -printf '%T@ %p\n' \
+                | sort -nr \
+                | head -n 1 \
+                | cut -d' ' -f2- \
+                | sed 's#^\\./##' \
+                || true
+            )"
+          fi
+
+          if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
+            echo "No ZIP patch found."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "ZIP patch: $ZIP_FILE"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          {
+            echo 'file<<EOF'
+            echo "$ZIP_FILE"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate ZIP
+        if: steps.zip.outputs.found == 'true'
+        shell: bash
+        env:
+          ZIP_FILE: ${{ steps.zip.outputs.file }}
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import os
+          import zipfile
+          from pathlib import PurePosixPath
+
+          zip_file = os.environ["ZIP_FILE"]
+
+          with zipfile.ZipFile(zip_file) as archive:
+              entries = archive.infolist()
+              if not entries:
+                  raise SystemExit("ZIP is empty.")
+
+              for entry in entries:
+                  raw = entry.filename.replace("\\\\", "/")
+                  path = PurePosixPath(raw)
+
+                  if path.is_absolute():
+                      raise SystemExit(f"Unsafe absolute path: {raw}")
+                  if ".." in path.parts:
+                      raise SystemExit(f"Unsafe parent traversal: {raw}")
+                  if ".git" in path.parts:
+                      raise SystemExit(f"ZIP cannot modify .git: {raw}")
+
+          print("ZIP validation passed.")
+          PY
+
+      - name: Extract ZIP
+        if: steps.zip.outputs.found == 'true'
+        shell: bash
+        env:
+          ZIP_FILE: ${{ steps.zip.outputs.file }}
+        run: |
+          set -euo pipefail
+
+          rm -rf "$RUNNER_TEMP/vueo_zip_patch"
+          mkdir -p "$RUNNER_TEMP/vueo_zip_patch"
+          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/vueo_zip_patch"
+
+      - name: Resolve ZIP root
+        if: steps.zip.outputs.found == 'true'
+        id: root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXTRACTED="$RUNNER_TEMP/vueo_zip_patch"
+          SOURCE_ROOT="$EXTRACTED"
+
+          mapfile -t TOP_ENTRIES < <(
+            find "$EXTRACTED" -mindepth 1 -maxdepth 1 -printf '%f\n'
+          )
+
+          if [ "${#TOP_ENTRIES[@]}" -eq 1 ] && [ -d "$EXTRACTED/${TOP_ENTRIES[0]}" ]; then
+            WRAPPER="$EXTRACTED/${TOP_ENTRIES[0]}"
+
+            if [ -d "$WRAPPER/app" ] \
+              || [ -d "$WRAPPER/.github" ] \
+              || [ -f "$WRAPPER/settings.gradle.kts" ] \
+              || [ -f "$WRAPPER/build.gradle.kts" ] \
+              || [ -f "$WRAPPER/gradlew" ]; then
+              SOURCE_ROOT="$WRAPPER"
+              echo "Detected repository wrapper folder: ${TOP_ENTRIES[0]}"
+            fi
+          fi
+
+          {
+            echo 'path<<EOF'
+            echo "$SOURCE_ROOT"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Apply files to repository
+        if: steps.zip.outputs.found == 'true'
+        shell: bash
+        env:
+          SOURCE_ROOT: ${{ steps.root.outputs.path }}
+        run: |
+          set -euo pipefail
+
+          rsync -a \
+            --exclude '.git/' \
+            "$SOURCE_ROOT/" \
+            ./
+
+      - name: Remove uploaded ZIP
+        if: steps.zip.outputs.found == 'true'
+        shell: bash
+        env:
+          ZIP_FILE: ${{ steps.zip.outputs.file }}
+        run: |
+          set -euo pipefail
+          rm -f "$ZIP_FILE"
+
+      - name: Show changes
+        if: steps.zip.outputs.found == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short
+
+      - name: Detect repository changes
+        if: steps.zip.outputs.found == 'true'
+        id: changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit applied patch
+        if: steps.zip.outputs.found == 'true' && steps.changes.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          git commit -m "chore: apply ZIP patch [zip-applied]"
+          git push origin HEAD:main
+
+      - name: Trigger VUEO build
+        if: steps.zip.outputs.found == 'true' && steps.changes.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/dispatches" \
+            -f event_type=vueo_build
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## VUEO ZIP Patch"
+            echo
+            echo "Upload one ZIP containing repository-relative file paths."
+            echo "The workflow extracts the files to those paths, overwrites matching files, removes the ZIP, commits the result, and triggers the VUEO build."
+          } >> "$GITHUB_STEP_SUMMARY"
