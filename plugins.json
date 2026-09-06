@@ -22,10 +22,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://anichin.club&size=%size%",
-        "fileHash": "sha256-8ae02b17d7282220f0792956f5da050a58b650d3ae64610e0ccf29f93df57805",
+        "fileHash": "sha256-e45aae674f6993131a6fb58f346fc49e56eddb1862dc6f3eb8dbc145c1184cac",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 57381,
+        "fileSize": 57161,
         "status": 1,
         "language": "id",
         "authors": [
