@@ -133,19 +133,39 @@ class AnichinProvider : MainAPI() {
         doc: Document,
         vararg needles: String
     ): Element? {
-        val heading = doc.select(".releases").firstOrNull { release ->
-            val text = release.text()
-            needles.any { text.contains(it, ignoreCase = true) }
+        // Match the actual heading text only. Using Element.text() on a broad
+        // wrapper can include text from multiple sections and make Popular and
+        // Latest resolve to the same list.
+        val heading = doc.select(
+            ".releases, h1, h2, h3, h4, h5"
+        ).firstOrNull { element ->
+            val own = element.ownText().trim()
+            own.isNotBlank() && needles.any { needle ->
+                own.contains(needle, ignoreCase = true)
+            }
         } ?: return null
 
-        var sibling = heading.nextElementSibling()
-        repeat(3) {
+        val marker = heading.closest(".releases") ?: heading
+
+        var sibling = marker.nextElementSibling()
+        repeat(6) {
             if (sibling == null) return null
-            if (sibling!!.hasClass("listupd") || sibling!!.select("article.bs").isNotEmpty()) {
+
+            // Stop before crossing into the next named section.
+            if (sibling!!.hasClass("releases")) {
+                return null
+            }
+
+            if (
+                sibling!!.hasClass("listupd") ||
+                sibling!!.select("article.bs").isNotEmpty()
+            ) {
                 return sibling
             }
+
             sibling = sibling!!.nextElementSibling()
         }
+
         return null
     }
 
@@ -162,13 +182,15 @@ class AnichinProvider : MainAPI() {
                 parseItems(section, "article.bs")
             } else {
                 parseItems(doc, ".releases.hothome + .listupd article.bs, .listupd.popular article.bs")
+                    .take(12)
             }
         } else if (page == 1) {
             val section = findHomeSection(doc, "Rilisan Terbaru", "Latest")
             if (section != null) {
                 parseItems(section, "article.bs")
             } else {
-                parseItems(doc, ".releases.latesthome + .listupd article.bs")
+                parseItems(doc, ".releases.latesthome + .listupd article.bs, .releases.latest + .listupd article.bs")
+                    .take(20)
             }
         } else {
             parseItems(doc, ".listupd.normal article.bs, main article.bs, article.bs")
