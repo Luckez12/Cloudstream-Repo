@@ -22,10 +22,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://anichin.club&size=%size%",
-        "fileHash": "sha256-5e573a9777ebbfecdb1bc80cb835b296d0caf3779ddc376684d524bdb81b2021",
+        "fileHash": "sha256-f2ff8b3269b2326f25bf7a1268b83ac6dc8fac3c22c700ef0536809d6a36fdbb",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 56276,
+        "fileSize": 58342,
         "status": 1,
         "language": "id",
         "authors": [
@@ -35,7 +35,7 @@
             "Anime",
             "Movie"
         ],
-        "version": 3,
+        "version": 7,
         "internalName": "Anichin",
         "description": "Anichin \u2014 Streaming Donghua Subtitle Indonesia",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/Anichin.cs3",
@@ -130,10 +130,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://45.11.57.243&size=%size%",
-        "fileHash": "sha256-75856cceb1e33e56eac7ec3c467251398ddd455484262c6d40c60854d5b49dca",
+        "fileHash": "sha256-24465649ff368ec18230a37263bd408d5ad38924e2950624bd520c74936c021e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 48839,
+        "fileSize": 47360,
         "status": 1,
         "language": "id",
         "authors": [
@@ -144,7 +144,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "OppaDrama",
         "description": "OppaDrama \u2014 Streaming Drama Korean, Movie and TV Series",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/OppaDrama.cs3",
