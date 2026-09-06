@@ -33,8 +33,9 @@ class AnichinProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
+        "$mainUrl/" to "Latest Release",
         "$mainUrl/" to "Popular Today",
-        "$mainUrl/" to "Latest Release"
+        "$mainUrl/?order=update&status=&type=Movie" to "Movie"
     )
 
     private data class PlayerOption(
@@ -173,27 +174,74 @@ class AnichinProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val url = if (page > 1) "$mainUrl/page/$page/" else mainUrl
+        val isMovie = request.name == "Movie"
+
+        val url = when {
+            isMovie && page > 1 ->
+                "$mainUrl/page/$page/?order=update&status=&type=Movie"
+
+            isMovie ->
+                "$mainUrl/?order=update&status=&type=Movie"
+
+            page > 1 ->
+                "$mainUrl/page/$page/"
+
+            else ->
+                mainUrl
+        }
+
         val doc = app.get(url).document
 
-        val items = if (page == 1 && request.name == "Popular Today") {
-            val section = findHomeSection(doc, "Terpopuler Hari Ini", "Popular")
-            if (section != null) {
-                parseItems(section, "article.bs")
-            } else {
-                parseItems(doc, ".releases.hothome + .listupd article.bs, .listupd.popular article.bs")
-                    .take(12)
+        val items = when {
+            isMovie -> {
+                val archiveItems = parseItems(
+                    doc,
+                    ".listupd.normal article.bs, .listupd article.bs"
+                ).filter { it.type == TvType.AnimeMovie }
+
+                if (archiveItems.isNotEmpty()) {
+                    archiveItems
+                } else {
+                    val section = findHomeSection(doc, "Movie Baru", "Movie")
+                    if (section != null) {
+                        parseItems(section, "article.bs")
+                            .filter { it.type == TvType.AnimeMovie }
+                    } else {
+                        emptyList()
+                    }
+                }
             }
-        } else if (page == 1) {
-            val section = findHomeSection(doc, "Rilisan Terbaru", "Latest")
-            if (section != null) {
-                parseItems(section, "article.bs")
-            } else {
-                parseItems(doc, ".releases.latesthome + .listupd article.bs, .releases.latest + .listupd article.bs")
-                    .take(20)
+
+            page == 1 && request.name == "Latest Release" -> {
+                val section = findHomeSection(doc, "Rilisan Terbaru", "Latest")
+                if (section != null) {
+                    parseItems(section, "article.bs")
+                } else {
+                    parseItems(
+                        doc,
+                        ".releases.latesthome + .listupd article.bs, .releases.latest + .listupd article.bs"
+                    ).take(20)
+                }
             }
-        } else {
-            parseItems(doc, ".listupd.normal article.bs, main article.bs, article.bs")
+
+            page == 1 && request.name == "Popular Today" -> {
+                val section = findHomeSection(doc, "Terpopuler Hari Ini", "Popular")
+                if (section != null) {
+                    parseItems(section, "article.bs")
+                } else {
+                    parseItems(
+                        doc,
+                        ".releases.hothome + .listupd article.bs, .listupd.popular article.bs"
+                    ).take(12)
+                }
+            }
+
+            else -> {
+                parseItems(
+                    doc,
+                    ".listupd.normal article.bs, main article.bs, article.bs"
+                )
+            }
         }
 
         return newHomePageResponse(request.name, items)
