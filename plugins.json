@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=4khdhub.one&sz=%size%",
-        "fileHash": "sha256-847c6bf896348cc448aaf9bd8fc1c668427475b04e97d3f7ebf3418ec92b0903",
+        "fileHash": "sha256-25cb89e0e28b76f65f5b3088abf0bfdf07a9b188420576e851b904de1113d379",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 84383,
+        "fileSize": 81529,
         "status": 1,
         "language": "en",
         "authors": [
@@ -86,10 +86,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ww03.pencurimovie.bond&size=%size%",
-        "fileHash": "sha256-52c1b3401e7faff5cdb5fa1e1bb759f2c3c6f1aa810a41a48838d9fba831806b",
+        "fileHash": "sha256-9e0da47151a938642879f7490b070ef0e745fb002d293c973a8a3f729b555b32",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 61107,
+        "fileSize": 62084,
         "status": 1,
         "language": "ms",
         "authors": [
@@ -107,7 +107,7 @@
     },
     {
         "iconUrl": "https://cdn.animaapp.com/projects/6215178219a2fd7886bf5a52/releases/621519ce72dadb5503e24f9f/img/app-icon%401x.png",
-        "fileHash": "sha256-be87c027a0fb41d27210b7281f2dcc8265cf9a8a578c448973e3ba40d7905455",
+        "fileHash": "sha256-851ae9d6ec1dc045c7e12fb7ee6c19e450215ac61aaf22c66464502ac4fe3b36",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
         "fileSize": 39625,
@@ -122,7 +122,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "OneTouchTV",
         "description": "OneTouchTV - Asian Drama and Anime",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/OneTouchTV.cs3",
@@ -130,10 +130,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://45.11.57.243&size=%size%",
-        "fileHash": "sha256-a0edf226f959abd5afc38a557916a51fcbf087fa0ec97a7f33dbf4f5a9d1bdbe",
+        "fileHash": "sha256-f84bd143626ebdbdf42935d1871ab6cc3e1a470fd3b44a370485d11684346cf1",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 47392,
+        "fileSize": 48432,
         "status": 1,
         "language": "id",
         "authors": [
