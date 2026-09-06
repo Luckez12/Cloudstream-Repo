@@ -375,63 +375,37 @@ class FourKHDHubProvider : MainAPI() {
             val resolved: String,
         )
 
-        // Resolve redirect wrappers first, then dedupe the actual targets.
-        // Different 4KHDHub buttons can lead to the same HubCloud page.
-        val resolvedTargets = Collections.synchronizedList(mutableListOf<ServerTarget>())
-
-        rawLinks.amap { rawLink ->
-            resolveSemaphore.withPermit {
-                val resolvedResult = withTimeoutOrNull(8_000L) {
-                    try {
-                        if (rawLink.contains("id=", ignoreCase = true)) {
-                            resolveFourKRedirect(rawLink)
-                        } else {
-                            rawLink
-                        }
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (error: Throwable) {
-                        log("redirect failed host=${hostOf(rawLink)}: ${error.message}")
-                        rawLink
-                    }
-                }
-
-                val resolved = if (resolvedResult == null) {
-                    log("redirect timeout host=${hostOf(rawLink)} after=8s; using original")
-                    rawLink
-                } else {
-                    resolvedResult
-                }.trim()
-
-                if (resolved.isNotBlank()) {
-                    resolvedTargets.add(ServerTarget(rawLink, resolved))
-                }
-            }
-        }
-
-        val targets = resolvedTargets
-            .distinctBy { canonicalServerKey(it.resolved) }
-
-        log(
-            "loadLinks raw=${rawLinks.size} resolved=${resolvedTargets.size} " +
-                "uniqueTargets=${targets.size}",
-        )
-
-        if (targets.isEmpty()) return false
-
         val emittedUrls = ConcurrentHashMap.newKeySet<String>()
-        val firstPassLinks = Collections.synchronizedList(mutableListOf<ExtractorLink>())
+        val seenTargetKeys = ConcurrentHashMap.newKeySet<String>()
+        val resolvedTargets = Collections.synchronizedList(mutableListOf<ServerTarget>())
         val retryCandidates = Collections.synchronizedList(mutableListOf<ServerTarget>())
+        val emittedNames = Collections.synchronizedList(mutableListOf<String>())
         val emitLock = Any()
 
         val hubCloud = HubCloudExtractor()
         val hubDrive = HubDriveExtractor()
 
+        fun emitLink(link: ExtractorLink): Boolean {
+            return synchronized(emitLock) {
+                if (!emittedUrls.add(link.url)) {
+                    false
+                } else {
+                    callback(link)
+                    emittedNames.add(link.name)
+                    true
+                }
+            }
+        }
+
         suspend fun extractOne(target: ServerTarget, retry: Boolean): List<ExtractorLink> {
             val local = Collections.synchronizedList(mutableListOf<ExtractorLink>())
             val localUrls = ConcurrentHashMap.newKeySet<String>()
             val localCallback: (ExtractorLink) -> Unit = { link ->
-                if (localUrls.add(link.url)) local.add(link)
+                if (localUrls.add(link.url)) {
+                    local.add(link)
+                    // Emit immediately instead of waiting for the whole batch.
+                    emitLink(link)
+                }
             }
 
             val resolved = target.resolved
@@ -494,68 +468,73 @@ class FourKHDHubProvider : MainAPI() {
             return local.toList()
         }
 
-        fun emitOrdered(source: List<ExtractorLink>): Int {
-            return synchronized(emitLock) {
-                var emitted = 0
-                source
-                    .distinctBy { it.url }
-                    .sortedBy { streamPriority(it) }
-                    .forEach { link ->
-                        if (emittedUrls.add(link.url)) {
-                            callback(link)
-                            emitted++
+        // Streaming pipeline:
+        // each raw server resolves, dedupes and starts extraction immediately.
+        // A slow redirect or extractor no longer blocks already-ready sources.
+        rawLinks.amap { rawLink ->
+            val resolvedResult = resolveSemaphore.withPermit {
+                withTimeoutOrNull(8_000L) {
+                    try {
+                        if (rawLink.contains("id=", ignoreCase = true)) {
+                            resolveFourKRedirect(rawLink)
+                        } else {
+                            rawLink
                         }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        log("redirect failed host=${hostOf(rawLink)}: ${error.message}")
+                        rawLink
                     }
-                emitted
+                }
             }
-        }
 
-        targets.amap { target ->
-            extractSemaphore.withPermit {
-                val foundResult = withTimeoutOrNull(18_000L) {
+            val resolved = if (resolvedResult == null) {
+                log("redirect timeout host=${hostOf(rawLink)} after=8s; using original")
+                rawLink
+            } else {
+                resolvedResult
+            }.trim()
+
+            if (resolved.isBlank()) return@amap
+
+            val target = ServerTarget(rawLink, resolved)
+            val targetKey = canonicalServerKey(resolved)
+            if (!seenTargetKeys.add(targetKey)) return@amap
+
+            resolvedTargets.add(target)
+
+            val foundResult = extractSemaphore.withPermit {
+                withTimeoutOrNull(18_000L) {
                     extractOne(target, retry = false)
                 }
-                if (foundResult == null) {
-                    log("extract timeout host=${hostOf(target.resolved)} retry=false after=18s")
+            }
+
+            if (foundResult == null) {
+                log("extract timeout host=${hostOf(target.resolved)} retry=false after=18s")
+            }
+
+            if (foundResult.orEmpty().isEmpty()) {
+                retryCandidates.add(target)
+
+                // Retry this failed server immediately while the other first-pass
+                // servers continue. Keep retries bounded to avoid request spikes.
+                val recoveredResult = retrySemaphore.withPermit {
+                    withTimeoutOrNull(8_000L) {
+                        extractOne(target, retry = true)
+                    }
                 }
-                val found = foundResult.orEmpty()
-                if (found.isEmpty()) {
-                    retryCandidates.add(target)
-                } else {
-                    firstPassLinks.addAll(found)
+
+                if (recoveredResult == null) {
+                    log("extract timeout host=${hostOf(target.resolved)} retry=true after=8s")
                 }
             }
         }
 
-        val firstEmitted = emitOrdered(firstPassLinks.toList())
-
-        val recoveredLinks = Collections.synchronizedList(mutableListOf<ExtractorLink>())
-        retryCandidates
-            .distinctBy { canonicalServerKey(it.resolved) }
-            .amap { target ->
-                retrySemaphore.withPermit {
-                    val recoveredResult = withTimeoutOrNull(8_000L) {
-                        extractOne(target, retry = true)
-                    }
-                    if (recoveredResult == null) {
-                        log("extract timeout host=${hostOf(target.resolved)} retry=true after=8s")
-                    }
-                    val recovered = recoveredResult.orEmpty()
-                    if (recovered.isNotEmpty()) recoveredLinks.addAll(recovered)
-                }
-            }
-
-        val recoveredEmitted = emitOrdered(recoveredLinks.toList())
-        val orderedNames = (firstPassLinks.toList() + recoveredLinks.toList())
-            .distinctBy { it.url }
-            .sortedBy { streamPriority(it) }
-            .joinToString(" | ") { it.name }
-
         log(
-            "loadLinks targets=${targets.size} first=$firstEmitted " +
-                "retry=${retryCandidates.distinctBy { canonicalServerKey(it.resolved) }.size} " +
-                "recovered=$recoveredEmitted unique=${emittedUrls.size} " +
-                "order=$orderedNames",
+            "loadLinks raw=${rawLinks.size} uniqueTargets=${resolvedTargets.size} " +
+                "retry=${retryCandidates.size} unique=${emittedUrls.size} " +
+                "sources=${emittedNames.distinct().joinToString(" | ")}",
         )
 
         return emittedUrls.isNotEmpty()
@@ -587,20 +566,6 @@ class FourKHDHubProvider : MainAPI() {
         return "$host$path?${uri.rawQuery.orEmpty()}"
     }
 
-    private fun streamPriority(link: ExtractorLink): Int {
-        val value = "${link.name} ${link.url}".lowercase()
-
-        return when {
-            Regex("(?:\\bavc\\b|\\bx264\\b|\\bh[\\s._-]?264\\b)")
-                .containsMatchIn(value) -> 0
-
-            Regex("(?:\\bhevc\\b|\\bx265\\b|\\bh[\\s._-]?265\\b)")
-                .containsMatchIn(value) -> 3
-
-            value.contains("10gbps") -> 2
-            else -> 1
-        }
-    }
 
     private fun parseMovieLinks(document: Document): List<String> {
         val primary = document
