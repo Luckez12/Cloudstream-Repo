@@ -806,6 +806,56 @@ class AnichinProvider : MainAPI() {
             }
     }
 
+    /**
+     * Hybrid two-lane scheduler for Cloudstream link loading.
+     *
+     * The first three priority players get their own fast lane so OK.ru,
+     * Dailymotion, Rumble, or whichever sources are ranked first can resolve
+     * immediately. The rest of the player list is processed at the same time
+     * in a separate bounded lane.
+     *
+     * Nothing is cancelled after the first success. Extractor callbacks are
+     * emitted as soon as each source resolves, while all remaining sources
+     * continue inside the same Cloudstream coroutine lifecycle.
+     */
+    private suspend fun <T> collectTwoLane(
+        items: List<T>,
+        block: suspend (T) -> Boolean
+    ): Boolean = coroutineScope {
+        if (items.isEmpty()) {
+            return@coroutineScope false
+        }
+
+        val fastLane =
+            items.take(FAST_LANE_SIZE)
+
+        val fullLane =
+            items.drop(FAST_LANE_SIZE)
+
+        val fastJob = async {
+            collectSuccessful(
+                fastLane,
+                FAST_LANE_CONCURRENCY,
+                block
+            )
+        }
+
+        val fullJob = async {
+            collectSuccessful(
+                fullLane,
+                FULL_LANE_CONCURRENCY,
+                block
+            )
+        }
+
+        listOf(
+            fastJob,
+            fullJob
+        )
+            .awaitAll()
+            .any { it }
+    }
+
     private suspend fun resolvePlayerPipeline(
         wrapperUrl: String,
         episodeUrl: String,
@@ -927,9 +977,8 @@ class AnichinProvider : MainAPI() {
                 document
                     .collectNestedPlayerUrls(data)
 
-            return collectSuccessful(
-                staticPlayers,
-                MAX_PLAYER_CONCURRENCY
+            return collectTwoLane(
+                staticPlayers
             ) { playerUrl ->
                 tryLoadExtractor(
                     playerUrl,
@@ -942,9 +991,8 @@ class AnichinProvider : MainAPI() {
             }
         }
 
-        return collectSuccessful(
-            players,
-            MAX_PLAYER_CONCURRENCY
+        return collectTwoLane(
+            players
         ) { player ->
             resolvePlayerPipeline(
                 player.url,
@@ -987,7 +1035,12 @@ class AnichinProvider : MainAPI() {
     companion object {
         private const val MAX_SEARCH_PAGES = 10
 
-        private const val MAX_PLAYER_CONCURRENCY = 4
+        // Top priority sources get three dedicated workers. The remaining
+        // sources get another three workers, giving fast first-link response
+        // without sacrificing the rest of the server list.
+        private const val FAST_LANE_SIZE = 3
+        private const val FAST_LANE_CONCURRENCY = 3
+        private const val FULL_LANE_CONCURRENCY = 3
         private const val MAX_NESTED_CONCURRENCY = 2
 
         private const val EPISODE_REQUEST_TIMEOUT_MS =
