@@ -130,6 +130,22 @@ jobs:
             2>&1 | tee "$DIAG/build.log"
 
           status=${PIPESTATUS[0]}
+
+          # Snapshot dependencies are served by JitPack and stale metadata can
+          # occasionally poison the Gradle cache. Retry once with a refresh only
+          # for dependency-resolution failures.
+          if [[ "$status" -ne 0 ]] && grep -Eq \
+            'Could not resolve|Could not HEAD|Could not GET|inconsistent module metadata' \
+            "$DIAG/build.log"; then
+            echo "Dependency resolution failed. Retrying once with --refresh-dependencies."
+            ./gradlew clean make makePluginsJson \
+              --no-daemon \
+              --build-cache \
+              --stacktrace \
+              --refresh-dependencies \
+              2>&1 | tee "$DIAG/build-retry.log"
+            status=${PIPESTATUS[0]}
+          fi
           set -e
 
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
@@ -335,3 +351,4 @@ jobs:
             echo "* Jar compatibility: \`${{ steps.compatibility.outcome || 'not-run' }}\`"
             echo "* Repo URL: \`https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/main/repo.json\`"
           } >> "$GITHUB_STEP_SUMMARY"
+          
