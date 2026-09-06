@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=4khdhub.one&sz=%size%",
-        "fileHash": "sha256-7750c1e283e690fc92dde70263d455b785f313cc30b59999c5f7f83f31a9deba",
+        "fileHash": "sha256-847c6bf896348cc448aaf9bd8fc1c668427475b04e97d3f7ebf3418ec92b0903",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 82097,
+        "fileSize": 84383,
         "status": 1,
         "language": "en",
         "authors": [
@@ -14,7 +14,7 @@
             "Movie",
             "TvSeries"
         ],
-        "version": 1,
+        "version": 3,
         "internalName": "4KHDHub",
         "description": "4KHDHub movies and series provider",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/4KHDHub.cs3",
@@ -22,10 +22,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://anichin.club&size=%size%",
-        "fileHash": "sha256-f2ff8b3269b2326f25bf7a1268b83ac6dc8fac3c22c700ef0536809d6a36fdbb",
+        "fileHash": "sha256-eefa8140cc4258436c511af6cbd93f9a06d2bef0fa77535553f073a75df144d8",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 58342,
+        "fileSize": 58322,
         "status": 1,
         "language": "id",
         "authors": [
@@ -35,7 +35,7 @@
             "Anime",
             "Movie"
         ],
-        "version": 7,
+        "version": 8,
         "internalName": "Anichin",
         "description": "Anichin \u2014 Streaming Donghua Subtitle Indonesia",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/Anichin.cs3",
@@ -43,10 +43,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://kisskh.id/&size=256",
-        "fileHash": "sha256-15d2fb71edf449309fbde1a1e301bacf0631ebce0b9d80ba1912ece864f65810",
+        "fileHash": "sha256-12220bcf29afed210942b65a2d01a5a537fa1b85e9753a5880b350b9e982f443",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 35318,
+        "fileSize": 35326,
         "status": 1,
         "language": "en",
         "authors": [
@@ -55,7 +55,7 @@
         "tvTypes": [
             "AsianDrama"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "KissKH",
         "description": "Watch drama online in high quality. Free download high quality drama. Various formats from 240p to 720p HD (or even 1080p). Feel Free To Watch!",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/KissKH.cs3",
@@ -63,10 +63,10 @@
     },
     {
         "iconUrl": "https://movieboxph.app/wp-content/uploads/2025/11/Movie-Box-icon.webp",
-        "fileHash": "sha256-1573026b28737fc6ba921b78442bce5ac20e0c44c308cb502aa8d1fce70d183e",
+        "fileHash": "sha256-6fdf5aae698d50a0b8cd86178e3d54d61c3b79fcff35da5e02918431b5f75c02",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 46362,
+        "fileSize": 46311,
         "status": 1,
         "language": "en",
         "authors": [
@@ -78,7 +78,7 @@
             "Anime",
             "AsianDrama"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "MovieBox",
         "description": "MovieBox \u2014 Streaming Movie Subtitle Indonesia",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/MovieBox.cs3",
@@ -86,10 +86,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ww03.pencurimovie.bond&size=%size%",
-        "fileHash": "sha256-017f74bba1fe1ab3efed99f80a60beb203680b878a9101cbe4bf9da932e5ed89",
+        "fileHash": "sha256-52c1b3401e7faff5cdb5fa1e1bb759f2c3c6f1aa810a41a48838d9fba831806b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 61064,
+        "fileSize": 61107,
         "status": 1,
         "language": "ms",
         "authors": [
@@ -99,7 +99,7 @@
             "Movie",
             "TvSeries"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "MSM21",
         "description": "MSM21 \u2014 Streaming Movie and TV Series",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/MSM21.cs3",
@@ -107,10 +107,10 @@
     },
     {
         "iconUrl": "https://cdn.animaapp.com/projects/6215178219a2fd7886bf5a52/releases/621519ce72dadb5503e24f9f/img/app-icon%401x.png",
-        "fileHash": "sha256-a1a3652ebde4b9397c2c043d99109a67e368dd2c3266c933cf3db0b943fa07b1",
+        "fileHash": "sha256-be87c027a0fb41d27210b7281f2dcc8265cf9a8a578c448973e3ba40d7905455",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 39633,
+        "fileSize": 39625,
         "status": 1,
         "language": "en",
         "authors": [
@@ -130,10 +130,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://45.11.57.243&size=%size%",
-        "fileHash": "sha256-24465649ff368ec18230a37263bd408d5ad38924e2950624bd520c74936c021e",
+        "fileHash": "sha256-a0edf226f959abd5afc38a557916a51fcbf087fa0ec97a7f33dbf4f5a9d1bdbe",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 47360,
+        "fileSize": 47392,
         "status": 1,
         "language": "id",
         "authors": [
@@ -144,7 +144,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 2,
+        "version": 3,
         "internalName": "OppaDrama",
         "description": "OppaDrama \u2014 Streaming Drama Korean, Movie and TV Series",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/OppaDrama.cs3",
@@ -152,10 +152,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ww03.pencurimovie.bond&size=%size%",
-        "fileHash": "sha256-62f76e2efe44590ea58d440f8dd0c6dc3a8dceced731c4b440cba8b76273bf1b",
+        "fileHash": "sha256-0809e280c84d5133d6b6618dd2c66ad5ea7597131fff7be949803c8973cdf0a2",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 26526,
+        "fileSize": 26491,
         "status": 1,
         "language": "ms",
         "authors": [
@@ -165,7 +165,7 @@
             "Movie",
             "TvSeries"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "PencuriMovie",
         "description": "PencuriMovie \u2014 Streaming Movie and TV Series",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/PencuriMovie.cs3",
