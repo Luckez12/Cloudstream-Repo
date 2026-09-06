@@ -501,61 +501,49 @@ class AnichinProvider : MainAPI() {
         rawValue: String,
         baseUrl: String
     ): String? {
-        val value =
-            rawValue.trim()
+        val value = rawValue.trim()
+        if (value.isBlank()) return null
 
-        if (value.isBlank()) {
-            return null
+        // Only resolve values that are clearly URLs/paths. A Base64 payload is
+        // otherwise a valid relative-URI string and would be misread as a path.
+        val looksLikeUrl = value.startsWith("http://", true) ||
+            value.startsWith("https://", true) ||
+            value.startsWith("//") ||
+            value.startsWith("/") ||
+            value.startsWith("./") ||
+            value.startsWith("../")
+
+        if (looksLikeUrl) {
+            return absoluteUrl(baseUrl, value)
         }
 
-        absoluteUrl(
-            baseUrl,
-            value
-        )?.takeIf {
-            it.startsWith("http")
-        }?.let {
-            return it
-        }
+        // Some player options contain raw iframe HTML.
+        Regex(
+            """<iframe[^>]+(?:src|data-src)\s*=\s*["']([^"']+)["']""",
+            RegexOption.IGNORE_CASE
+        ).find(value)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let { return absoluteUrl(baseUrl, it) }
 
-        val decoded = try {
-            String(
-                Base64.decode(
-                    value,
-                    Base64.DEFAULT
-                )
-            )
-        } catch (_: Exception) {
-            null
-        } ?: return null
+        val decoded = runCatching {
+            String(Base64.decode(value, Base64.DEFAULT))
+        }.getOrNull() ?: return null
 
-        val iframeUrl =
-            Regex(
-                """<iframe[^>]+(?:src|data-src)\s*=\s*["']([^"']+)["']""",
-                RegexOption.IGNORE_CASE
-            ).find(decoded)
-                ?.groupValues
-                ?.getOrNull(1)
+        Regex(
+            """<iframe[^>]+(?:src|data-src)\s*=\s*["']([^"']+)["']""",
+            RegexOption.IGNORE_CASE
+        ).find(decoded)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let { return absoluteUrl(baseUrl, it) }
 
-        if (iframeUrl != null) {
-            return absoluteUrl(
-                baseUrl,
-                iframeUrl
-            )
-        }
-
-        val directUrl =
-            Regex(
-                """https?://[^\s"'<>]+""",
-                RegexOption.IGNORE_CASE
-            ).find(decoded)
-                ?.value
-
-        return directUrl?.let {
-            absoluteUrl(
-                baseUrl,
-                it
-            )
-        }
+        return Regex(
+            """https?://[^\s"'<>]+""",
+            RegexOption.IGNORE_CASE
+        ).find(decoded)
+            ?.value
+            ?.let { absoluteUrl(baseUrl, it) }
     }
 
     private fun Document.collectTopLevelPlayers(
@@ -727,13 +715,12 @@ class AnichinProvider : MainAPI() {
         url: String,
         referer: String
     ): Document? {
-        return withTimeoutOrNull(
-            PLAYER_REQUEST_TIMEOUT_MS
-        ) {
-            app.get(
-                url,
-                referer = referer
-            ).document
+        return try {
+            withTimeoutOrNull(PLAYER_REQUEST_TIMEOUT_MS) {
+                app.get(url, referer = referer).document
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 
