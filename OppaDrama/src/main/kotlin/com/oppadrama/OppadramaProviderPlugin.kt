@@ -1,13 +1,14 @@
 package com.oppadrama
 
 import android.content.Context
+import com.lagradost.api.getContext
+import com.lagradost.cloudstream3.plugins.BasePlugin
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
-import com.lagradost.cloudstream3.plugins.Plugin
 
 @CloudstreamPlugin
-class OppadramaProviderPlugin : Plugin() {
-    override fun load(context: Context) {
-        OppaRuntime.context = context.applicationContext
+class OppadramaProviderPlugin : BasePlugin() {
+    override fun load() {
+        OppaRuntime.context = (getContext() as? Context)?.applicationContext
         registerMainAPI(OppadramaProvider())
     }
 }

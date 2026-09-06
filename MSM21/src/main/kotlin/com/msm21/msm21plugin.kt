@@ -1,8 +1,9 @@
 package com.msm21
 
 import android.content.Context
+import com.lagradost.api.getContext
+import com.lagradost.cloudstream3.plugins.BasePlugin
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
-import com.lagradost.cloudstream3.plugins.Plugin
 
 object MsmRuntime {
     @Volatile
@@ -10,9 +11,9 @@ object MsmRuntime {
 }
 
 @CloudstreamPlugin
-class msm21plugin : Plugin() {
-    override fun load(context: Context) {
-        MsmRuntime.context = context.applicationContext
+class msm21plugin : BasePlugin() {
+    override fun load() {
+        MsmRuntime.context = (getContext() as? Context)?.applicationContext
 
         registerMainAPI(msm21())
         registerExtractorAPI(Dsvplay())

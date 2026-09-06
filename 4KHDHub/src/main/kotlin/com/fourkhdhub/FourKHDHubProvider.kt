@@ -3,7 +3,6 @@ package com.fourkhdhub
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
@@ -24,9 +23,9 @@ class FourKHDHubProvider : MainAPI() {
 
     companion object {
         // Shared across provider instances for the lifetime of the app process.
-        // CloudflareKiller clears WebView cookies when constructed, so creating
+        // CloudflareCompat clears WebView cookies when constructed, so creating
         // one per provider instance causes unnecessary re-challenges.
-        private val sharedCloudflareKiller by lazy { CloudflareKiller() }
+        private val sharedCloudflareKiller by lazy { CloudflareCompat() }
         private val sharedCloudflareMutex = Mutex()
         private val cloudflareStatusCodes = setOf(403, 503)
     }
@@ -115,7 +114,7 @@ class FourKHDHubProvider : MainAPI() {
             return response.document
         }
 
-        // CloudflareKiller exposes its per-host cookie cache. Reuse it directly
+        // CloudflareCompat exposes its per-host cookie cache. Reuse it directly
         // so later home/search/detail requests avoid a guaranteed 403 first.
         if (sharedCloudflareKiller.savedCookies.containsKey(host)) {
             try {

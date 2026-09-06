@@ -1,4 +1,4 @@
-version = 2
+version = 3
 cloudstream {
     description = "4KHDHub movies and series provider"
     authors = listOf("Luckez")

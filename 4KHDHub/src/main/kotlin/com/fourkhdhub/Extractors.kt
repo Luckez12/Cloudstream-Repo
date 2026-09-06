@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.extractors.PixelDrain
 import com.lagradost.cloudstream3.extractors.VidHidePro
 import com.lagradost.cloudstream3.extractors.VidStack
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
@@ -30,7 +29,7 @@ private data class ExtractorHtmlPage(
     val html: String,
 )
 
-private val sharedExtractorCloudflareKiller by lazy { CloudflareKiller() }
+private val sharedExtractorCloudflareKiller by lazy { CloudflareCompat() }
 private val sharedExtractorCloudflareMutex = Mutex()
 private val extractorCloudflareStatusCodes = setOf(403, 503)
 
