@@ -208,14 +208,15 @@ class AnichinProvider : MainAPI() {
             val currentHeading = headingText(current)
             if (
                 current.hasClass("releases") ||
-                current.matches("h1, h2, h3, h4, h5")
+                current.tagName().lowercase() in
+                    setOf("h1", "h2", "h3", "h4", "h5")
             ) {
                 if (currentHeading.isNotBlank()) return null
             }
 
             if (
                 current.select("article.bs, .bsx").isNotEmpty() ||
-                current.matches(".listupd")
+                current.hasClass("listupd")
             ) {
                 return current
             }
@@ -267,8 +268,7 @@ class AnichinProvider : MainAPI() {
     ): HomePageResponse {
         val items = when (request.name) {
             "Latest Release" -> {
-                // Use the same update-sorted archive for every page so page 1
-                // and later pages cannot drift into different ordering.
+                // Keep the same update-sorted archive for every page.
                 parseArchiveItems(
                     app.get(archiveUrl(page)).document
                 )
@@ -426,9 +426,6 @@ class AnichinProvider : MainAPI() {
         val anchors: List<Element> = if (primaryAnchors.isNotEmpty()) {
             primaryAnchors.toList()
         } else {
-            // Last-resort fallback is restricted to the current series slug.
-            // This prevents sidebar/recommendation episodes from another title
-            // being injected into this series.
             val seriesSlug = seriesSlugFromUrl(seriesUrl)
             if (seriesSlug == null) {
                 emptyList()
@@ -669,7 +666,6 @@ class AnichinProvider : MainAPI() {
         repeat(12) {
             val current = node ?: return@repeat
             val tag = current.tagName().lowercase()
-            val currentText = current.text().trim()
 
             if (tag in setOf("h1", "h2", "h3", "h4", "h5")) {
                 node = null
@@ -710,11 +706,11 @@ class AnichinProvider : MainAPI() {
                 title
             )?.let { return it }
 
-            // Some templates put a title heading immediately after "Sinopsis".
             val titleHeading = synopsisHeading
                 .nextElementSibling()
                 ?.takeIf {
-                    it.matches("h2, h3, h4, h5")
+                    it.tagName().lowercase() in
+                        setOf("h2", "h3", "h4", "h5")
                 }
 
             if (titleHeading != null) {
@@ -772,8 +768,6 @@ class AnichinProvider : MainAPI() {
             )?.let { return it }
         }
 
-        // Movie/episode templates can omit the "Sinopsis" heading and only
-        // show a heading equal to the title followed by multiple paragraphs.
         doc.select("h2, h3, h4, h5")
             .firstOrNull { heading ->
                 cleanDetailTitle(heading.text())
@@ -786,7 +780,6 @@ class AnichinProvider : MainAPI() {
                 )?.let { return it }
             }
 
-        // Final conservative fallback. Never use SEO meta/OG descriptions.
         return doc.select("p")
             .mapNotNull {
                 cleanSynopsisCandidate(
@@ -1444,10 +1437,6 @@ class AnichinProvider : MainAPI() {
             }
                 ?: return false
 
-        // Most Anichin videos are hard-subbed. Only expose extractor
-        // subtitles when the episode page explicitly tells viewers to enable
-        // CC, which covers special releases without showing useless generated
-        // tracks on normal episodes.
         val needsClosedCaptions =
             document.text().contains(
                 "AKTIFKAN SUB CC",
