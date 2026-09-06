@@ -193,46 +193,41 @@ class AnichinProvider : MainAPI() {
         val doc = app.get(url).document
 
         val items = when {
-            isMovie -> {
-                val archiveItems = parseItems(
-                    doc,
-                    ".listupd.normal article.bs, .listupd article.bs"
-                ).filter { it.type == TvType.AnimeMovie }
-
-                if (archiveItems.isNotEmpty()) {
-                    archiveItems
-                } else {
-                    val section = findHomeSection(doc, "Movie Baru", "Movie")
-                    if (section != null) {
-                        parseItems(section, "article.bs")
-                            .filter { it.type == TvType.AnimeMovie }
-                    } else {
-                        emptyList()
-                    }
-                }
-            }
-
-            page == 1 && request.name == "Latest Release" -> {
+            request.name == "Latest Release" && page == 1 -> {
                 val section = findHomeSection(doc, "Rilisan Terbaru", "Latest")
                 if (section != null) {
-                    parseItems(section, "article.bs")
+                    parseItems(section, "article.bs, .bs")
                 } else {
                     parseItems(
                         doc,
-                        ".releases.latesthome + .listupd article.bs, .releases.latest + .listupd article.bs"
+                        ".releases.latesthome + .listupd article.bs, " +
+                            ".releases.latest + .listupd article.bs"
                     ).take(20)
                 }
             }
 
-            page == 1 && request.name == "Popular Today" -> {
+            request.name == "Popular Today" && page == 1 -> {
                 val section = findHomeSection(doc, "Terpopuler Hari Ini", "Popular")
                 if (section != null) {
-                    parseItems(section, "article.bs")
+                    parseItems(section, "article.bs, .bs")
                 } else {
                     parseItems(
                         doc,
-                        ".releases.hothome + .listupd article.bs, .listupd.popular article.bs"
+                        ".releases.hothome + .listupd article.bs, " +
+                            ".listupd.popular article.bs"
                     ).take(12)
+                }
+            }
+
+            isMovie -> {
+                val section = findHomeSection(doc, "Movie")
+                if (section != null) {
+                    parseItems(section, "article.bs, .bs")
+                } else {
+                    parseItems(
+                        doc,
+                        ".listupd article.bs, .listupd .bs"
+                    ).filter { it.type == TvType.AnimeMovie }
                 }
             }
 
