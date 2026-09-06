@@ -370,96 +370,114 @@ class msm21 : MainAPI() {
                 callback = callback,
                 emittedUrls = emittedUrls
             )
-            if (standard.foundStream) return true
 
-            return probeWithWebView(
+            val webViewFound = probeWithWebView(
                 mirrors = standard.unresolved,
                 pageUrl = pageUrl,
                 callback = callback,
                 emittedUrls = emittedUrls,
                 maxMirrors = MAX_WEBVIEW_MIRRORS
             )
+
+            return standard.foundStream || webViewFound
         }
 
-        // Episod biasanya mempunyai beberapa host native. Ambil semuanya serentak
-        // supaya link pertama boleh dihantar tanpa menunggu player JavaScript.
-        val fastOptions = options
+        // Fast native servers and fallback servers start together.
+        // Direct extractor callbacks are emitted immediately as each source resolves.
+        val selectedFastOptions = options
             .filter { it.isFastNativeOption() }
             .sortedBy { it.fastPriority() }
+            .take(MAX_FAST_OPTIONS)
 
-        if (fastOptions.isNotEmpty()) {
-            // Setiap host bermula terus. Callback daripada host terpantas boleh
-            // sampai sementara host lain masih melengkapkan senarai server.
-            val nativeResults = coroutineScope {
-                val ajaxSemaphore = Semaphore(AJAX_BATCH_SIZE)
-                fastOptions.take(MAX_FAST_OPTIONS).map { option ->
-                    async {
-                        val fastMirrors = ajaxSemaphore.withPermit {
-                            fetchMirror(option, pageUrl)
-                                .distinctBy { it.url }
-                        }
-                        loadStandardMirrors(
-                            mirrors = fastMirrors,
-                            pageUrl = pageUrl,
-                            subtitleCallback = subtitleCallback,
-                            callback = callback,
-                            emittedUrls = emittedUrls
-                        )
-                    }
-                }.awaitAll()
-            }
+        val fastOptionKeys = selectedFastOptions
+            .map { it.optionKey() }
+            .toSet()
 
-            // Semua host native telah dicuba. Jika sekurang-kurangnya satu berjaya,
-            // jangan hidupkan WebView yang lebih berat.
-            if (nativeResults.any { it.foundStream }) return true
-        }
-
-        // Filem lazimnya menggunakan Abyss atau keluarga PlayerX. Proses dua
-        // pilihan pada satu masa dan berhenti sebaik sahaja satu link boleh main.
         val fallbackOptions = options
+            .filterNot { it.optionKey() in fastOptionKeys }
             .sortedBy { it.fallbackPriority() }
             .take(MAX_FALLBACK_OPTIONS)
 
-        var webViewBudget = MAX_WEBVIEW_MIRRORS
-        val probedUrls = mutableSetOf<String>()
+        val laneResults = coroutineScope {
+            val fastLane = async {
+                if (selectedFastOptions.isEmpty()) {
+                    ExtractionBatchResult(false, emptyList())
+                } else {
+                    val ajaxSemaphore = Semaphore(AJAX_BATCH_SIZE)
+                    val results = selectedFastOptions.map { option ->
+                        async {
+                            val mirrors = ajaxSemaphore.withPermit {
+                                fetchMirror(option, pageUrl)
+                                    .distinctBy { it.url }
+                            }
+                            loadStandardMirrors(
+                                mirrors = mirrors,
+                                pageUrl = pageUrl,
+                                subtitleCallback = subtitleCallback,
+                                callback = callback,
+                                emittedUrls = emittedUrls
+                            )
+                        }
+                    }.awaitAll()
 
-        for (batch in fallbackOptions.chunked(FALLBACK_BATCH_SIZE)) {
-            val mirrors = fetchMirrors(batch, pageUrl)
-                .distinctBy { it.url }
-            if (mirrors.isEmpty()) continue
-
-            val standard = loadStandardMirrors(
-                mirrors = mirrors,
-                pageUrl = pageUrl,
-                subtitleCallback = subtitleCallback,
-                callback = callback,
-                emittedUrls = emittedUrls
-            )
-            if (standard.foundStream) return true
-
-            if (webViewBudget > 0) {
-                val candidates = standard.unresolved
-                    .filter { probedUrls.add(it.url) }
-                    .sortedBy { it.webViewPriority() }
-                    .take(webViewBudget)
-
-                if (probeWithWebView(
-                        mirrors = candidates,
-                        pageUrl = pageUrl,
-                        callback = callback,
-                        emittedUrls = emittedUrls,
-                        maxMirrors = webViewBudget
+                    ExtractionBatchResult(
+                        foundStream = results.any { it.foundStream },
+                        unresolved = results.flatMap { it.unresolved }
                     )
-                ) return true
-
-                webViewBudget -= candidates.size
+                }
             }
 
-            if (webViewBudget <= 0) break
+            val fallbackLane = async {
+                var foundStream = false
+                val unresolved = mutableListOf<EmbedMirror>()
+
+                for (batch in fallbackOptions.chunked(FALLBACK_BATCH_SIZE)) {
+                    val mirrors = fetchMirrors(batch, pageUrl)
+                        .distinctBy { it.url }
+                    if (mirrors.isEmpty()) continue
+
+                    val standard = loadStandardMirrors(
+                        mirrors = mirrors,
+                        pageUrl = pageUrl,
+                        subtitleCallback = subtitleCallback,
+                        callback = callback,
+                        emittedUrls = emittedUrls
+                    )
+                    foundStream = foundStream || standard.foundStream
+                    unresolved += standard.unresolved
+                }
+
+                ExtractionBatchResult(
+                    foundStream = foundStream,
+                    unresolved = unresolved
+                )
+            }
+
+            awaitAll(fastLane, fallbackLane)
         }
 
-        invalidateMirrorCache(pageUrl)
-        return false
+        var foundStream = laneResults.any { it.foundStream }
+
+        val webViewCandidates = laneResults
+            .flatMap { it.unresolved }
+            .distinctBy { it.url }
+            .sortedBy { it.webViewPriority() }
+            .take(MAX_WEBVIEW_MIRRORS)
+
+        if (webViewCandidates.isNotEmpty()) {
+            foundStream = probeWithWebView(
+                mirrors = webViewCandidates,
+                pageUrl = pageUrl,
+                callback = callback,
+                emittedUrls = emittedUrls,
+                maxMirrors = MAX_WEBVIEW_MIRRORS
+            ) || foundStream
+        }
+
+        if (!foundStream) {
+            invalidateMirrorCache(pageUrl)
+        }
+        return foundStream
     }
 
     private suspend fun loadStandardMirrors(
@@ -508,6 +526,8 @@ class msm21 : MainAPI() {
         emittedUrls: MutableSet<String>,
         maxMirrors: Int
     ): Boolean {
+        var foundAny = false
+
         for (mirror in mirrors
             .distinctBy { it.url }
             .sortedBy { it.webViewPriority() }
@@ -558,10 +578,12 @@ class msm21 : MainAPI() {
                 )
             }
 
-            if (streams.isNotEmpty()) return true
+            if (streams.isNotEmpty()) {
+                foundAny = true
+            }
         }
 
-        return false
+        return foundAny
     }
 
     private suspend fun fetchMirrors(
@@ -745,6 +767,10 @@ class msm21 : MainAPI() {
             value.contains("veev") -> 2
             else -> 3
         }
+    }
+
+    private fun PlayerOption.optionKey(): String {
+        return "$post\u0000$nume\u0000$type"
     }
 
     private fun PlayerOption.isFastNativeOption(): Boolean {
