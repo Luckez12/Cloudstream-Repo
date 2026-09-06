@@ -68,10 +68,16 @@ subprojects {
     }
 
     dependencies {
-        val cloudstream by configurations
         val implementation by configurations
+        val compileOnly by configurations
 
-        cloudstream("com.lagradost:cloudstream3:pre-release")
+        // Current cross-platform Cloudstream API used by the official extensions repo.
+        implementation("com.github.recloudstream.cloudstream:library:-SNAPSHOT")
+
+        // App-only APIs still used by a few legacy providers in this repo
+        // (Plugin, CloudflareKiller, Android-context plugin lifecycle).
+        // compileOnly keeps them out of the built extension package.
+        compileOnly("com.lagradost:cloudstream3:pre-release")
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.11")
         implementation("org.jsoup:jsoup:1.18.3")
