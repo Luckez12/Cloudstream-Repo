@@ -1,5 +1,4 @@
-version = 1
-
+version = 2
 cloudstream {
     description = "OppaDrama — Streaming Drama Korean, Movie and TV Series"
     language = "id"

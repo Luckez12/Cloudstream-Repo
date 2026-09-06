@@ -7,17 +7,16 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.net.URI
 import java.net.URLEncoder
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 
 class OppadramaProvider : MainAPI() {
 
@@ -237,46 +236,56 @@ class OppadramaProvider : MainAPI() {
         }
 
         /*
-         * Fast race strategy:
-         * 1. Standard extractors start concurrently instead of waiting serially.
-         * 2. Hydrax/Abyss runs in one dedicated job to avoid multiple WebViews.
-         * 3. The first playable link opens a short collection window so other
-         *    fast mirrors can still appear, then remaining slow work is cancelled.
+         * Hybrid two-lane strategy:
+         * 1. The first priority standard mirrors get dedicated fast workers.
+         * 2. Remaining standard mirrors continue in a bounded full lane.
+         * 3. Hydrax/Abyss stays in one serial lane to avoid parallel WebViews.
+         * 4. A successful source never cancels another mirror. Every callback is
+         *    emitted immediately, while the remaining work stays inside the same
+         *    Cloudstream coroutine lifecycle.
          */
         return supervisorScope {
             val foundLinks = AtomicBoolean(false)
-            val raceResult = CompletableDeferred<Boolean>()
+            val emittedUrls = ConcurrentHashMap.newKeySet<String>()
 
-            val standardServers = sortedServers.filterNot { it.isHydraxMirror() }
-            val hydraxServers = sortedServers.filter { it.isHydraxMirror() }
-            val totalJobs = standardServers.size + if (hydraxServers.isNotEmpty()) 1 else 0
-            val remainingJobs = AtomicInteger(totalJobs)
-
-            val fastCallback: (ExtractorLink) -> Unit = { link ->
-                foundLinks.set(true)
-                raceResult.complete(true)
-                callback(link)
-            }
-
-            fun jobFinished() {
-                if (remainingJobs.decrementAndGet() == 0) {
-                    raceResult.complete(false)
+            val emitCallback: (ExtractorLink) -> Unit = { link ->
+                if (emittedUrls.add(link.url)) {
+                    foundLinks.set(true)
+                    callback(link)
                 }
             }
 
+            val standardServers = sortedServers.filterNot { it.isHydraxMirror() }
+            val hydraxServers = sortedServers.filter { it.isHydraxMirror() }
+
+            val fastServers = standardServers.take(FAST_LANE_SIZE)
+            val fullServers = standardServers.drop(FAST_LANE_SIZE)
+            val fullLaneSemaphore = Semaphore(FULL_LANE_CONCURRENCY)
+
             val jobs = buildList {
-                standardServers.forEach { mirror ->
+                fastServers.forEach { mirror ->
                     add(
                         launch {
-                            try {
+                            resolveStandardMirror(
+                                mirror = mirror,
+                                data = data,
+                                subtitleCallback = subtitleCallback,
+                                callback = emitCallback
+                            )
+                        }
+                    )
+                }
+
+                fullServers.forEach { mirror ->
+                    add(
+                        launch {
+                            fullLaneSemaphore.withPermit {
                                 resolveStandardMirror(
                                     mirror = mirror,
                                     data = data,
                                     subtitleCallback = subtitleCallback,
-                                    callback = fastCallback
+                                    callback = emitCallback
                                 )
-                            } finally {
-                                jobFinished()
                             }
                         }
                     )
@@ -285,58 +294,25 @@ class OppadramaProvider : MainAPI() {
                 if (hydraxServers.isNotEmpty()) {
                     add(
                         launch {
-                            try {
-                                for (mirror in hydraxServers) {
-                                    val loaded = resolveHydraxMirror(
-                                        mirror = mirror,
-                                        data = data,
-                                        subtitleCallback = subtitleCallback,
-                                        callback = fastCallback
-                                    )
-                                    if (loaded) break
-                                }
-                            } finally {
-                                jobFinished()
+                            for (mirror in hydraxServers) {
+                                resolveHydraxMirror(
+                                    mirror = mirror,
+                                    data = data,
+                                    subtitleCallback = subtitleCallback,
+                                    callback = emitCallback
+                                )
                             }
                         }
                     )
                 }
             }
 
-            val gotFirstLink = withTimeoutOrNull(SERVER_RACE_TIMEOUT_MS) {
-                raceResult.await()
-            } ?: false
-
-            if (gotFirstLink) {
-                // A playable source exists. Give other fast mirrors a short chance,
-                // then stop expensive work such as a lingering WebView probe.
-                delay(COLLECT_AFTER_FIRST_LINK_MS)
-                jobs.forEach { job ->
-                    if (job.isActive) job.cancel()
-                }
-                jobs.joinAll()
-            } else {
-                /*
-                 * Reliability phase. Do NOT cancel the race just because no server
-                 * answered during the fast window. Some CloudStream extractors can
-                 * legitimately take longer on a cold DNS/TLS path. Let the existing
-                 * jobs finish for a bounded compatibility window first.
-                 */
-                Log.i(TAG, "OPPA_FAST_RACE_SLOW_FALLBACK = servers=${sortedServers.size}")
-                withTimeoutOrNull(SLOW_FALLBACK_WAIT_MS) {
-                    jobs.joinAll()
-                }
-
-                jobs.forEach { job ->
-                    if (job.isActive) job.cancel()
-                }
-                jobs.joinAll()
-            }
+            jobs.joinAll()
 
             Log.i(
                 TAG,
-                "OPPA_FAST_RACE_DONE = first=$gotFirstLink | found=${foundLinks.get()} | " +
-                    "servers=${sortedServers.size}"
+                "OPPA_LINK_COLLECTION_DONE = found=${foundLinks.get()} | " +
+                    "servers=${sortedServers.size} | unique=${emittedUrls.size}"
             )
 
             foundLinks.get()
@@ -714,22 +690,6 @@ class OppadramaProvider : MainAPI() {
             ?.takeIf { it.isNotBlank() }
     }
 
-    private fun streamSbCandidates(id: String): List<String> {
-        return listOf(
-            "https://sbembed1.com/e/$id.html",
-            "https://sbembed4.com/e/$id.html",
-            "https://sbvideo.net/e/$id.html",
-            "https://viewsb.com/e/$id",
-            "https://watchsb.com/e/$id",
-            "https://embedsb.com/e/$id",
-            "https://playersb.com/e/$id",
-            "https://streamsb.net/e/$id",
-            "https://streamsb.com/e/$id",
-            "https://sbembed.com/e/$id",
-            "https://sbplay.org/e/$id",
-            "https://streamsss.net/e/$id"
-        )
-    }
 
     private fun hydraxCandidates(id: String): List<String> {
         return listOf(
@@ -756,34 +716,7 @@ class OppadramaProvider : MainAPI() {
         return this
     }
 
-    private fun MutableMap<String, String>.cleanAbyssHeaders(): MutableMap<String, String> {
-        val blocked = setOf(
-            "host",
-            "connection",
-            "accept-encoding",
-            "range",
-            "origin"
-        )
 
-        keys.toList().forEach { key ->
-            if (key.lowercase() in blocked) {
-                remove(key)
-            }
-        }
-
-        return this
-    }
-
-    private fun String.toAbsoluteStreamUrl(): String {
-        val value = trim()
-
-        return when {
-            value.startsWith("//") -> "https:$value"
-            value.startsWith("http", true) -> value
-            value.startsWith("/") -> "https://abyssplayer.com$value"
-            else -> value
-        }
-    }
 
     private fun isRealStreamServer(
         label: String,
@@ -946,9 +879,8 @@ class OppadramaProvider : MainAPI() {
     companion object {
         private const val TAG = "OppaDrama"
         private const val DEFAULT_SITE_URL = "http://45.11.57.188"
-        private const val SERVER_RACE_TIMEOUT_MS = 14000L
-        private const val SLOW_FALLBACK_WAIT_MS = 18000L
-        private const val COLLECT_AFTER_FIRST_LINK_MS = 2200L
+        private const val FAST_LANE_SIZE = 3
+        private const val FULL_LANE_CONCURRENCY = 2
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 Chrome/139.0 Mobile Safari/537.36"
     }
