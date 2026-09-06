@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 @CloudstreamPlugin
 class AnichinPlugin : BasePlugin() {
     override fun load() {
-        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=8")
+        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=9")
         registerMainAPI(AnichinProvider())
 
         registerExtractorAPI(Dailymotion())

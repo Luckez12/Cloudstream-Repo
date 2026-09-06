@@ -4,7 +4,6 @@ import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
-import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import kotlinx.coroutines.CancellationException
@@ -15,6 +14,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -42,13 +42,56 @@ class AnichinProvider : MainAPI() {
         val url: String
     )
 
+    /**
+     * Current Anichin series pages live directly at /{series-slug}/.
+     * Homepage/archive cards often point to the newest episode post, so
+     * normalize those links back to the real series page before Cloudstream
+     * stores them in the catalogue.
+     */
+    private fun normalizeCatalogUrl(rawHref: String): String? {
+        val absolute = absoluteUrl(mainUrl, rawHref) ?: return null
+        val clean = absolute.substringBefore('#')
+        val slug = runCatching {
+            URI(clean).path.trim('/').substringAfterLast('/')
+        }.getOrNull().orEmpty()
+
+        if (slug.isBlank()) return clean
+
+        val seriesSlug = EPISODE_SLUG_SUFFIX.replace(slug, "")
+        return if (seriesSlug != slug && seriesSlug.isNotBlank()) {
+            "$mainUrl/$seriesSlug/"
+        } else {
+            clean
+        }
+    }
+
+    private fun cleanCatalogTitle(raw: String): String {
+        val title = raw.trim()
+        if (title.isBlank()) return title
+
+        val withoutEpisode = title.replace(
+            Regex(
+                """\s+(?:Episode|Ep|Eps)\s*\d+(?:\.\d+)?(?:\s*(?:Tamat|END))?.*$""",
+                RegexOption.IGNORE_CASE
+            ),
+            ""
+        ).trim()
+
+        val cleaned = withoutEpisode.replace(
+            Regex("""\s+Subtitle\s+Indonesia.*$""", RegexOption.IGNORE_CASE),
+            ""
+        ).trim()
+
+        return cleaned.ifBlank { title }
+    }
+
     private fun parseItems(
-        doc: Document,
+        root: Element,
         selector: String
     ): List<SearchResponse> {
-        return doc.select(selector).mapNotNull { item ->
+        return root.select(selector).mapNotNull { item ->
             val anchor = item.selectFirst(".bsx > a, a") ?: return@mapNotNull null
-            val href = anchor.attr("href").ifBlank { return@mapNotNull null }
+            val href = normalizeCatalogUrl(anchor.attr("href")) ?: return@mapNotNull null
 
             val poster = item.selectFirst(".limit img, img")?.let { image ->
                 image.attr("data-src")
@@ -57,23 +100,27 @@ class AnichinProvider : MainAPI() {
                     .ifBlank { null }
             }
 
-            val type = item.selectFirst(".typez")?.text()?.trim()
+            val type = item.selectFirst(".typez, .type")?.text()?.trim()
             val tvType = when {
-                type.equals("Movie", ignoreCase = true) -> TvType.AnimeMovie
+                type?.contains("Movie", ignoreCase = true) == true -> TvType.AnimeMovie
                 else -> TvType.Anime
             }
 
-            val title = item.selectFirst(".tt")?.ownText()?.trim()?.ifBlank { null }
+            val rawTitle = item.selectFirst(".tt")?.text()?.trim()?.ifBlank { null }
                 ?: item.selectFirst(".tt h2, h2, h3")?.text()?.trim()?.ifBlank { null }
                 ?: anchor.attr("title").trim().ifBlank { null }
                 ?: return@mapNotNull null
 
+            val title = cleanCatalogTitle(rawTitle)
+            if (title.isBlank()) return@mapNotNull null
+
             val epText = item.selectFirst(".bt .epx, .epx, .ep")?.text()?.trim()
-            val epNum = Regex("""(\d+)""")
+            val epNum = Regex("""(\d+(?:\.\d+)?)""")
                 .find(epText.orEmpty())
                 ?.groupValues
                 ?.getOrNull(1)
-                ?.toIntOrNull()
+                ?.toDoubleOrNull()
+                ?.toInt()
 
             newAnimeSearchResponse(title, href, tvType) {
                 posterUrl = poster
@@ -82,37 +129,50 @@ class AnichinProvider : MainAPI() {
         }.distinctBy { it.url }
     }
 
+    private fun findHomeSection(
+        doc: Document,
+        vararg needles: String
+    ): Element? {
+        val heading = doc.select(".releases").firstOrNull { release ->
+            val text = release.text()
+            needles.any { text.contains(it, ignoreCase = true) }
+        } ?: return null
+
+        var sibling = heading.nextElementSibling()
+        repeat(3) {
+            if (sibling == null) return null
+            if (sibling!!.hasClass("listupd") || sibling!!.select("article.bs").isNotEmpty()) {
+                return sibling
+            }
+            sibling = sibling!!.nextElementSibling()
+        }
+        return null
+    }
+
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        if (request.name == "Popular Today") {
-            val doc = app.get(mainUrl).document
-
-            val items = parseItems(
-                doc,
-                ".releases.hothome + .listupd.normal article.bs, " +
-                    ".listupd.popular article.bs, " +
-                    ".listupd article.bs"
-            )
-
-            return newHomePageResponse(request.name, items)
-        }
-
-        val url = if (page > 1) {
-            "$mainUrl/page/$page/"
-        } else {
-            mainUrl
-        }
-
+        val url = if (page > 1) "$mainUrl/page/$page/" else mainUrl
         val doc = app.get(url).document
 
-        val items = parseItems(
-            doc,
-            ".releases.latesthome + .listupd.normal article.bs, " +
-                ".listupd.normal article.bs, " +
-                ".listupd article.bs"
-        )
+        val items = if (page == 1 && request.name == "Popular Today") {
+            val section = findHomeSection(doc, "Terpopuler Hari Ini", "Popular")
+            if (section != null) {
+                parseItems(section, "article.bs")
+            } else {
+                parseItems(doc, ".releases.hothome + .listupd article.bs, .listupd.popular article.bs")
+            }
+        } else if (page == 1) {
+            val section = findHomeSection(doc, "Rilisan Terbaru", "Latest")
+            if (section != null) {
+                parseItems(section, "article.bs")
+            } else {
+                parseItems(doc, ".releases.latesthome + .listupd article.bs")
+            }
+        } else {
+            parseItems(doc, ".listupd.normal article.bs, main article.bs, article.bs")
+        }
 
         return newHomePageResponse(request.name, items)
     }
@@ -124,258 +184,140 @@ class AnichinProvider : MainAPI() {
 
         return parseItems(
             doc,
-            "div.listupd article.bs, article.bs"
+            "div.listupd article.bs, main article.bs, article.bs"
         )
     }
 
-    private fun episodeToSeriesUrl(url: String): String? {
-        val slug = url
-            .substringBefore("?")
-            .trimEnd('/')
-            .substringAfterLast("/")
-
-        val seriesSlug = Regex(
-            """-episode-\d+(?:\.\d+)?(?:-[^/]*)?$""",
+    private fun episodeNumberFrom(
+        href: String,
+        text: String
+    ): Double? {
+        val fromText = Regex(
+            """(?:Episode|Ep|Eps|E)?\s*(\d+(?:\.\d+)?)""",
             RegexOption.IGNORE_CASE
-        ).replace(slug, "")
+        ).find(text)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toDoubleOrNull()
 
-        if (seriesSlug == slug || seriesSlug.isBlank()) {
-            return null
-        }
+        if (fromText != null) return fromText
 
-        return "$mainUrl/seri/$seriesSlug/"
-    }
-
-    private suspend fun getEpisodesFromRestApi(
-        animeUrl: String,
-        poster: String?
-    ): MutableList<Episode> {
-        val slug = animeUrl
-            .substringBefore("?")
-            .trimEnd('/')
-            .substringAfterLast("/")
-
-        val categoryRaw = app.get(
-            "$mainUrl/wp-json/wp/v2/categories" +
-                "?slug=$slug&per_page=1&_fields=id"
-        ).text
-
-        val categoryList =
-            tryParseJson<List<Map<String, Any?>>>(categoryRaw)
-
-        val categoryId =
-            categoryList
-                ?.firstOrNull()
-                ?.get("id")
-                ?.toString()
-                ?.substringBefore(".")
-
-        val episodes = mutableListOf<Episode>()
-
-        if (categoryId == null) {
-            return episodes
-        }
-
-        var apiPage = 1
-
-        while (apiPage <= MAX_SEARCH_PAGES) {
-            val postRaw = app.get(
-                "$mainUrl/wp-json/wp/v2/posts" +
-                    "?categories=$categoryId" +
-                    "&per_page=100" +
-                    "&page=$apiPage" +
-                    "&_fields=id,title,link"
-            ).text
-
-            val posts =
-                tryParseJson<List<Map<String, Any?>>>(postRaw)
-                    ?: break
-
-            if (posts.isEmpty()) {
-                break
-            }
-
-            posts.forEach { post ->
-                val epHref =
-                    post["link"]?.toString()
-                        ?: return@forEach
-
-                val titleObj =
-                    post["title"] as? Map<*, *>
-
-                val epTitle =
-                    titleObj
-                        ?.get("rendered")
-                        ?.toString()
-                        ?.replace(Regex("<[^>]+>"), "")
-                        ?.trim()
-                        ?.ifBlank { null }
-                        ?: return@forEach
-
-                val epNum = Regex(
-                    """(?:Episode|Ep|Eps|E)\s*(\d+(?:\.\d+)?)""",
-                    RegexOption.IGNORE_CASE
-                ).find(epTitle)
-                    ?.groupValues
-                    ?.getOrNull(1)
-                    ?.toDoubleOrNull()
-
-                episodes.add(
-                    newEpisode(epHref) {
-                        name = epTitle
-                        episode = epNum?.toInt()
-                        posterUrl = poster
-                    }
-                )
-            }
-
-            if (posts.size < 100) {
-                break
-            }
-
-            apiPage++
-        }
-
-        return episodes
+        return Regex(
+            """-episode-(\d+(?:\.\d+)?)""",
+            RegexOption.IGNORE_CASE
+        ).find(href)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toDoubleOrNull()
     }
 
     private fun getEpisodesFromDocument(
         doc: Document,
         poster: String?
     ): MutableList<Episode> {
-        val episodes = mutableListOf<Episode>()
-
-        doc.select(
-            ".eplister a[href], " +
+        var anchors = doc.select(
+            ".eplister li a[href], " +
+                ".eplister a[href], " +
                 ".episodelist a[href], " +
                 ".episode-list a[href], " +
-                ".bixbox.bxcl.epcheck a[href], " +
-                "a[href*='-episode-']"
-        ).forEach { anchor ->
-            val href = anchor.attr("href").trim()
-            if (href.isBlank()) return@forEach
+                ".bixbox.bxcl.epcheck a[href]"
+        )
 
-            val text = anchor.text().trim()
-            if (text.isBlank()) return@forEach
+        if (anchors.isEmpty()) {
+            anchors = doc.select("a[href*='-episode-']")
+        }
 
-            val epNum = Regex(
-                """(?:Episode|Ep|Eps|E)?\s*(\d+(?:\.\d+)?)""",
-                RegexOption.IGNORE_CASE
-            ).find(text)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.toDoubleOrNull()
+        val episodes = anchors.mapNotNull { anchor ->
+            val href = absoluteUrl(mainUrl, anchor.attr("href")) ?: return@mapNotNull null
+            if (!href.contains("-episode-", ignoreCase = true)) return@mapNotNull null
 
-            episodes.add(
-                newEpisode(href) {
-                    name = text
-                    episode = epNum?.toInt()
-                    posterUrl = poster
-                }
+            val numberText = anchor.selectFirst(
+                ".epl-num, .epnum, .episode-number, [data-num]"
+            )?.text()?.trim().orEmpty()
+
+            val titleText = anchor.selectFirst(
+                ".epl-title, .episode-title, .title"
+            )?.text()?.trim()?.ifBlank { null }
+                ?: anchor.text().trim().ifBlank { null }
+                ?: return@mapNotNull null
+
+            val epNum = episodeNumberFrom(
+                href,
+                numberText.ifBlank { titleText }
             )
+
+            newEpisode(href) {
+                name = titleText
+                episode = epNum?.toInt()
+                posterUrl = poster
+            }
         }
 
         return episodes
             .distinctBy { it.data }
+            .sortedWith(
+                compareBy<Episode> { it.episode ?: Int.MAX_VALUE }
+                    .thenBy { it.name.orEmpty() }
+            )
             .toMutableList()
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val isEpisode =
-            url.contains("-episode-", ignoreCase = true)
+        val animeUrl = normalizeCatalogUrl(url) ?: url
+        val doc = app.get(animeUrl).document
 
-        val seriesUrl =
-            if (isEpisode) episodeToSeriesUrl(url)
-            else null
+        val title = doc.selectFirst("h1.entry-title, .infox h1, .infolimit h2")
+            ?.text()
+            ?.trim()
+            ?.ifBlank { null }
+            ?: doc.selectFirst("meta[property=og:title]")
+                ?.attr("content")
+                ?.substringBefore(" - Anichin")
+                ?.trim()
+                ?.ifBlank { null }
+            ?: throw ErrorLoadingException("Title not found")
 
-        val animeUrl =
-            seriesUrl ?: url
+        val poster = doc.selectFirst(".thumb img, .bigcontent .thumb img")?.let { image ->
+            image.attr("data-src")
+                .ifBlank { image.attr("data-lazy-src") }
+                .ifBlank { image.attr("src") }
+                .ifBlank { null }
+        } ?: doc.selectFirst("meta[property=og:image]")
+            ?.attr("content")
+            ?.ifBlank { null }
 
-        val doc =
-            app.get(animeUrl).document
-
-        val title =
-            doc.selectFirst("h1.entry-title")?.text()?.trim()
-                ?: doc.selectFirst(".infolimit h2")?.text()?.trim()
-                ?: doc.selectFirst(".infox h1")?.text()?.trim()
-                ?: doc.selectFirst("meta[property=og:title]")
-                    ?.attr("content")
-                    ?.trim()
-                ?: throw ErrorLoadingException("Title not found")
-
-        val poster =
-            doc.selectFirst(".thumb img")?.let { image ->
-                image.attr("data-src")
-                    .ifBlank { image.attr("data-lazy-src") }
-                    .ifBlank { image.attr("src") }
-                    .ifBlank { null }
-            }
-                ?: doc.selectFirst("meta[property=og:image]")
-                    ?.attr("content")
-                    ?.ifBlank { null }
-
-        val synopsis =
-            doc.select(".desc p, .entry-content p, .synp .entry-content")
+        val synopsis = doc.selectFirst(
+            ".synp .entry-content, .entry-content[itemprop=description], .desc"
+        )?.text()?.trim()?.ifBlank { null }
+            ?: doc.select(".desc p, .synp p")
                 .text()
                 .trim()
                 .ifBlank { null }
 
-        val tags =
-            doc.select(".genxed a, .genx a")
-                .mapNotNull {
-                    it.text().trim().ifBlank { null }
-                }
-                .distinct()
+        val tags = doc.select(".genxed a, .genx a")
+            .mapNotNull { it.text().trim().ifBlank { null } }
+            .distinct()
 
-        val status =
-            doc.select(".spe span, .info-content .spe span")
-                .firstOrNull {
-                    it.text().contains(
-                        "Status",
-                        ignoreCase = true
-                    )
-                }
-                ?.text()
-                ?.substringAfter(":")
-                ?.trim()
+        val infoSpans = doc.select(".spe span, .info-content .spe span")
 
-        val year =
-            Regex("""\b(19|20)\d{2}\b""")
-                .find(
-                    doc.select(
-                        ".spe, .info-content, .entry-content"
-                    ).text()
-                )
-                ?.value
-                ?.toIntOrNull()
+        val status = infoSpans.firstOrNull {
+            it.text().contains("Status", ignoreCase = true)
+        }?.text()?.substringAfter(":")?.trim()
 
-        val episodes = try {
-            getEpisodesFromRestApi(
-                animeUrl,
-                poster
-            )
-        } catch (_: Exception) {
-            mutableListOf()
-        }
+        val typeText = infoSpans.firstOrNull {
+            it.text().contains("Tipe", ignoreCase = true) ||
+                it.text().contains("Type", ignoreCase = true)
+        }?.text()?.substringAfter(":")?.trim()
 
-        if (episodes.isEmpty()) {
-            episodes.addAll(
-                getEpisodesFromDocument(
-                    doc,
-                    poster
-                )
-            )
-        }
+        val year = Regex("""\b(19|20)\d{2}\b""")
+            .find(doc.select(".spe, .info-content").text())
+            ?.value
+            ?.toIntOrNull()
 
-        episodes.sortWith(
-            compareBy<Episode> {
-                it.episode ?: Int.MAX_VALUE
-            }.thenBy {
-                it.name.orEmpty()
-            }
-        )
+        val episodes = getEpisodesFromDocument(doc, poster)
+        val isMovie = typeText?.contains("Movie", ignoreCase = true) == true
 
-        if (episodes.isNotEmpty()) {
+        if (!isMovie) {
             return newAnimeLoadResponse(
                 title,
                 animeUrl,
@@ -383,57 +325,31 @@ class AnichinProvider : MainAPI() {
             ) {
                 engName = title
                 posterUrl = poster
-                addEpisodes(
-                    DubStatus.Subbed,
-                    episodes
-                )
+                if (episodes.isNotEmpty()) {
+                    addEpisodes(DubStatus.Subbed, episodes)
+                }
                 plot = synopsis
                 this.tags = tags
                 this.year = year
 
-                showStatus =
-                    when {
-                        status?.contains(
-                            "Completed",
-                            ignoreCase = true
-                        ) == true -> ShowStatus.Completed
-
-                        status?.contains(
-                            "Ongoing",
-                            ignoreCase = true
-                        ) == true -> ShowStatus.Ongoing
-
-                        else -> null
-                    }
-
-                doc.selectFirst(
-                    "[data-alid], [data-anilist]"
-                )?.let { element ->
-                    val id =
-                        element.attr("data-alid")
-                            .ifBlank {
-                                element.attr("data-anilist")
-                            }
-                            .toIntOrNull()
-
-                    if (id != null) {
-                        addAniListId(id)
-                    }
+                showStatus = when {
+                    status?.contains("Completed", ignoreCase = true) == true -> ShowStatus.Completed
+                    status?.contains("Ongoing", ignoreCase = true) == true -> ShowStatus.Ongoing
+                    else -> null
                 }
 
-                doc.selectFirst(
-                    "[data-malid], [data-mal]"
-                )?.let { element ->
-                    val id =
-                        element.attr("data-malid")
-                            .ifBlank {
-                                element.attr("data-mal")
-                            }
-                            .toIntOrNull()
+                doc.selectFirst("[data-alid], [data-anilist]")?.let { element ->
+                    val id = element.attr("data-alid")
+                        .ifBlank { element.attr("data-anilist") }
+                        .toIntOrNull()
+                    if (id != null) addAniListId(id)
+                }
 
-                    if (id != null) {
-                        addMalId(id)
-                    }
+                doc.selectFirst("[data-malid], [data-mal]")?.let { element ->
+                    val id = element.attr("data-malid")
+                        .ifBlank { element.attr("data-mal") }
+                        .toIntOrNull()
+                    if (id != null) addMalId(id)
                 }
             }
         }
@@ -1037,7 +953,10 @@ class AnichinProvider : MainAPI() {
     }
 
     companion object {
-        private const val MAX_SEARCH_PAGES = 10
+        private val EPISODE_SLUG_SUFFIX = Regex(
+            """-episode-\d+(?:\.\d+)?(?:-[^/]*)?$""",
+            RegexOption.IGNORE_CASE
+        )
 
         // Top priority sources get three dedicated workers. The remaining
         // sources get another three workers, giving fast first-link response
