@@ -74,7 +74,7 @@ object MsmWebViewProbe {
         url: String,
         referer: String
     ): List<CapturedStream> = withContext(Dispatchers.Main) {
-        val context = MsmRuntime.context
+        val context = MsmRuntime.resolveContext()
             ?: return@withContext emptyList()
 
         suspendCancellableCoroutine { continuation ->

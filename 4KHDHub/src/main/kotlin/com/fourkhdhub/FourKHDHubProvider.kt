@@ -23,7 +23,7 @@ class FourKHDHubProvider : MainAPI() {
 
     companion object {
         // Shared across provider instances for the lifetime of the app process.
-        // CloudflareCompat clears WebView cookies when constructed, so creating
+        // CloudflareKiller clears WebView cookies when constructed, so creating
         // one per provider instance causes unnecessary re-challenges.
         private val sharedCloudflareKiller by lazy { CloudflareCompat() }
         private val sharedCloudflareMutex = Mutex()
@@ -114,7 +114,7 @@ class FourKHDHubProvider : MainAPI() {
             return response.document
         }
 
-        // CloudflareCompat exposes its per-host cookie cache. Reuse it directly
+        // CloudflareKiller exposes its per-host cookie cache. Reuse it directly
         // so later home/search/detail requests avoid a guaranteed 403 first.
         if (sharedCloudflareKiller.savedCookies.containsKey(host)) {
             try {

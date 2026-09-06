@@ -47,7 +47,7 @@ object AbyssWebViewProbe {
         url: String,
         referer: String
     ): List<AbyssStream> = withContext(Dispatchers.Main) {
-        val context = OppaRuntime.context
+        val context = OppaRuntime.resolveContext()
             ?: return@withContext emptyList()
 
         suspendCancellableCoroutine { continuation ->

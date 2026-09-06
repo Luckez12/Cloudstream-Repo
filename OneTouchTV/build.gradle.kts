@@ -1,5 +1,4 @@
-version = 1
-
+version = 2
 cloudstream {
     language = "en"
     description = "OneTouchTV - Asian Drama and Anime"
