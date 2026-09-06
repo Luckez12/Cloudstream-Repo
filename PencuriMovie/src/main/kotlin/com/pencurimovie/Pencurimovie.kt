@@ -4,13 +4,18 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 class Pencurimovie : MainAPI() {
     override var mainUrl = "https://ww21.pencurimovie.sbs"
@@ -42,6 +47,8 @@ class Pencurimovie : MainAPI() {
         val candidate = mainUrl.removeSuffix("/")
         mainUrl = try {
             getOrigin(followRedirect(candidate, maxHops = 4))
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             candidate
         }
@@ -255,48 +262,87 @@ class Pencurimovie : MainAPI() {
         val document = response.document
         val embedUrls = collectEmbedUrls(document, response.text, pageUrl)
         if (embedUrls.isEmpty()) return false
+
         val foundStream = AtomicBoolean(false)
+        val emittedUrls = ConcurrentHashMap.newKeySet<String>()
+        val attemptedTargets = ConcurrentHashMap.newKeySet<String>()
+        val semaphore = Semaphore(MAX_EMBED_CONCURRENCY)
+
+        fun emit(link: ExtractorLink) {
+            if (emittedUrls.add(link.url)) {
+                foundStream.set(true)
+                callback(link)
+            }
+        }
+
         coroutineScope {
             embedUrls.map { embedUrl ->
                 async {
-                    try {
-                        val finalUrl = followRedirect(embedUrl, maxHops = 5)
-                        val matched = loadExtractor(
-                            finalUrl,
-                            pageUrl,
-                            subtitleCallback
-                        ) { link ->
-                            foundStream.set(true)
-                            callback(link)
-                        }
-                        if (!matched) {
-                            val nestedUrl = findNestedEmbed(
-                                finalUrl,
-                                pageUrl
-                            )
-                            if (!nestedUrl.isNullOrBlank() &&
-                                nestedUrl != finalUrl
-                            ) {
-                                val nestedFinal = followRedirect(
-                                    nestedUrl,
-                                    maxHops = 4
+                    semaphore.withPermit {
+                        try {
+                            withTimeoutOrNull(EMBED_PIPELINE_TIMEOUT_MS) {
+                                val finalUrl = followRedirect(
+                                    embedUrl,
+                                    maxHops = 5
                                 )
-                                loadExtractor(
-                                    nestedFinal,
-                                    finalUrl,
-                                    subtitleCallback
-                                ) { link ->
-                                    foundStream.set(true)
-                                    callback(link)
+                                if (finalUrl.isBlank() ||
+                                    !attemptedTargets.add(finalUrl)
+                                ) {
+                                    return@withTimeoutOrNull
+                                }
+
+                                val directProduced = AtomicBoolean(false)
+                                withTimeoutOrNull(EXTRACTOR_TIMEOUT_MS) {
+                                    loadExtractor(
+                                        finalUrl,
+                                        pageUrl,
+                                        subtitleCallback
+                                    ) { link ->
+                                        directProduced.set(true)
+                                        emit(link)
+                                    }
+                                }
+
+                                if (!directProduced.get()) {
+                                    val nestedUrl = findNestedEmbed(
+                                        finalUrl,
+                                        pageUrl
+                                    )
+                                    if (!nestedUrl.isNullOrBlank() &&
+                                        nestedUrl != finalUrl
+                                    ) {
+                                        val nestedFinal = followRedirect(
+                                            nestedUrl,
+                                            maxHops = 4
+                                        )
+                                        if (nestedFinal.isNotBlank() &&
+                                            attemptedTargets.add(nestedFinal)
+                                        ) {
+                                            withTimeoutOrNull(
+                                                EXTRACTOR_TIMEOUT_MS
+                                            ) {
+                                                loadExtractor(
+                                                    nestedFinal,
+                                                    finalUrl,
+                                                    subtitleCallback
+                                                ) { link ->
+                                                    emit(link)
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            // One dead server must not block the rest.
                         }
-                    } catch (_: Exception) {
-                        // One dead server must not block the remaining servers.
                     }
                 }
             }.awaitAll()
         }
+
         return foundStream.get()
     }
     private fun collectEmbedUrls(
@@ -467,6 +513,8 @@ class Pencurimovie : MainAPI() {
                     ?.let { resolveUrl(url, cleanCandidateUrl(it)) }
                     ?.takeIf { !isNonVideoFrame(it) }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             null
         }
@@ -500,6 +548,8 @@ class Pencurimovie : MainAPI() {
                             ?.let { resolveUrl(current, it) }
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 null
             }
@@ -627,4 +677,10 @@ class Pencurimovie : MainAPI() {
             else -> srcAttr
         }
     }
+    private companion object {
+        const val MAX_EMBED_CONCURRENCY = 4
+        const val EMBED_PIPELINE_TIMEOUT_MS = 20_000L
+        const val EXTRACTOR_TIMEOUT_MS = 10_000L
+    }
+
 }
