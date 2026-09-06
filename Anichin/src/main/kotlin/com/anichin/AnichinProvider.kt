@@ -1,435 +1,740 @@
 package com.anichin
 
-import android.util.Log
+import android.util.Base64
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.network.CloudflareKiller
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
+import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.loadExtractor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.joinAll
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
-import java.net.URLEncoder
+import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 class AnichinProvider : MainAPI() {
 
     override var mainUrl = "https://anichin.moe"
-    override var name = "Anichin 👾"
+    override var name = "Anichin"
     override val hasMainPage = true
     override var lang = "id"
     override val hasDownloadSupport = true
-    override val loadLinksTimeoutMs = 90_000L
-
     override val supportedTypes = setOf(
-        TvType.Movie,
-        TvType.Anime
+        TvType.Anime,
+        TvType.AnimeMovie,
+        TvType.TvSeries
     )
 
     override val mainPage = mainPageOf(
-        "anime/?order=update" to "Latest Update",
-        "anime/?status=ongoing&order=update" to "Series Ongoing",
-        "anime/?status=completed&order=update" to "Series Completed",
-        "anime/?status=hiatus&order=update" to "Series Drop/Hiatus",
-        "anime/?type=movie&order=update" to "Movie"
+        "$mainUrl/" to "Popular Today",
+        "$mainUrl/" to "Latest Release"
     )
 
-    private fun Element.getImageUrl(): String? {
-        val imageUrl = listOf(
-            attr("data-src"),
-            attr("data-lazy-src"),
-            attr("data-original"),
-            attr("src")
-        ).firstOrNull {
-            it.isNotBlank() &&
-                !it.startsWith("data:", ignoreCase = true)
-        }
-        if (imageUrl != null) return imageUrl
+    private data class PlayerOption(
+        val label: String,
+        val url: String
+    )
 
-        val srcSet = listOf(
-            attr("data-srcset"),
-            attr("srcset")
-        ).firstOrNull { it.isNotBlank() } ?: return null
+    private fun parseItems(
+        doc: Document,
+        selector: String
+    ): List<SearchResponse> {
+        return doc.select(selector).mapNotNull { item ->
+            val anchor = item.selectFirst(".bsx > a, a") ?: return@mapNotNull null
+            val href = anchor.attr("href").ifBlank { return@mapNotNull null }
 
-        return srcSet
-            .split(",")
-            .lastOrNull()
-            ?.trim()
-            ?.split(" ")
-            ?.firstOrNull()
-            ?.takeIf {
-                it.isNotBlank() &&
-                    !it.startsWith("data:", ignoreCase = true)
+            val poster = item.selectFirst(".limit img, img")?.let { image ->
+                image.attr("data-src")
+                    .ifBlank { image.attr("data-lazy-src") }
+                    .ifBlank { image.attr("src") }
+                    .ifBlank { null }
             }
+
+            val type = item.selectFirst(".typez")?.text()?.trim()
+            val tvType = when {
+                type.equals("Movie", ignoreCase = true) -> TvType.AnimeMovie
+                else -> TvType.Anime
+            }
+
+            val title = item.selectFirst(".tt")?.ownText()?.trim()?.ifBlank { null }
+                ?: item.selectFirst(".tt h2, h2, h3")?.text()?.trim()?.ifBlank { null }
+                ?: anchor.attr("title").trim().ifBlank { null }
+                ?: return@mapNotNull null
+
+            val epText = item.selectFirst(".bt .epx, .epx, .ep")?.text()?.trim()
+            val epNum = Regex("""(\d+)""")
+                .find(epText.orEmpty())
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+
+            newAnimeSearchResponse(title, href, tvType) {
+                posterUrl = poster
+                addSub(epNum)
+            }
+        }.distinctBy { it.url }
     }
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val baseUrl = "$mainUrl/${request.data.trimStart('/')}"
-        val separator = if (baseUrl.contains('?')) "&" else "?"
-        val document = fetchSiteDocument(
-            "$baseUrl${separator}page=$page"
+        if (request.name == "Popular Today") {
+            val doc = app.get(mainUrl).document
+
+            val items = parseItems(
+                doc,
+                ".releases.hothome + .listupd.normal article.bs, " +
+                    ".listupd.popular article.bs, " +
+                    ".listupd article.bs"
+            )
+
+            return newHomePageResponse(request.name, items)
+        }
+
+        val url = if (page > 1) {
+            "$mainUrl/page/$page/"
+        } else {
+            mainUrl
+        }
+
+        val doc = app.get(url).document
+
+        val items = parseItems(
+            doc,
+            ".releases.latesthome + .listupd.normal article.bs, " +
+                ".listupd.normal article.bs, " +
+                ".listupd article.bs"
         )
 
-        val home = document
-            .select("div.listupd > article")
-            .mapNotNull { it.toSearchResult() }
+        return newHomePageResponse(request.name, items)
+    }
 
-        return newHomePageResponse(
-            list = HomePageList(
-                name = request.name,
-                list = home,
-                isHorizontalImages = false
-            ),
-            hasNext = document.selectFirst(".hpage a.r[href]") != null
+    override suspend fun search(query: String): List<SearchResponse> {
+        val doc = app.get(
+            "$mainUrl/?s=${query.replace(" ", "+")}"
+        ).document
+
+        return parseItems(
+            doc,
+            "div.listupd article.bs, article.bs"
         )
     }
 
-    private fun Element.toSearchResult(): SearchResponse? {
-        val anchor = selectFirst("div.bsx > a[href]") ?: return null
-        val title = anchor.attr("title").trim()
-            .ifBlank { selectFirst(".tt, h2")?.text()?.trim().orEmpty() }
-        val href = anchor.attr("href").trim()
-            .takeIf { it.isNotBlank() }
-            ?.let(::fixUrl)
-            ?: return null
-        if (title.isBlank()) return null
+    private fun episodeToSeriesUrl(url: String): String? {
+        val slug = url
+            .substringBefore("?")
+            .trimEnd('/')
+            .substringAfterLast("/")
 
-        val posterUrl = selectFirst("div.bsx > a img")
-            ?.getImageUrl()
-            ?.let { fixUrlNull(it) }
+        val seriesSlug = Regex(
+            """-episode-\d+(?:\.\d+)?(?:-[^/]*)?$""",
+            RegexOption.IGNORE_CASE
+        ).replace(slug, "")
 
-        val isMovie = selectFirst(".typez")
-            ?.text()
-            ?.contains("Movie", ignoreCase = true) == true
-
-        return if (isMovie) {
-            newMovieSearchResponse(title, href, TvType.Movie) {
-                this.posterUrl = posterUrl
-            }
-        } else {
-            newAnimeSearchResponse(title, href, TvType.Anime) {
-                this.posterUrl = posterUrl
-            }
+        if (seriesSlug == slug || seriesSlug.isBlank()) {
+            return null
         }
+
+        return "$mainUrl/seri/$seriesSlug/"
     }
 
-    override suspend fun search(
-        query: String
-    ): List<SearchResponse> = coroutineScope {
-        val searchQuery = URLEncoder.encode(query, "UTF-8")
+    private suspend fun getEpisodesFromRestApi(
+        animeUrl: String,
+        poster: String?
+    ): MutableList<Episode> {
+        val slug = animeUrl
+            .substringBefore("?")
+            .trimEnd('/')
+            .substringAfterLast("/")
 
-        (1..MAX_SEARCH_PAGES).map { page ->
-            async {
-                tryOrNull {
-                    fetchSiteDocument(
-                        "$mainUrl/page/$page/?s=$searchQuery"
-                    )
-                        .select("div.listupd > article")
-                        .mapNotNull { it.toSearchResult() }
-                }.orEmpty()
-            }
-        }.awaitAll().flatten().distinctBy { it.url }
-    }
+        val categoryRaw = app.get(
+            "$mainUrl/wp-json/wp/v2/categories" +
+                "?slug=$slug&per_page=1&_fields=id"
+        ).text
 
-    override suspend fun load(
-        url: String
-    ): LoadResponse {
-        val document = fetchSiteDocument(fixUrl(url))
+        val categoryList =
+            tryParseJson<List<Map<String, Any?>>>(categoryRaw)
 
-        val rawTitle = document
-            .selectFirst("h1.entry-title")
-            ?.text()
-            ?.trim()
-            .orEmpty()
-        val title = rawTitle
-            .replace(EPISODE_PAGE_SUFFIX, "")
-            .trim(' ', '-', ':', '|')
-        if (title.isBlank()) {
-            throw ErrorLoadingException("Anichin: title not found")
+        val categoryId =
+            categoryList
+                ?.firstOrNull()
+                ?.get("id")
+                ?.toString()
+                ?.substringBefore(".")
+
+        val episodes = mutableListOf<Episode>()
+
+        if (categoryId == null) {
+            return episodes
         }
 
-        val poster = (
-            document
-                .selectFirst("div.thumb img, div.ime img, img.wp-post-image")
-                ?.getImageUrl()
-                ?: document
-                    .selectFirst("meta[property=og:image]")
-                    ?.attr("content")
-                    ?.trim()
-        ).orEmpty()
+        var apiPage = 1
 
-        val description = document
-            .selectFirst("div.entry-content")
-            ?.text()
-            ?.trim()
+        while (apiPage <= MAX_SEARCH_PAGES) {
+            val postRaw = app.get(
+                "$mainUrl/wp-json/wp/v2/posts" +
+                    "?categories=$categoryId" +
+                    "&per_page=100" +
+                    "&page=$apiPage" +
+                    "&_fields=id,title,link"
+            ).text
 
-        val type = document
-            .selectFirst(".spe")
-            ?.text()
-            .orEmpty()
+            val posts =
+                tryParseJson<List<Map<String, Any?>>>(postRaw)
+                    ?: break
 
-        val genres = document.select(".genxed a")
-            .map { it.text().trim() }
-            .filter { it.isNotBlank() }
-
-        val year = RELEASE_YEAR.find(type)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-
-        val showStatus = when {
-            type.contains("Ongoing", ignoreCase = true) -> ShowStatus.Ongoing
-            type.contains("Completed", ignoreCase = true) -> ShowStatus.Completed
-            else -> null
-        }
-
-        val recommendations = document
-            .select("div.listupd > article")
-            .mapNotNull { it.toSearchResult() }
-            .distinctBy { it.url }
-
-        val tvType = if (type.contains("Movie", true)) {
-            TvType.Movie
-        } else {
-            TvType.TvSeries
-        }
-
-        return if (tvType == TvType.TvSeries) {
-            val seasonNumber = SEASON_NUMBER.find(title)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.toIntOrNull()
-
-            val episodes = document
-                .select(".eplister li")
-                .mapNotNull { episodeElement ->
-                    val link = fixUrl(
-                        episodeElement
-                            .selectFirst("a")
-                            ?.attr("href")
-                            .orEmpty()
-                    )
-                    if (link.isBlank()) return@mapNotNull null
-
-                    val episodeTitle = episodeElement
-                        .selectFirst(".epl-title")
-                        ?.text()
-                        ?.trim()
-                        .orEmpty()
-
-                    val episodeDate = episodeElement
-                        .selectFirst(".epl-date")
-                        ?.text()
-                        ?.trim()
-                        .orEmpty()
-
-                    val episodePoster = episodeElement
-                        .selectFirst("a img")
-                        ?.getImageUrl()
-                        ?.let { fixUrlNull(it) }
-                        ?: fixUrlNull(poster)
-
-                    // The site occasionally contains a typo in .epl-num
-                    // (for example Episode 574 is labelled as Eps 7574).
-                    // Prefer the title and URL, which remain correct.
-                    val episodeNumber = EPISODE_IN_TITLE.find(episodeTitle)
-                            ?.groupValues
-                            ?.getOrNull(1)
-                            ?.toIntOrNull()
-                        ?: EPISODE_IN_URL.find(link)
-                            ?.groupValues
-                            ?.getOrNull(1)
-                            ?.toIntOrNull()
-                        ?: episodeElement
-                            .selectFirst(".epl-num")
-                            ?.text()
-                            ?.let { EPISODE_NUMBER.find(it)?.value?.toIntOrNull() }
-
-                    val baseEpisodeName = episodeNumber
-                        ?.let { "Episode $it" }
-                        ?: episodeTitle
-                            .replace("Subtitle Indonesia", "", ignoreCase = true)
-                            .trim()
-                            .ifBlank { "Episode" }
-
-                    val episodeDescription =
-                        episodeDate
-                            .takeIf { it.isNotEmpty() }
-                            ?.let { "Rilis: $it" }
-
-                    newEpisode(link) {
-                        this.name = baseEpisodeName
-                        this.season = seasonNumber
-                        this.episode = episodeNumber
-                        this.posterUrl = episodePoster
-                        this.description = episodeDescription
-                    }
-                }
-                .reversed()
-
-            newTvSeriesLoadResponse(
-                title,
-                url,
-                TvType.Anime,
-                episodes
-            ) {
-                this.posterUrl = fixUrlNull(poster)
-                this.year = year
-                this.plot = description
-                this.tags = genres
-                this.recommendations = recommendations
-                this.showStatus = showStatus
-            }
-        } else {
-            val movieHref = document
-                .selectFirst(".eplister li > a")
-                ?.attr("href")
-                ?.let { fixUrl(it) }
-                ?: url
-
-            newMovieLoadResponse(
-                title,
-                movieHref,
-                TvType.Movie,
-                movieHref
-            ) {
-                this.posterUrl = fixUrlNull(poster)
-                this.year = year
-                this.plot = description
-                this.tags = genres
-                this.recommendations = recommendations
-            }
-        }
-    }
-
-    /**
-     * Runs a bounded group until one item succeeds. After the first success,
-     * keep a short grace period for another ready link, then cancel slow work.
-     */
-    private suspend fun <T> firstSuccessful(
-        items: List<T>,
-        concurrency: Int = MAX_PLAYER_CONCURRENCY,
-        block: suspend (T) -> Boolean
-    ): Boolean = coroutineScope {
-        if (items.isEmpty()) return@coroutineScope false
-
-        val semaphore = Semaphore(concurrency.coerceAtLeast(1))
-        val results = Channel<Boolean>(Channel.UNLIMITED)
-
-        val jobs = items.map { item ->
-            launch {
-                val succeeded = semaphore.withPermit {
-                    try {
-                        block(item)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
-                        false
-                    }
-                }
-
-                results.trySend(succeeded)
-            }
-        }
-
-        var completed = 0
-        var succeeded = false
-
-        while (completed < jobs.size) {
-            val result = results.receive()
-            completed++
-            if (result) {
-                succeeded = true
+            if (posts.isEmpty()) {
                 break
             }
+
+            posts.forEach { post ->
+                val epHref =
+                    post["link"]?.toString()
+                        ?: return@forEach
+
+                val titleObj =
+                    post["title"] as? Map<*, *>
+
+                val epTitle =
+                    titleObj
+                        ?.get("rendered")
+                        ?.toString()
+                        ?.replace(Regex("<[^>]+>"), "")
+                        ?.trim()
+                        ?.ifBlank { null }
+                        ?: return@forEach
+
+                val epNum = Regex(
+                    """(?:Episode|Ep|Eps|E)\s*(\d+(?:\.\d+)?)""",
+                    RegexOption.IGNORE_CASE
+                ).find(epTitle)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?.toDoubleOrNull()
+
+                episodes.add(
+                    newEpisode(epHref) {
+                        name = epTitle
+                        episode = epNum?.toInt()
+                        posterUrl = poster
+                    }
+                )
+            }
+
+            if (posts.size < 100) {
+                break
+            }
+
+            apiPage++
         }
 
-        if (succeeded && completed < jobs.size) {
-            withTimeoutOrNull(SUCCESS_GRACE_PERIOD_MS) {
-                while (completed < jobs.size) {
-                    results.receive()
-                    completed++
+        return episodes
+    }
+
+    private fun getEpisodesFromDocument(
+        doc: Document,
+        poster: String?
+    ): MutableList<Episode> {
+        val episodes = mutableListOf<Episode>()
+
+        doc.select(
+            ".eplister a[href], " +
+                ".episodelist a[href], " +
+                ".episode-list a[href], " +
+                ".bixbox.bxcl.epcheck a[href], " +
+                "a[href*='-episode-']"
+        ).forEach { anchor ->
+            val href = anchor.attr("href").trim()
+            if (href.isBlank()) return@forEach
+
+            val text = anchor.text().trim()
+            if (text.isBlank()) return@forEach
+
+            val epNum = Regex(
+                """(?:Episode|Ep|Eps|E)?\s*(\d+(?:\.\d+)?)""",
+                RegexOption.IGNORE_CASE
+            ).find(text)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toDoubleOrNull()
+
+            episodes.add(
+                newEpisode(href) {
+                    name = text
+                    episode = epNum?.toInt()
+                    posterUrl = poster
+                }
+            )
+        }
+
+        return episodes
+            .distinctBy { it.data }
+            .toMutableList()
+    }
+
+    override suspend fun load(url: String): LoadResponse {
+        val isEpisode =
+            url.contains("-episode-", ignoreCase = true)
+
+        val seriesUrl =
+            if (isEpisode) episodeToSeriesUrl(url)
+            else null
+
+        val animeUrl =
+            seriesUrl ?: url
+
+        val doc =
+            app.get(animeUrl).document
+
+        val title =
+            doc.selectFirst("h1.entry-title")?.text()?.trim()
+                ?: doc.selectFirst(".infolimit h2")?.text()?.trim()
+                ?: doc.selectFirst(".infox h1")?.text()?.trim()
+                ?: doc.selectFirst("meta[property=og:title]")
+                    ?.attr("content")
+                    ?.trim()
+                ?: throw ErrorLoadingException("Title not found")
+
+        val poster =
+            doc.selectFirst(".thumb img")?.let { image ->
+                image.attr("data-src")
+                    .ifBlank { image.attr("data-lazy-src") }
+                    .ifBlank { image.attr("src") }
+                    .ifBlank { null }
+            }
+                ?: doc.selectFirst("meta[property=og:image]")
+                    ?.attr("content")
+                    ?.ifBlank { null }
+
+        val synopsis =
+            doc.select(".desc p, .entry-content p, .synp .entry-content")
+                .text()
+                .trim()
+                .ifBlank { null }
+
+        val tags =
+            doc.select(".genxed a, .genx a")
+                .mapNotNull {
+                    it.text().trim().ifBlank { null }
+                }
+                .distinct()
+
+        val status =
+            doc.select(".spe span, .info-content .spe span")
+                .firstOrNull {
+                    it.text().contains(
+                        "Status",
+                        ignoreCase = true
+                    )
+                }
+                ?.text()
+                ?.substringAfter(":")
+                ?.trim()
+
+        val year =
+            Regex("""\b(19|20)\d{2}\b""")
+                .find(
+                    doc.select(
+                        ".spe, .info-content, .entry-content"
+                    ).text()
+                )
+                ?.value
+                ?.toIntOrNull()
+
+        val episodes = try {
+            getEpisodesFromRestApi(
+                animeUrl,
+                poster
+            )
+        } catch (_: Exception) {
+            mutableListOf()
+        }
+
+        if (episodes.isEmpty()) {
+            episodes.addAll(
+                getEpisodesFromDocument(
+                    doc,
+                    poster
+                )
+            )
+        }
+
+        episodes.sortWith(
+            compareBy<Episode> {
+                it.episode ?: Int.MAX_VALUE
+            }.thenBy {
+                it.name.orEmpty()
+            }
+        )
+
+        if (episodes.isNotEmpty()) {
+            return newAnimeLoadResponse(
+                title,
+                animeUrl,
+                TvType.Anime
+            ) {
+                engName = title
+                posterUrl = poster
+                addEpisodes(
+                    DubStatus.Subbed,
+                    episodes
+                )
+                plot = synopsis
+                this.tags = tags
+                this.year = year
+
+                showStatus =
+                    when {
+                        status?.contains(
+                            "Completed",
+                            ignoreCase = true
+                        ) == true -> ShowStatus.Completed
+
+                        status?.contains(
+                            "Ongoing",
+                            ignoreCase = true
+                        ) == true -> ShowStatus.Ongoing
+
+                        else -> null
+                    }
+
+                doc.selectFirst(
+                    "[data-alid], [data-anilist]"
+                )?.let { element ->
+                    val id =
+                        element.attr("data-alid")
+                            .ifBlank {
+                                element.attr("data-anilist")
+                            }
+                            .toIntOrNull()
+
+                    if (id != null) {
+                        addAniListId(id)
+                    }
+                }
+
+                doc.selectFirst(
+                    "[data-malid], [data-mal]"
+                )?.let { element ->
+                    val id =
+                        element.attr("data-malid")
+                            .ifBlank {
+                                element.attr("data-mal")
+                            }
+                            .toIntOrNull()
+
+                    if (id != null) {
+                        addMalId(id)
+                    }
                 }
             }
         }
 
-        jobs.forEach { job ->
-            if (job.isActive) job.cancel()
+        return newMovieLoadResponse(
+            title,
+            animeUrl,
+            TvType.AnimeMovie,
+            animeUrl
+        ) {
+            posterUrl = poster
+            plot = synopsis
+            this.tags = tags
+            this.year = year
         }
-        jobs.joinAll()
-        results.close()
-
-        succeeded
     }
 
-    private suspend fun <T> tryOrNull(
-        block: suspend () -> T
-    ): T? {
+    private fun absoluteUrl(
+        base: String,
+        raw: String
+    ): String? {
+        val value =
+            raw.trim()
+                .replace("&amp;", "&")
+                .replace("\\/", "/")
+
+        if (value.isBlank()) {
+            return null
+        }
+
+        if (value.startsWith(
+                "javascript:",
+                ignoreCase = true
+            )
+        ) {
+            return null
+        }
+
         return try {
-            block()
-        } catch (e: CancellationException) {
-            throw e
+            when {
+                value.startsWith("//") -> {
+                    val scheme =
+                        URI(base).scheme ?: "https"
+
+                    "$scheme:$value"
+                }
+
+                value.startsWith("http://") ||
+                    value.startsWith("https://") -> {
+                    value
+                }
+
+                else -> {
+                    URI(base)
+                        .resolve(value)
+                        .toString()
+                }
+            }
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun decodePlayerValue(
+        rawValue: String,
+        baseUrl: String
+    ): String? {
+        val value =
+            rawValue.trim()
+
+        if (value.isBlank()) {
+            return null
+        }
+
+        absoluteUrl(
+            baseUrl,
+            value
+        )?.takeIf {
+            it.startsWith("http")
+        }?.let {
+            return it
+        }
+
+        val decoded = try {
+            String(
+                Base64.decode(
+                    value,
+                    Base64.DEFAULT
+                )
+            )
+        } catch (_: Exception) {
+            null
+        } ?: return null
+
+        val iframeUrl =
+            Regex(
+                """<iframe[^>]+(?:src|data-src)\s*=\s*["']([^"']+)["']""",
+                RegexOption.IGNORE_CASE
+            ).find(decoded)
+                ?.groupValues
+                ?.getOrNull(1)
+
+        if (iframeUrl != null) {
+            return absoluteUrl(
+                baseUrl,
+                iframeUrl
+            )
+        }
+
+        val directUrl =
+            Regex(
+                """https?://[^\s"'<>]+""",
+                RegexOption.IGNORE_CASE
+            ).find(decoded)
+                ?.value
+
+        return directUrl?.let {
+            absoluteUrl(
+                baseUrl,
+                it
+            )
+        }
+    }
+
+    private fun Document.collectTopLevelPlayers(
+        pageUrl: String
+    ): List<PlayerOption> {
+        val players =
+            mutableListOf<PlayerOption>()
+
+        select(
+            "#embed_holder iframe[src], " +
+                "#embed_holder iframe[data-src], " +
+                ".player-embed iframe[src], " +
+                ".player-embed iframe[data-src], " +
+                ".embed_holder iframe[src], " +
+                ".embed_holder iframe[data-src], " +
+                "iframe.metaframe[src]"
+        ).forEachIndexed { index, iframe ->
+            val src =
+                iframe.attr("src")
+                    .ifBlank {
+                        iframe.attr("data-src")
+                    }
+
+            val url =
+                absoluteUrl(
+                    pageUrl,
+                    src
+                )
+                    ?: return@forEachIndexed
+
+            players.add(
+                PlayerOption(
+                    label = "Direct ${index + 1}",
+                    url = url
+                )
+            )
+        }
+
+        select(
+            ".mobius option, " +
+                "select.mirror option, " +
+                ".mirror option, " +
+                ".server option, " +
+                "option[data-index], " +
+                "option[data-video], " +
+                "option[data-src]"
+        ).forEach { option ->
+            val label =
+                option.text()
+                    .trim()
+                    .ifBlank {
+                        option.attr("data-index")
+                            .trim()
+                    }
+                    .ifBlank {
+                        "Server"
+                    }
+
+            val candidates = listOf(
+                option.attr("value"),
+                option.attr("data-video"),
+                option.attr("data-src"),
+                option.attr("data-embed")
+            )
+
+            candidates.forEach { raw ->
+                val url =
+                    decodePlayerValue(
+                        raw,
+                        pageUrl
+                    )
+                        ?: return@forEach
+
+                players.add(
+                    PlayerOption(
+                        label = label,
+                        url = url
+                    )
+                )
+            }
+        }
+
+        return players
+            .filter {
+                it.url.startsWith("http")
+            }
+            .distinctBy {
+                it.url
+            }
+            .sortedBy {
+                it.priority()
+            }
+    }
+
+    private fun Document.collectNestedPlayerUrls(
+        pageUrl: String
+    ): List<String> {
+        val urls =
+            mutableListOf<String>()
+
+        select(
+            "iframe[src], " +
+                "iframe[data-src], " +
+                "video source[src], " +
+                "source[src]"
+        ).forEach { element ->
+            val raw =
+                element.attr("src")
+                    .ifBlank {
+                        element.attr("data-src")
+                    }
+
+            absoluteUrl(
+                pageUrl,
+                raw
+            )?.let {
+                urls.add(it)
+            }
+        }
+
+        select("script").forEach { script ->
+            val text =
+                script.data()
+                    .ifBlank {
+                        script.html()
+                    }
+
+            Regex(
+                """(?:file|source|src)\s*[:=]\s*["'](https?://[^"']+)["']""",
+                setOf(
+                    RegexOption.IGNORE_CASE,
+                    RegexOption.MULTILINE
+                )
+            ).findAll(text)
+                .forEach { match ->
+                    match.groupValues
+                        .getOrNull(1)
+                        ?.let {
+                            absoluteUrl(
+                                pageUrl,
+                                it
+                            )
+                        }
+                        ?.let {
+                            urls.add(it)
+                        }
+                }
+
+            Regex(
+                """https?://[^\s"'<>]+\.m3u8(?:\?[^\s"'<>]*)?""",
+                RegexOption.IGNORE_CASE
+            ).findAll(text)
+                .forEach { match ->
+                    urls.add(
+                        match.value
+                            .replace("\\/", "/")
+                    )
+                }
+        }
+
+        return urls
+            .filter {
+                it.startsWith("http")
+            }
+            .distinct()
     }
 
     private suspend fun fetchDocument(
         url: String,
         referer: String
     ): Document? {
-        return withTimeoutOrNull(PLAYER_REQUEST_TIMEOUT_MS) {
-            tryOrNull {
-                app.get(
-                    url,
-                    headers = mapOf(
-                        "Referer" to referer,
-                        "Origin" to mainUrl,
-                        "User-Agent" to USER_AGENT
-                    ),
-                    timeout = PLAYER_REQUEST_TIMEOUT_SECONDS
-                ).document
-            }
+        return withTimeoutOrNull(
+            PLAYER_REQUEST_TIMEOUT_MS
+        ) {
+            app.get(
+                url,
+                referer = referer
+            ).document
         }
-    }
-
-    private fun Document.collectPlayerUrls(baseUrl: String): List<String> {
-        return select("iframe[src], iframe[data-src]")
-            .mapNotNull { frame ->
-                frame.attr("data-src")
-                    .ifBlank { frame.attr("src") }
-                    .trim()
-                    .takeIf { it.isNotBlank() }
-                    ?.let { raw ->
-                        if (raw.startsWith("//")) {
-                            "https:$raw"
-                        } else if (raw.startsWith("http://", true) ||
-                            raw.startsWith("https://", true)
-                        ) {
-                            raw
-                        } else {
-                            runCatching {
-                                java.net.URI(baseUrl).resolve(raw).toString()
-                            }.getOrDefault(raw)
-                        }
-                    }
-            }
-            .filter { it.startsWith("http://", true) || it.startsWith("https://", true) }
-            .distinct()
     }
 
     private suspend fun tryLoadExtractor(
@@ -440,28 +745,35 @@ class AnichinProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (!attemptedUrls.add(url)) return false
+        val attemptKey =
+            "$url\u0000$referer"
 
-        val emitted = AtomicBoolean(false)
+        if (!attemptedUrls.add(attemptKey)) {
+            return false
+        }
+
+        val emitted =
+            AtomicBoolean(false)
+
+        val wrappedCallback:
+            (ExtractorLink) -> Unit = { link ->
+
+            if (emittedUrls.add(link.url)) {
+                emitted.set(true)
+                callback(link)
+            }
+        }
 
         return try {
-            withTimeoutOrNull(EXTRACTOR_TIMEOUT_MS) {
+            withTimeoutOrNull(
+                EXTRACTOR_TIMEOUT_MS
+            ) {
                 loadExtractor(
                     url,
                     referer,
-                    subtitleCallback
-                ) { link ->
-                    // Keep every available quality. CloudStream can rank the
-                    // links, while SD-only mirrors remain valid fallbacks.
-                    if (emittedUrls.add(link.url)) {
-                        emitted.set(true)
-                        Log.i(
-                            TAG,
-                            "ANICHIN_STREAM_FOUND source=${link.source} quality=${link.quality}"
-                        )
-                        callback(link)
-                    }
-                }
+                    subtitleCallback,
+                    wrappedCallback
+                )
             }
 
             emitted.get()
@@ -472,118 +784,169 @@ class AnichinProvider : MainAPI() {
         }
     }
 
+    private suspend fun <T> collectSuccessful(
+        items: List<T>,
+        concurrency: Int,
+        block: suspend (T) -> Boolean
+    ): Boolean = coroutineScope {
+        if (items.isEmpty()) {
+            return@coroutineScope false
+        }
+
+        val semaphore =
+            Semaphore(
+                concurrency.coerceAtLeast(1)
+            )
+
+        items.map { item ->
+            async {
+                semaphore.withPermit {
+                    try {
+                        block(item)
+                    } catch (
+                        e: CancellationException
+                    ) {
+                        throw e
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+            }
+        }
+            .awaitAll()
+            .any {
+                it
+            }
+    }
+
     private suspend fun resolvePlayerPipeline(
         wrapperUrl: String,
-        pageUrl: String,
+        episodeUrl: String,
         attemptedUrls: MutableSet<String>,
         emittedUrls: MutableSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Some sites occasionally put the real host directly inside Mobius.
-        if (!isSiteUrl(wrapperUrl)) {
-            val directSuccess = tryLoadExtractor(
+        val directSuccess =
+            tryLoadExtractor(
                 wrapperUrl,
-                pageUrl,
+                episodeUrl,
                 attemptedUrls,
                 emittedUrls,
                 subtitleCallback,
                 callback
             )
-            if (directSuccess) return true
+
+        if (directSuccess) {
+            return true
         }
 
-        val wrapperDocument = fetchDocument(wrapperUrl, pageUrl) ?: return false
-        val playerUrls = wrapperDocument.collectPlayerUrls(wrapperUrl)
-
-        for (playerUrl in playerUrls) {
-            val playerSuccess = tryLoadExtractor(
-                playerUrl,
+        val wrapperDocument =
+            fetchDocument(
                 wrapperUrl,
-                attemptedUrls,
-                emittedUrls,
-                subtitleCallback,
-                callback
+                episodeUrl
             )
-            if (playerSuccess) return true
+                ?: return false
 
-            // Only inspect another iframe level when the direct extractor did
-            // not produce a playable link.
-            val nestedDocument = fetchDocument(playerUrl, wrapperUrl) ?: continue
-            val nestedUrls = nestedDocument.collectPlayerUrls(playerUrl)
+        val playerUrls =
+            wrapperDocument
+                .collectNestedPlayerUrls(
+                    wrapperUrl
+                )
 
-            for (nestedUrl in nestedUrls) {
-                val nestedSuccess = tryLoadExtractor(
-                    nestedUrl,
+        return collectSuccessful(
+            playerUrls,
+            MAX_NESTED_CONCURRENCY
+        ) { playerUrl ->
+
+            val playerSuccess =
+                tryLoadExtractor(
                     playerUrl,
+                    wrapperUrl,
                     attemptedUrls,
                     emittedUrls,
                     subtitleCallback,
                     callback
                 )
-                if (nestedSuccess) return true
+
+            if (playerSuccess) {
+                true
+            } else {
+                val nestedDocument =
+                    fetchDocument(
+                        playerUrl,
+                        wrapperUrl
+                    )
+
+                if (nestedDocument == null) {
+                    false
+                } else {
+                    val nestedUrls =
+                        nestedDocument
+                            .collectNestedPlayerUrls(
+                                playerUrl
+                            )
+
+                    collectSuccessful(
+                        nestedUrls,
+                        MAX_NESTED_CONCURRENCY
+                    ) { nestedUrl ->
+                        tryLoadExtractor(
+                            nestedUrl,
+                            playerUrl,
+                            attemptedUrls,
+                            emittedUrls,
+                            subtitleCallback,
+                            callback
+                        )
+                    }
+                }
             }
         }
-
-        return false
-    }
-
-    private fun isSiteUrl(url: String): Boolean {
-        val siteHost = runCatching { java.net.URI(mainUrl).host }
-            .getOrNull()
-            ?: return false
-        val urlHost = runCatching { java.net.URI(url).host }
-            .getOrNull()
-            ?: return false
-
-        return urlHost.equals(siteHost, ignoreCase = true)
     }
 
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        subtitleCallback:
+            (SubtitleFile) -> Unit,
+        callback:
+            (ExtractorLink) -> Unit
     ): Boolean {
-        val episodeUrl = fixUrl(data)
-        Log.i(TAG, "ANICHIN_LINKS_START")
-        val document = fetchSiteDocument(episodeUrl)
-
-        val attemptedUrls = ConcurrentHashMap.newKeySet<String>()
-        val emittedUrls = ConcurrentHashMap.newKeySet<String>()
-
-        val players = document
-            .select(".mobius option")
-            .mapNotNull { option ->
-                val encodedValue = option.attr("value").trim()
-                if (encodedValue.isBlank()) return@mapNotNull null
-
-                val decodedDocument = runCatching {
-                    Jsoup.parse(base64Decode(encodedValue))
-                }.getOrNull() ?: return@mapNotNull null
-
-                val wrapperUrl = decodedDocument
-                    .selectFirst("iframe[src]")
-                    ?.attr("src")
-                    ?.trim()
-                    .orEmpty()
-
-                wrapperUrl
-                    .takeIf { it.isNotBlank() }
-                    ?.let { PlayerOption(option.text().trim(), fixUrl(it)) }
+        val document =
+            withTimeoutOrNull(
+                EPISODE_REQUEST_TIMEOUT_MS
+            ) {
+                app.get(data).document
             }
-            .distinctBy { it.url }
-            .sortedBy { it.priority() }
-            .take(MAX_PLAYER_OPTIONS)
+                ?: return false
 
-        Log.i(TAG, "ANICHIN_PLAYERS count=${players.size}")
+        val attemptedUrls:
+            MutableSet<String> =
+            ConcurrentHashMap
+                .newKeySet()
+
+        val emittedUrls:
+            MutableSet<String> =
+            ConcurrentHashMap
+                .newKeySet()
+
+        val players =
+            document
+                .collectTopLevelPlayers(data)
 
         if (players.isEmpty()) {
-            val staticPlayers = document.collectPlayerUrls(episodeUrl)
-            return firstSuccessful(staticPlayers) { playerUrl ->
+            val staticPlayers =
+                document
+                    .collectNestedPlayerUrls(data)
+
+            return collectSuccessful(
+                staticPlayers,
+                MAX_PLAYER_CONCURRENCY
+            ) { playerUrl ->
                 tryLoadExtractor(
                     playerUrl,
-                    episodeUrl,
+                    data,
                     attemptedUrls,
                     emittedUrls,
                     subtitleCallback,
@@ -592,24 +955,13 @@ class AnichinProvider : MainAPI() {
             }
         }
 
-        val preferredPlayers = players.take(FAST_PLAYER_OPTIONS)
-        val preferredSuccess = firstSuccessful(preferredPlayers) { player ->
+        return collectSuccessful(
+            players,
+            MAX_PLAYER_CONCURRENCY
+        ) { player ->
             resolvePlayerPipeline(
                 player.url,
-                episodeUrl,
-                attemptedUrls,
-                emittedUrls,
-                subtitleCallback,
-                callback
-            )
-        }
-        if (preferredSuccess) return true
-
-        val fallbackPlayers = players.drop(FAST_PLAYER_OPTIONS)
-        return firstSuccessful(fallbackPlayers) { player ->
-            resolvePlayerPipeline(
-                player.url,
-                episodeUrl,
+                data,
                 attemptedUrls,
                 emittedUrls,
                 subtitleCallback,
@@ -619,106 +971,45 @@ class AnichinProvider : MainAPI() {
     }
 
     private fun PlayerOption.priority(): Int {
-        val value = label.lowercase()
+        val value =
+            "$label $url".lowercase()
+
         return when {
-            value.contains("ok.ru") || value.contains("okru") -> 0
+            value.contains("ok.ru") ||
+                value.contains("okru") -> 0
+
             value.contains("dailymotion") -> 1
+
             value.contains("rumble") -> 2
-            value.contains("streamruby") -> 3
-            value.contains("dood") -> 4
-            value.contains("vidhide") || value.contains("vidguard") -> 5
-            else -> 10
+
+            value.contains("anichin.stream") -> 3
+
+            value.contains(
+                "anichin-player.web.id"
+            ) -> 4
+
+            value.contains("streamruby") ||
+                value.contains("ruby") -> 5
+
+            value.contains("vidhide") -> 6
+
+            else -> 20
         }
     }
-
-    private data class PlayerOption(
-        val label: String,
-        val url: String
-    )
 
     companion object {
-        private const val TAG = "Anichin"
-        private val sharedCloudflareKiller by lazy { CloudflareKiller() }
-        private val sharedCloudflareMutex = Mutex()
-        private val cloudflareStatusCodes = setOf(403, 503)
-        private val SITE_HEADERS = mapOf(
-            "User-Agent" to USER_AGENT,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8"
-        )
+        private const val MAX_SEARCH_PAGES = 10
 
-        private const val PAGE_TIMEOUT_SECONDS = 30L
-        private const val PLAYER_REQUEST_TIMEOUT_SECONDS = 8L
-        private const val PLAYER_REQUEST_TIMEOUT_MS = 9_000L
-        private const val EXTRACTOR_TIMEOUT_MS = 10_000L
-        private const val MAX_SEARCH_PAGES = 3
         private const val MAX_PLAYER_CONCURRENCY = 4
-        private const val FAST_PLAYER_OPTIONS = 4
-        private const val MAX_PLAYER_OPTIONS = 12
-        private const val SUCCESS_GRACE_PERIOD_MS = 1_500L
+        private const val MAX_NESTED_CONCURRENCY = 2
 
-        private val EPISODE_NUMBER = Regex("\\d+")
-        private val EPISODE_IN_TITLE = Regex(
-            "(?i)Episode\\s*(\\d+)"
-        )
-        private val EPISODE_IN_URL = Regex(
-            "(?i)(?:episode|eps?)[-/ ]?(\\d+)"
-        )
-        private val EPISODE_PAGE_SUFFIX = Regex(
-            "(?i)\\s*(?:[-:|]\\s*)?Episode\\s*\\d+" +
-                "(?:\\s*[-:|]?\\s*Sub(?:title)?\\s*Indonesia)?\\s*$"
-        )
-        private val SEASON_NUMBER = Regex(
-            "(?i)Season\\s*(\\d+)"
-        )
-        private val RELEASE_YEAR = Regex(
-            "(?i)Tanggal\\s+rilis[^0-9]*(?:[A-Za-z]{3}\\s+\\d{1,2},\\s*)?(\\d{4})"
-        )
-    }
+        private const val EPISODE_REQUEST_TIMEOUT_MS =
+            10_000L
 
-    private suspend fun fetchSiteDocument(url: String): Document {
-        suspend fun requestWithCloudflare(): Document {
-            return app.get(
-                url,
-                headers = SITE_HEADERS,
-                referer = "$mainUrl/",
-                interceptor = sharedCloudflareKiller,
-                timeout = PAGE_TIMEOUT_SECONDS
-            ).document
-        }
+        private const val PLAYER_REQUEST_TIMEOUT_MS =
+            7_000L
 
-        val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
-
-        if (sharedCloudflareKiller.savedCookies.containsKey(host)) {
-            return try {
-                requestWithCloudflare()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                sharedCloudflareKiller.savedCookies.remove(host)
-                requestWithCloudflare()
-            }
-        }
-
-        val response = app.get(
-            url,
-            headers = SITE_HEADERS,
-            referer = "$mainUrl/",
-            timeout = PAGE_TIMEOUT_SECONDS
-        )
-
-        Log.i(TAG, "ANICHIN_HTTP host=$host code=${response.code}")
-
-        if (response.code !in cloudflareStatusCodes) {
-            return response.document
-        }
-
-        response.okhttpResponse.close()
-
-        Log.i(TAG, "ANICHIN_CLOUDFLARE_FALLBACK host=$host")
-
-        return sharedCloudflareMutex.withLock {
-            requestWithCloudflare()
-        }
+        private const val EXTRACTOR_TIMEOUT_MS =
+            8_000L
     }
 }
