@@ -152,10 +152,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ww03.pencurimovie.bond&size=%size%",
-        "fileHash": "sha256-0809e280c84d5133d6b6618dd2c66ad5ea7597131fff7be949803c8973cdf0a2",
+        "fileHash": "sha256-51ac41337b6d4e494dd5759f98a5d4c04174733e025023881eebfbd247eddcb1",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 26491,
+        "fileSize": 29555,
         "status": 1,
         "language": "ms",
         "authors": [
@@ -165,7 +165,7 @@
             "Movie",
             "TvSeries"
         ],
-        "version": 2,
+        "version": 3,
         "internalName": "PencuriMovie",
         "description": "PencuriMovie \u2014 Streaming Movie and TV Series",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/PencuriMovie.cs3",
