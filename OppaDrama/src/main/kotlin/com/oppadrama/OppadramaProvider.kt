@@ -10,6 +10,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.net.URI
@@ -327,12 +328,17 @@ class OppadramaProvider : MainAPI() {
     ): Boolean {
         return try {
             Log.i(TAG, "OPPA_FAST_EXTRACTOR = ${mirror.label} | ${mirror.url}")
-            loadExtractor(
-                mirror.url,
-                data,
-                subtitleCallback,
-                callback
-            )
+
+            withTimeoutOrNull(
+                STANDARD_EXTRACTOR_TIMEOUT_MS
+            ) {
+                loadExtractor(
+                    mirror.url,
+                    data,
+                    subtitleCallback,
+                    callback
+                )
+            } ?: false
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -724,7 +730,9 @@ class OppadramaProvider : MainAPI() {
     ): Boolean {
         val value = "${label.lowercase()} ${url.lowercase()}"
 
-        return value.contains("hydrax") ||
+        // Keep known working hosts on the fast path.
+        if (
+            value.contains("hydrax") ||
             value.contains("abyssplayer") ||
             value.contains("abyss.to") ||
             value.contains("turbovip") ||
@@ -734,6 +742,62 @@ class OppadramaProvider : MainAPI() {
             value.contains("filelion") ||
             value.contains("minochinos") ||
             value.contains("filemoon")
+        ) {
+            return true
+        }
+
+        /*
+         * Do not hard-whitelist every future mirror. OppaDrama changes hosts,
+         * and Cloudstream may already know how to extract a new one.
+         * Accept normal external HTTP(S) embeds and only reject obvious junk.
+         */
+        val uri = runCatching { URI(url) }.getOrNull() ?: return false
+        val host = uri.host?.lowercase()?.takeIf { it.isNotBlank() } ?: return false
+        val scheme = uri.scheme?.lowercase()
+
+        if (scheme != "http" && scheme != "https") return false
+
+        val siteHost = runCatching {
+            URI(mainUrl).host?.lowercase()
+        }.getOrNull()
+
+        if (host == siteHost) {
+            return false
+        }
+
+        val path = uri.path.orEmpty().lowercase()
+        if (
+            path.endsWith(".jpg") ||
+            path.endsWith(".jpeg") ||
+            path.endsWith(".png") ||
+            path.endsWith(".webp") ||
+            path.endsWith(".gif") ||
+            path.endsWith(".css") ||
+            path.endsWith(".js") ||
+            path.endsWith(".ico")
+        ) {
+            return false
+        }
+
+        val blockedHostHints = listOf(
+            "google.com",
+            "googleapis.com",
+            "gstatic.com",
+            "facebook.com",
+            "instagram.com",
+            "twitter.com",
+            "x.com",
+            "telegram.me",
+            "t.me",
+            "doubleclick",
+            "googlesyndication",
+            "googletagmanager",
+            "analytics"
+        )
+
+        return blockedHostHints.none { hint ->
+            host == hint || host.endsWith(".$hint") || host.contains(hint)
+        }
     }
 
     private fun String.priorityScore(): Int {
@@ -881,6 +945,7 @@ class OppadramaProvider : MainAPI() {
         private const val DEFAULT_SITE_URL = "http://45.11.57.188"
         private const val FAST_LANE_SIZE = 3
         private const val FULL_LANE_CONCURRENCY = 2
+        private const val STANDARD_EXTRACTOR_TIMEOUT_MS = 10_000L
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 Chrome/139.0 Mobile Safari/537.36"
     }
