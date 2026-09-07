@@ -107,10 +107,10 @@
     },
     {
         "iconUrl": "https://cdn.animaapp.com/projects/6215178219a2fd7886bf5a52/releases/621519ce72dadb5503e24f9f/img/app-icon%401x.png",
-        "fileHash": "sha256-851ae9d6ec1dc045c7e12fb7ee6c19e450215ac61aaf22c66464502ac4fe3b36",
+        "fileHash": "sha256-fcf1b64cee69d6b2cc35718de70413d1c4fd3cea3ad3ee59b37f8fe1658c5168",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 39625,
+        "fileSize": 41607,
         "status": 1,
         "language": "en",
         "authors": [
@@ -122,7 +122,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 2,
+        "version": 3,
         "internalName": "OneTouchTV",
         "description": "OneTouchTV - Asian Drama and Anime",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/OneTouchTV.cs3",
