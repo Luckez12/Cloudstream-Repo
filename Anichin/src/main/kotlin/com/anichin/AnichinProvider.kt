@@ -275,25 +275,56 @@ class AnichinProvider : MainAPI() {
         link: String,
         title: String
     ): Double? {
-        val numberText = episodeElement
+        /*
+         * Anichin episode rows have TWO episode numbers for many long-running
+         * donghua:
+         *   epl-num = 190              <- global episode number
+         *   title   = "... Arc Episode 14"
+         *
+         * Always trust the dedicated global-number column first. Reading the
+         * arc title first is what caused Cloudstream to group episodes as
+         * 1-20 / 21-40 / 61-76 / 178-178.
+         */
+        val globalNumberText = episodeElement
             .selectFirst(".epl-num, .epnum, .episode-number")
             ?.text()
+            ?.trim()
             .orEmpty()
 
-        return Regex(
-            """(?:Episode|Ep|Eps)\s*(\d+(?:\.\d+)?)""",
+        val globalNumber = Regex(
+            """\d+(?:\.\d+)?"""
+        ).find(globalNumberText)
+            ?.value
+            ?.toDoubleOrNull()
+
+        if (globalNumber != null) {
+            return globalNumber
+        }
+
+        /*
+         * URL is the second safest source because Anichin normally uses
+         * ...-episode-190-subtitle-indonesia/.
+         */
+        val urlNumber = Regex(
+            """-episode-(\d+(?:\.\d+)?)""",
             RegexOption.IGNORE_CASE
-        ).find("$numberText $title")
+        ).find(link)
             ?.groupValues
             ?.getOrNull(1)
             ?.toDoubleOrNull()
-            ?: Regex(
-                """-episode-(\d+(?:\.\d+)?)""",
-                RegexOption.IGNORE_CASE
-            ).find(link)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.toDoubleOrNull()
+
+        if (urlNumber != null) {
+            return urlNumber
+        }
+
+        // Last fallback only, for unusual rows without a numeric column/URL.
+        return Regex(
+            """(?:Episode|Ep|Eps)\s*(\d+(?:\.\d+)?)""",
+            RegexOption.IGNORE_CASE
+        ).find(title)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toDoubleOrNull()
     }
 
     override suspend fun load(
