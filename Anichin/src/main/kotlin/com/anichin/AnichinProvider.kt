@@ -696,7 +696,7 @@ class AnichinProvider : MainAPI() {
         val value = "$label $url".lowercase()
 
         return when {
-            value.contains("ok.ru") || value.contains("okru") -> 0
+            value.contains("ok.ru") || value.contains("okru") || value.contains("odnoklassniki") -> 0
             value.contains("dailymotion") -> 1
             value.contains("rumble") -> 2
             value.contains("anichin.stream") -> 3
