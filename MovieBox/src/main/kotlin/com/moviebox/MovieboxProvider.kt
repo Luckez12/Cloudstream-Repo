@@ -9,12 +9,7 @@ import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.nicehttp.RequestBodyTypes
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CancellationException
 
 class MovieboxProvider : MainAPI() {
 
@@ -60,11 +55,11 @@ class MovieboxProvider : MainAPI() {
     @Volatile
     private var preferredWebHost: String? = null
 
-    private val searchRaceTimeoutMs = 4_000L
-    private val detailRaceTimeoutMs = 4_500L
-    private val playRaceTimeoutMs = 5_500L
-    private val captionRaceTimeoutMs = 3_000L
-    private val recommendationTimeoutMs = 350L
+    private val searchHostTimeoutSeconds = 4L
+    private val detailHostTimeoutSeconds = 5L
+    private val playHostTimeoutSeconds = 4L
+    private val captionHostTimeoutSeconds = 3L
+    private val recommendationTimeoutSeconds = 3L
 
     private fun orderedWebHosts(seedHost: String? = null): List<String> = buildList {
         seedHost?.takeIf { it.isNotBlank() }?.let { add(it) }
@@ -166,9 +161,11 @@ class MovieboxProvider : MainAPI() {
         val detail: MediaDetail.Data
     )
 
-    private suspend fun raceSearchHosts(query: String): SearchRaceResult? = coroutineScope {
+    private suspend fun raceSearchHosts(
+        query: String
+    ): SearchRaceResult? {
         val hosts = orderedWebHosts()
-        if (hosts.isEmpty()) return@coroutineScope null
+        if (hosts.isEmpty()) return null
 
         val requestJson = mapOf(
             "keyword" to query.trim(),
@@ -177,98 +174,74 @@ class MovieboxProvider : MainAPI() {
             "subjectType" to 0
         ).toJson()
 
-        val winner = CompletableDeferred<SearchRaceResult?>()
-        val remaining = AtomicInteger(hosts.size)
-        val jobs = hosts.map { host ->
-            launch {
-                try {
-                    val requestBody = requestJson.toRequestBody(RequestBodyTypes.JSON.toMediaTypeOrNull())
-                    val items = app.post(
-                        "$host/wefeed-h5-bff/web/subject/search",
-                        headers = commonHeaders,
-                        referer = "$host/",
-                        requestBody = requestBody
-                    ).parsedSafe<Media>()
-                        ?.data
-                        ?.items
-                        .orEmpty()
+        for (host in hosts) {
+            try {
+                val requestBody = requestJson.toRequestBody(
+                    RequestBodyTypes.JSON.toMediaTypeOrNull()
+                )
 
-                    if (items.isNotEmpty()) {
-                        winner.complete(SearchRaceResult(host, items))
-                    }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Throwable) {
-                    // Ignore a dead/slow mirror. Another parallel mirror may win.
-                } finally {
-                    if (remaining.decrementAndGet() == 0) {
-                        winner.complete(null)
-                    }
+                val items = app.post(
+                    "$host/wefeed-h5-bff/web/subject/search",
+                    headers = commonHeaders,
+                    referer = "$host/",
+                    requestBody = requestBody,
+                    timeout = searchHostTimeoutSeconds
+                ).parsedSafe<Media>()
+                    ?.data
+                    ?.items
+                    .orEmpty()
+
+                if (items.isNotEmpty()) {
+                    return SearchRaceResult(host, items)
                 }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                // Dead/blocked mirror: continue to the next host.
             }
         }
 
-        val result = withTimeoutOrNull(searchRaceTimeoutMs) {
-            winner.await()
-        }
-
-        jobs.forEach { job ->
-            if (job.isActive) job.cancel(CancellationException("MovieBox race completed"))
-        }
-
-        result
+        return null
     }
 
-    private suspend fun raceDetailHosts(subjectId: String): DetailRaceResult? = coroutineScope {
+    private suspend fun raceDetailHosts(
+        subjectId: String
+    ): DetailRaceResult? {
         val hosts = orderedWebHosts()
-        if (hosts.isEmpty()) return@coroutineScope null
+        if (hosts.isEmpty()) return null
 
-        val winner = CompletableDeferred<DetailRaceResult?>()
-        val remaining = AtomicInteger(hosts.size)
-        val jobs = hosts.map { host ->
-            launch {
-                try {
-                    val detail = app.get(
-                        "$host/wefeed-h5-bff/web/subject/detail?subjectId=$subjectId",
-                        headers = commonHeaders,
-                        referer = "$host/"
-                    ).parsedSafe<MediaDetail>()?.data
+        for (host in hosts) {
+            try {
+                val detail = app.get(
+                    "$host/wefeed-h5-bff/web/subject/detail?subjectId=$subjectId",
+                    headers = commonHeaders,
+                    referer = "$host/",
+                    timeout = detailHostTimeoutSeconds
+                ).parsedSafe<MediaDetail>()?.data
 
-                    if (detail?.subject != null) {
-                        winner.complete(DetailRaceResult(host, detail))
-                    }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Throwable) {
-                    // Ignore a dead/slow mirror. Another parallel mirror may win.
-                } finally {
-                    if (remaining.decrementAndGet() == 0) {
-                        winner.complete(null)
-                    }
+                if (detail?.subject != null) {
+                    return DetailRaceResult(host, detail)
                 }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                // Dead/blocked mirror: continue to the next host.
             }
         }
 
-        val result = withTimeoutOrNull(detailRaceTimeoutMs) {
-            winner.await()
-        }
-
-        jobs.forEach { job ->
-            if (job.isActive) job.cancel(CancellationException("MovieBox race completed"))
-        }
-
-        result
+        return null
     }
 
     private suspend fun loadRecommendationsFast(
         subjectId: String,
         host: String
-    ): List<SearchResponse>? = withTimeoutOrNull(recommendationTimeoutMs) {
-        try {
+    ): List<SearchResponse>? {
+        return try {
             app.get(
                 "$host/wefeed-h5-bff/web/subject/detail-rec?subjectId=$subjectId&page=1&perPage=12",
                 headers = commonHeaders,
-                referer = "$host/"
+                referer = "$host/",
+                timeout = recommendationTimeoutSeconds
             ).parsedSafe<Media>()
                 ?.data
                 ?.items
@@ -413,10 +386,10 @@ class MovieboxProvider : MainAPI() {
         }
     }
 
-    private data class PlayRaceResult(
+    private data class ResolvedStream(
         val host: String,
         val referer: String,
-        val streams: List<Media.Data.Streams>
+        val stream: Media.Data.Streams
     )
 
     private fun buildPlayReferer(
@@ -425,6 +398,10 @@ class MovieboxProvider : MainAPI() {
         subjectId: String
     ): String {
         val detailPath = media.detailPath.orEmpty()
+
+        // MovieBox itself currently uses this /movies/... referer shape for
+        // both movie and episodic subjects, so keep it instead of guessing
+        // a separate TV path.
         return if (detailPath.isNotBlank()) {
             "$host/spa/videoPlayPage/movies/$detailPath?id=$subjectId&type=/movie/detail&lang=en"
         } else {
@@ -432,62 +409,53 @@ class MovieboxProvider : MainAPI() {
         }
     }
 
-    private suspend fun racePlayHosts(
+    private suspend fun loadPlayHosts(
         media: LoadData,
         subjectId: String,
         season: Int,
         episode: Int
-    ): PlayRaceResult? = coroutineScope {
-        val hosts = orderedWebHosts(media.apiHost)
-        if (hosts.isEmpty()) return@coroutineScope null
+    ): List<ResolvedStream> {
+        val resolved = mutableListOf<ResolvedStream>()
 
-        val winner = CompletableDeferred<PlayRaceResult?>()
-        val remaining = AtomicInteger(hosts.size)
+        for (host in orderedWebHosts(media.apiHost)) {
+            try {
+                val referer = buildPlayReferer(
+                    host = host,
+                    media = media,
+                    subjectId = subjectId
+                )
 
-        val jobs = hosts.map { host ->
-            launch {
-                try {
-                    val referer = buildPlayReferer(host, media, subjectId)
-                    val streams = app.get(
-                        "$host/wefeed-h5-bff/web/subject/play?subjectId=$subjectId&se=$season&ep=$episode",
-                        headers = commonHeaders,
-                        referer = referer
-                    ).parsedSafe<Media>()
-                        ?.data
-                        ?.streams
-                        .orEmpty()
-                        .filter { !it.url.isNullOrBlank() }
+                val streams = app.get(
+                    "$host/wefeed-h5-bff/web/subject/play?subjectId=$subjectId&se=$season&ep=$episode",
+                    headers = commonHeaders,
+                    referer = referer,
+                    timeout = playHostTimeoutSeconds
+                ).parsedSafe<Media>()
+                    ?.data
+                    ?.streams
+                    .orEmpty()
+                    .filter { !it.url.isNullOrBlank() }
 
-                    if (streams.isNotEmpty()) {
-                        winner.complete(
-                            PlayRaceResult(
-                                host = host,
-                                referer = referer,
-                                streams = streams
-                            )
-                        )
-                    }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Throwable) {
-                    // A failed mirror is ignored. Another parallel mirror may win.
-                } finally {
-                    if (remaining.decrementAndGet() == 0) {
-                        winner.complete(null)
-                    }
+                streams.forEach { stream ->
+                    resolved += ResolvedStream(
+                        host = host,
+                        referer = referer,
+                        stream = stream
+                    )
                 }
+
+                if (streams.isNotEmpty()) {
+                    preferredWebHost = host
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                // Keep checking every mirror. A dead host must not remove
+                // links available from another host.
             }
         }
 
-        val result = withTimeoutOrNull(playRaceTimeoutMs) {
-            winner.await()
-        }
-
-        jobs.forEach { job ->
-            if (job.isActive) job.cancel(CancellationException("MovieBox race completed"))
-        }
-
-        result
+        return resolved.distinctBy { it.stream.url }
     }
 
     private fun allowedSubtitleLanguage(caption: Media.Data.Captions): String? {
@@ -537,25 +505,36 @@ class MovieboxProvider : MainAPI() {
         }
     }
 
-    private suspend fun raceCaptionHosts(
+    private suspend fun loadCaptionsAcrossHosts(
         subjectId: String,
-        streamId: String,
-        format: String,
-        winningHost: String
-    ): List<Media.Data.Captions> = coroutineScope {
-        val hosts = orderedWebHosts(winningHost)
-        if (hosts.isEmpty()) return@coroutineScope emptyList()
+        seeds: List<ResolvedStream>
+    ): List<Media.Data.Captions> {
+        val captions = mutableListOf<Media.Data.Captions>()
 
-        val winner = CompletableDeferred<List<Media.Data.Captions>?>()
-        val remaining = AtomicInteger(hosts.size)
+        /*
+         * One stream seed per origin host is enough for MovieBox caption
+         * metadata in practice, while still checking every API mirror.
+         * This keeps EN/MS/ID subtitles from a secondary host instead of
+         * stopping at the first successful response.
+         */
+        val captionSeeds = seeds
+            .filter {
+                !it.stream.id.isNullOrBlank() &&
+                    !it.stream.format.isNullOrBlank()
+            }
+            .distinctBy { it.host }
 
-        val jobs = hosts.map { host ->
-            launch {
+        for (seed in captionSeeds) {
+            val streamId = seed.stream.id ?: continue
+            val format = seed.stream.format ?: continue
+
+            for (host in orderedWebHosts(seed.host)) {
                 try {
-                    val captions = app.get(
+                    val hostCaptions = app.get(
                         "$host/wefeed-h5-bff/web/subject/caption?format=$format&id=$streamId&subjectId=$subjectId",
                         headers = commonHeaders,
-                        referer = "$host/"
+                        referer = "$host/",
+                        timeout = captionHostTimeoutSeconds
                     ).parsedSafe<Media>()
                         ?.data
                         ?.captions
@@ -565,31 +544,16 @@ class MovieboxProvider : MainAPI() {
                                 allowedSubtitleLanguage(caption) != null
                         }
 
-                    // Only a mirror containing EN/MS/ID captions may win.
-                    if (captions.isNotEmpty()) {
-                        winner.complete(captions)
-                    }
+                    captions += hostCaptions
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Throwable) {
-                    // Ignore dead/blocked caption mirror.
-                } finally {
-                    if (remaining.decrementAndGet() == 0) {
-                        winner.complete(null)
-                    }
+                    // Continue: subtitle mirrors are independent.
                 }
             }
         }
 
-        val result = withTimeoutOrNull(captionRaceTimeoutMs) {
-            winner.await()
-        }.orEmpty()
-
-        jobs.forEach { job ->
-            if (job.isActive) job.cancel(CancellationException("MovieBox race completed"))
-        }
-
-        result
+        return captions.distinctBy { it.url }
     }
 
     override suspend fun loadLinks(
@@ -610,76 +574,57 @@ class MovieboxProvider : MainAPI() {
         val episode = media.episode ?: 0
 
         /*
-         * Critical path: race every compatible H5 mirror at the same time.
-         * The first mirror with a non-empty stream list wins.
+         * Compatibility path:
+         * - no manual child-task cancellation machinery
+         * - every MovieBox web mirror is checked
+         * - unique streams from every successful host are emitted
          */
-        val playResult = racePlayHosts(
+        val resolvedStreams = loadPlayHosts(
             media = media,
             subjectId = subjectId,
             season = season,
             episode = episode
-        ) ?: return false
+        )
 
-        preferredWebHost = playResult.host
+        if (resolvedStreams.isEmpty()) return false
 
-        val streams = playResult.streams
-            .distinctBy { it.url }
-            .sortedByDescending { getQualityFromName(it.resolutions) }
-
-        if (streams.isEmpty()) return false
-
-        /*
-         * Emit video links immediately after the first valid host wins.
-         * Caption lookup happens afterwards and cannot delay stream discovery.
-         */
-        streams.forEach { source ->
-            val streamUrl = source.url ?: return@forEach
-
-            callback.invoke(
-                newExtractorLink(
-                    this.name,
-                    buildString {
-                        append(this@MovieboxProvider.name)
-                        source.resolutions
-                            ?.takeIf { it.isNotBlank() }
-                            ?.let { append(" ").append(it) }
-                    },
-                    streamUrl,
-                    INFER_TYPE
-                ) {
-                    this.referer = "${playResult.host}/"
-                    this.quality = getQualityFromName(source.resolutions)
-                }
-            )
-        }
-
-        val captionSeed = streams.firstOrNull { source ->
-            !source.id.isNullOrBlank() && !source.format.isNullOrBlank()
-        }
-
-        if (captionSeed != null) {
-            val streamId = captionSeed.id
-            val format = captionSeed.format
-
-            if (!streamId.isNullOrBlank() && !format.isNullOrBlank()) {
-                val captions = raceCaptionHosts(
-                    subjectId = subjectId,
-                    streamId = streamId,
-                    format = format,
-                    winningHost = playResult.host
-                )
-
-                captions
-                    .distinctBy { it.url }
-                    .forEach { subtitle ->
-                        val subtitleUrl = subtitle.url ?: return@forEach
-                        val language = allowedSubtitleLanguage(subtitle) ?: return@forEach
-
-                        subtitleCallback.invoke(
-                            newSubtitleFile(language, subtitleUrl)
-                        )
-                    }
+        resolvedStreams
+            .sortedByDescending {
+                getQualityFromName(it.stream.resolutions)
             }
+            .forEach { resolved ->
+                val source = resolved.stream
+                val streamUrl = source.url ?: return@forEach
+
+                callback.invoke(
+                    newExtractorLink(
+                        this.name,
+                        buildString {
+                            append(this@MovieboxProvider.name)
+                            source.resolutions
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { append(" ").append(it) }
+                        },
+                        streamUrl,
+                        INFER_TYPE
+                    ) {
+                        this.referer = resolved.referer
+                        this.quality = getQualityFromName(source.resolutions)
+                    }
+                )
+            }
+
+        loadCaptionsAcrossHosts(
+            subjectId = subjectId,
+            seeds = resolvedStreams
+        ).forEach { subtitle ->
+            val subtitleUrl = subtitle.url ?: return@forEach
+            val language = allowedSubtitleLanguage(subtitle)
+                ?: return@forEach
+
+            subtitleCallback.invoke(
+                newSubtitleFile(language, subtitleUrl)
+            )
         }
 
         return true
@@ -759,15 +704,30 @@ class MovieboxProvider : MainAPI() {
     ) {
 
         fun toSearchResponse(provider: MovieboxProvider): SearchResponse {
-            val type = if (subjectType == 1) TvType.Movie else TvType.TvSeries
+            val type = if (subjectType == 1) {
+                TvType.Movie
+            } else {
+                TvType.TvSeries
+            }
 
-            return provider.newMovieSearchResponse(
-                title.orEmpty(),
-                subjectId.orEmpty(),
-                type,
-                false
-            ) {
-                this.posterUrl = cover?.url
+            return if (type == TvType.Movie) {
+                provider.newMovieSearchResponse(
+                    title.orEmpty(),
+                    subjectId.orEmpty(),
+                    TvType.Movie,
+                    false
+                ) {
+                    this.posterUrl = cover?.url
+                }
+            } else {
+                provider.newTvSeriesSearchResponse(
+                    title.orEmpty(),
+                    subjectId.orEmpty(),
+                    TvType.TvSeries,
+                    false
+                ) {
+                    this.posterUrl = cover?.url
+                }
             }
         }
 
