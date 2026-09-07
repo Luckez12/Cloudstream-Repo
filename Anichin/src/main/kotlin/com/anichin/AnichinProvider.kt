@@ -13,6 +13,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -63,9 +64,21 @@ class AnichinProvider : MainAPI() {
             "${mainUrl}/${request.data}&page=$page"
         ).document
 
+        val typeHint = if (
+            request.data.contains("type=movie", ignoreCase = true)
+        ) {
+            TvType.Movie
+        } else {
+            null
+        }
+
         val home = document
             .select("div.listupd > article")
-            .mapNotNull { it.toSearchResult() }
+            .mapNotNull { it.toSearchResult(typeHint) }
+
+        val hasNext = document.selectFirst(
+            "a.next.page-numbers, .pagination .next a, .hpage a.r, a[rel=next]"
+        ) != null
 
         return newHomePageResponse(
             list = HomePageList(
@@ -73,29 +86,51 @@ class AnichinProvider : MainAPI() {
                 list = home,
                 isHorizontalImages = false
             ),
-            hasNext = true
+            hasNext = hasNext
         )
     }
 
-    private fun Element.toSearchResult(): SearchResponse {
+    private fun Element.toSearchResult(
+        typeHint: TvType? = null
+    ): SearchResponse? {
 
-        val title = select("div.bsx > a")
+        val anchor = selectFirst("div.bsx > a[href]")
+            ?: selectFirst("a[href]")
+            ?: return null
+
+        val title = anchor
             .attr("title")
             .trim()
+            .ifBlank {
+                selectFirst(".tt, h2, h3")
+                    ?.text()
+                    ?.trim()
+                    .orEmpty()
+            }
 
-        val href = fixUrl(
-            select("div.bsx > a")
-                .attr("href")
-        )
+        if (title.isBlank()) return null
 
-        val posterUrl = selectFirst("div.bsx > a img")
+        val href = fixUrl(anchor.attr("href"))
+
+        val posterUrl = selectFirst("div.bsx > a img, img")
             ?.getImageUrl()
             ?.let { fixUrlNull(it) }
+
+        val badge = selectFirst(".typez, .type, .status")
+            ?.text()
+            .orEmpty()
+
+        val tvType = when {
+            typeHint == TvType.Movie -> TvType.Movie
+            badge.contains("Movie", ignoreCase = true) -> TvType.Movie
+            href.contains("-movie-", ignoreCase = true) -> TvType.Movie
+            else -> TvType.Anime
+        }
 
         return newAnimeSearchResponse(
             title,
             href,
-            TvType.Anime
+            tvType
         ) {
             this.posterUrl = posterUrl
         }
@@ -105,12 +140,21 @@ class AnichinProvider : MainAPI() {
         query: String
     ): List<SearchResponse> {
 
+        val encodedQuery = URLEncoder.encode(
+            query.trim(),
+            "UTF-8"
+        )
+
+        if (encodedQuery.isBlank()) {
+            return emptyList()
+        }
+
         val searchResponse = mutableListOf<SearchResponse>()
 
         for (page in 1..3) {
 
             val document = app.get(
-                "${mainUrl}/page/$page/?s=$query"
+                "${mainUrl}/page/$page/?s=$encodedQuery"
             ).document
 
             val results = document
@@ -123,6 +167,133 @@ class AnichinProvider : MainAPI() {
         }
 
         return searchResponse.distinctBy { it.url }
+    }
+
+    private fun isSeoSynopsis(
+        text: String
+    ): Boolean {
+        val lower = text.lowercase()
+
+        if (lower.startsWith("tonton streaming")) return true
+        if (lower.startsWith("nonton ") && lower.contains("terlengkap")) return true
+
+        val hits = listOf(
+            "download gratis",
+            "berbagai kualitas",
+            "menghemat kuota",
+            "mp4 mkv",
+            "hardsub softsub",
+            "streaming online",
+            "di anichin"
+        ).count { lower.contains(it) }
+
+        return hits >= 2
+    }
+
+    private fun cleanSynopsis(raw: String?): String? {
+        val text = raw
+            ?.replace('\u00a0', ' ')
+            ?.replace(Regex("""\s+"""), " ")
+            ?.trim()
+            .orEmpty()
+
+        if (text.length < 35) return null
+        if (isSeoSynopsis(text)) return null
+        return text
+    }
+
+    private fun extractSynopsis(document: Document): String? {
+        val heading = document.select("h2, h3, h4, h5")
+            .firstOrNull {
+                it.text().contains("Sinopsis", ignoreCase = true)
+            }
+
+        if (heading != null) {
+            val paragraphs = mutableListOf<String>()
+            var node = heading.nextElementSibling()
+
+            repeat(10) {
+                val current = node ?: return@repeat
+
+                if (
+                    current.tagName().lowercase() in
+                    setOf("h1", "h2", "h3", "h4", "h5")
+                ) {
+                    node = null
+                    return@repeat
+                }
+
+                val candidates = if (
+                    current.tagName().equals("p", ignoreCase = true)
+                ) {
+                    listOf(current.text())
+                } else {
+                    current.select("p").map { it.text() }
+                }
+
+                candidates.mapNotNull(::cleanSynopsis)
+                    .forEach(paragraphs::add)
+
+                node = current.nextElementSibling()
+            }
+
+            if (paragraphs.isNotEmpty()) {
+                return paragraphs.distinct().joinToString("\n\n")
+            }
+        }
+
+        document.select(
+            ".synp .entry-content, .synopsis, .sinopsis, .desc"
+        ).forEach { container ->
+            val paragraphs = container.select("p")
+                .mapNotNull { cleanSynopsis(it.text()) }
+                .distinct()
+
+            if (paragraphs.isNotEmpty()) {
+                return paragraphs.joinToString("\n\n")
+            }
+
+            cleanSynopsis(container.text())?.let { return it }
+        }
+
+        val contentParagraphs = document
+            .select("div.entry-content p")
+            .mapNotNull { cleanSynopsis(it.text()) }
+            .filterNot {
+                it.contains("server streaming", ignoreCase = true) ||
+                    it.contains("grup telegram", ignoreCase = true)
+            }
+            .distinct()
+
+        return contentParagraphs
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString("\n\n")
+    }
+
+    private fun episodeNumberFrom(
+        episodeElement: Element,
+        link: String,
+        title: String
+    ): Double? {
+        val numberText = episodeElement
+            .selectFirst(".epl-num, .epnum, .episode-number")
+            ?.text()
+            .orEmpty()
+
+        return Regex(
+            """(?:Episode|Ep|Eps)\s*(\d+(?:\.\d+)?)""",
+            RegexOption.IGNORE_CASE
+        ).find("$numberText $title")
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toDoubleOrNull()
+            ?: Regex(
+                """-episode-(\d+(?:\.\d+)?)""",
+                RegexOption.IGNORE_CASE
+            ).find(link)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toDoubleOrNull()
     }
 
     override suspend fun load(
@@ -149,10 +320,7 @@ class AnichinProvider : MainAPI() {
                     ?.trim()
         ).orEmpty()
 
-        val description = document
-            .selectFirst("div.entry-content")
-            ?.text()
-            ?.trim()
+        val description = extractSynopsis(document)
 
         val type = document
             .selectFirst(".spe")
@@ -169,14 +337,19 @@ class AnichinProvider : MainAPI() {
 
             val episodes = document
                 .select(".eplister li")
-                .map { episodeElement ->
+                .mapNotNull { episodeElement ->
 
-                    val link = fixUrl(
-                        episodeElement
-                            .selectFirst("a")
-                            ?.attr("href")
-                            .orEmpty()
-                    )
+                    val rawLink = episodeElement
+                        .selectFirst("a[href]")
+                        ?.attr("href")
+                        ?.trim()
+                        .orEmpty()
+
+                    if (rawLink.isBlank()) {
+                        return@mapNotNull null
+                    }
+
+                    val link = fixUrl(rawLink)
 
                     val episodeTitle = episodeElement
                         .selectFirst(".epl-title")
@@ -224,10 +397,23 @@ class AnichinProvider : MainAPI() {
                             .takeIf { it.isNotEmpty() }
                             ?.let { "Rilis: $it" }
 
+                    val episodeNumber = episodeNumberFrom(
+                        episodeElement,
+                        link,
+                        episodeTitle
+                    )
+
                     newEpisode(link) {
                         this.name = episodeName
                         this.posterUrl = episodePoster
                         this.description = episodeDescription
+
+                        if (
+                            episodeNumber != null &&
+                            episodeNumber % 1.0 == 0.0
+                        ) {
+                            this.episode = episodeNumber.toInt()
+                        }
                     }
                 }
                 .reversed()
