@@ -7,15 +7,12 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 @CloudstreamPlugin
 class AnichinPlugin : BasePlugin() {
     override fun load() {
-        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=14")
+        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=15")
         registerMainAPI(AnichinProvider())
 
-        registerExtractorAPI(Dailymotion())
-        registerExtractorAPI(Geodailymotion())
-
-        registerExtractorAPI(Odnoklassniki())
-        registerExtractorAPI(OkRuSSL())
-        registerExtractorAPI(OkRuHTTP())
+        // Dailymotion/GeoDailymotion and OK.ru/Odnoklassniki are built into
+        // the current Cloudstream library. Do not re-register local copies,
+        // otherwise these stale aliases override the maintained built-ins.
 
         registerExtractorAPI(Rumble())
         registerExtractorAPI(Morencius())
