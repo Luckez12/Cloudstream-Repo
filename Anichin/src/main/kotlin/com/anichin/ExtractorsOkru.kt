@@ -1,6 +1,6 @@
 package com.anichin
 
-import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.databind.JsonNode
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.USER_AGENT
 import com.lagradost.cloudstream3.app
@@ -13,19 +13,9 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
 import java.net.URLDecoder
 
-class OkRuSSL : Odnoklassniki() {
+open class OkRuExtractor : ExtractorApi() {
     override var name = "OK.ru"
     override var mainUrl = "https://ok.ru"
-}
-
-class OkRuHTTP : Odnoklassniki() {
-    override var name = "OK.ru"
-    override var mainUrl = "http://ok.ru"
-}
-
-open class Odnoklassniki : ExtractorApi() {
-    override var name = "OK.ru"
-    override var mainUrl = "https://odnoklassniki.ru"
     override val requiresReferer = false
 
     override suspend fun getUrl(
@@ -34,105 +24,150 @@ open class Odnoklassniki : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val embedUrl = normalizeEmbedUrl(url)
-        val origin = when {
-            embedUrl.contains("odnoklassniki.ru", ignoreCase = true) ->
-                "https://odnoklassniki.ru"
-            else -> "https://ok.ru"
-        }
-
-        val response = try {
-            app.get(
-                embedUrl,
-                referer = referer,
-                headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Accept" to "text/html,application/xhtml+xml"
-                )
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            return
+        val videoId = extractVideoId(url)
+        val embedUrl = if (videoId != null) {
+            "https://ok.ru/videoembed/$videoId"
+        } else {
+            normalizeUrl(url)
         }
 
         val videos = linkedMapOf<String, OkRuVideo>()
 
         fun addVideos(items: List<OkRuVideo>) {
             items.forEach { video ->
-                if (video.url.isNotBlank()) {
-                    videos[video.url] = video
+                val normalized = normalizeMediaUrl(video.url)
+                if (normalized.isNotBlank()) {
+                    videos[normalized] = video.copy(url = normalized)
                 }
             }
         }
 
-        // Current OK.ru player embeds JSON in data-options.
-        response.document
-            .select("[data-options]")
-            .forEach { element ->
-                val rawOptions = element.attr("data-options")
-                if (rawOptions.isBlank()) return@forEach
-
-                val options = AppUtils.tryParseJson<PlayerOptions>(rawOptions)
-                    ?: return@forEach
-
-                val flashvars = options.flashvars ?: return@forEach
-
-                flashvars.metadata
-                    ?.let(::cleanJsonString)
-                    ?.let { AppUtils.tryParseJson<OkMetadata>(it) }
-                    ?.videos
-                    ?.let(::addVideos)
-
-                if (videos.isEmpty()) {
-                    val metadataUrl = flashvars.metadataUrl
-                        ?.let(::cleanJsonString)
-                        ?.let(::decodeUrl)
-
-                    if (!metadataUrl.isNullOrBlank()) {
-                        val metadataText = try {
-                            app.get(
-                                metadataUrl,
-                                referer = embedUrl,
-                                headers = mapOf("User-Agent" to USER_AGENT)
-                            ).text
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (_: Exception) {
-                            null
-                        }
-
-                        metadataText
-                            ?.let { AppUtils.tryParseJson<OkMetadata>(it) }
-                            ?.videos
-                            ?.let(::addVideos)
-                    }
-                }
+        /*
+         * Current OK.ru exposes videoPlayerMetadata directly. Try this first:
+         * it avoids relying only on the HTML player's data-options shape.
+         */
+        if (videoId != null) {
+            val apiText = try {
+                app.post(
+                    "https://www.ok.ru/dk?cmd=videoPlayerMetadata",
+                    data = mapOf("mid" to videoId),
+                    referer = embedUrl,
+                    headers = requestHeaders(embedUrl)
+                ).text
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
             }
 
-        // Fallback for older/current variants that expose "videos" directly
-        // in page source instead of a parseable data-options object.
-        if (videos.isEmpty()) {
-            val normalized = cleanJsonString(response.text)
-            val videosJson = Regex(
-                """"videos"\s*:\s*(\[[\s\S]*?])""",
-                RegexOption.IGNORE_CASE
-            ).find(normalized)
-                ?.groupValues
-                ?.getOrNull(1)
-
-            AppUtils.tryParseJson<List<OkRuVideo>>(videosJson.orEmpty())
+            apiText
+                ?.let(::parseNode)
+                ?.let(::extractVideos)
                 ?.let(::addVideos)
         }
 
-        videos.values.forEach { video ->
-            val videoUrl = video.url
-                .replace("\\/", "/")
-                .let {
-                    if (it.startsWith("//")) "https:$it" else it
+        /*
+         * Embed pages are more reliable than normal /video/ pages for guests.
+         * They also cover cases where the metadata API returns no renditions.
+         */
+        if (videos.isEmpty()) {
+            val response = try {
+                app.get(
+                    embedUrl,
+                    referer = referer ?: "https://anichin.moe/",
+                    headers = requestHeaders(embedUrl)
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                return
+            }
+
+            response.document
+                .select("[data-options]")
+                .forEach { element ->
+                    if (videos.isNotEmpty()) return@forEach
+
+                    val optionsNode = parseNode(
+                        cleanJsonString(
+                            element.attr("data-options")
+                        )
+                    ) ?: return@forEach
+
+                    val flashvars = optionsNode.get("flashvars")
+                        ?: return@forEach
+
+                    val metadataNode = flashvars.get("metadata")
+
+                    when {
+                        metadataNode == null || metadataNode.isNull -> Unit
+
+                        metadataNode.isObject || metadataNode.isArray -> {
+                            addVideos(
+                                extractVideos(metadataNode)
+                            )
+                        }
+
+                        metadataNode.isTextual -> {
+                            parseNode(
+                                cleanJsonString(
+                                    metadataNode.asText()
+                                )
+                            )?.let(::extractVideos)
+                                ?.let(::addVideos)
+                        }
+                    }
+
+                    if (videos.isEmpty()) {
+                        val metadataUrl = flashvars
+                            .get("metadataUrl")
+                            ?.asText()
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let(::cleanJsonString)
+                            ?.let(::decodeUrl)
+
+                        if (!metadataUrl.isNullOrBlank()) {
+                            val metadataText = try {
+                                app.get(
+                                    metadataUrl,
+                                    referer = embedUrl,
+                                    headers = requestHeaders(embedUrl)
+                                ).text
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                null
+                            }
+
+                            metadataText
+                                ?.let(::parseNode)
+                                ?.let(::extractVideos)
+                                ?.let(::addVideos)
+                        }
+                    }
                 }
 
-            val qualityName = when (video.name.uppercase()) {
+            /*
+             * Last HTML fallback for player variants where "videos" is present
+             * in source but data-options cannot be parsed as a whole.
+             */
+            if (videos.isEmpty()) {
+                val normalizedHtml = cleanJsonString(response.text)
+
+                Regex(
+                    """"videos"\s*:\s*(\[[\s\S]*?])""",
+                    RegexOption.IGNORE_CASE
+                ).find(normalizedHtml)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?.let(::parseNode)
+                    ?.let(::extractVideos)
+                    ?.let(::addVideos)
+            }
+        }
+
+        videos.values.forEach { video ->
+            val quality = when (video.name.uppercase()) {
                 "MOBILE" -> "144p"
                 "LOWEST" -> "240p"
                 "LOW" -> "360p"
@@ -148,30 +183,69 @@ open class Odnoklassniki : ExtractorApi() {
                 newExtractorLink(
                     source = name,
                     name = name,
-                    url = videoUrl,
+                    url = video.url,
                     type = INFER_TYPE
                 ) {
-                    this.referer = "$origin/"
-                    this.quality = getQualityFromName(qualityName)
+                    this.referer = embedUrl
+                    this.quality = getQualityFromName(quality)
                     this.headers = mapOf(
                         "User-Agent" to USER_AGENT,
-                        "Referer" to "$origin/"
+                        "Referer" to embedUrl,
+                        "Origin" to "https://ok.ru"
                     )
                 }
             )
         }
     }
 
-    private fun normalizeEmbedUrl(url: String): String {
-        val fixed = url
+    private fun requestHeaders(referer: String): Map<String, String> {
+        return mapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "*/*",
+            "Referer" to referer,
+            "Origin" to "https://ok.ru"
+        )
+    }
+
+    private fun extractVideoId(url: String): String? {
+        val clean = normalizeUrl(url)
+
+        val patterns = listOf(
+            Regex(
+                """(?:videoembed|video|moviePlayer)/([\d-]+)""",
+                RegexOption.IGNORE_CASE
+            ),
+            Regex(
+                """[?&](?:st\.mvId|mid)=([\d-]+)""",
+                RegexOption.IGNORE_CASE
+            )
+        )
+
+        return patterns.firstNotNullOfOrNull { regex ->
+            regex.find(clean)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.takeIf { it.isNotBlank() }
+        }
+    }
+
+    private fun normalizeUrl(url: String): String {
+        return url
             .replace("&amp;", "&")
             .replace("\\/", "/")
+            .trim()
+    }
+
+    private fun normalizeMediaUrl(url: String): String {
+        val clean = url
+            .replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("&amp;", "&")
+            .trim()
 
         return when {
-            fixed.contains("/videoembed/", ignoreCase = true) -> fixed
-            fixed.contains("/video/", ignoreCase = true) ->
-                fixed.replace("/video/", "/videoembed/")
-            else -> fixed
+            clean.startsWith("//") -> "https:$clean"
+            else -> clean
         }
     }
 
@@ -181,6 +255,7 @@ open class Odnoklassniki : ExtractorApi() {
             .replace("&#34;", "\"")
             .replace("\\&quot;", "\"")
             .replace("\\/", "/")
+            .replace("\\u0026", "&")
             .replace(Regex("""\\u([0-9A-Fa-f]{4})""")) { match ->
                 match.groupValues[1]
                     .toIntOrNull(16)
@@ -199,27 +274,61 @@ open class Odnoklassniki : ExtractorApi() {
         }
     }
 
-    private data class PlayerOptions(
-        @param:JsonProperty("flashvars")
-        val flashvars: FlashVars? = null
-    )
+    private fun parseNode(value: String): JsonNode? {
+        if (value.isBlank()) return null
+        return AppUtils.tryParseJson<JsonNode>(value)
+    }
 
-    private data class FlashVars(
-        @param:JsonProperty("metadata")
-        val metadata: String? = null,
-        @param:JsonProperty("metadataUrl")
-        val metadataUrl: String? = null
-    )
+    private fun extractVideos(node: JsonNode): List<OkRuVideo> {
+        val videosNode = when {
+            node.isArray -> node
 
-    private data class OkMetadata(
-        @param:JsonProperty("videos")
-        val videos: List<OkRuVideo> = emptyList()
-    )
+            node.has("videos") ->
+                node.get("videos")
 
-    data class OkRuVideo(
-        @param:JsonProperty("name")
-        val name: String = "",
-        @param:JsonProperty("url")
-        val url: String = ""
+            else ->
+                node.findValue("videos")
+        } ?: return emptyList()
+
+        if (!videosNode.isArray) return emptyList()
+
+        return videosNode.mapNotNull { item ->
+            val url = item.get("url")
+                ?.asText()
+                ?.takeIf { it.isNotBlank() }
+                ?: return@mapNotNull null
+
+            OkRuVideo(
+                name = item.get("name")
+                    ?.asText()
+                    .orEmpty(),
+                url = url
+            )
+        }
+    }
+
+    private data class OkRuVideo(
+        val name: String,
+        val url: String
     )
+}
+
+class OkRuSSL : OkRuExtractor() {
+    override var mainUrl = "https://ok.ru"
+}
+
+class OkRuWWW : OkRuExtractor() {
+    override var mainUrl = "https://www.ok.ru"
+}
+
+class OkRuHTTP : OkRuExtractor() {
+    override var mainUrl = "http://ok.ru"
+}
+
+class Odnoklassniki : OkRuExtractor() {
+    override var mainUrl = "https://odnoklassniki.ru"
+}
+
+class OdnoklassnikiWWW : OkRuExtractor() {
+    override var mainUrl = "https://www.odnoklassniki.ru"
 }

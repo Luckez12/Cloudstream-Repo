@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 @CloudstreamPlugin
 class AnichinPlugin : BasePlugin() {
     override fun load() {
-        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=16")
+        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=17")
         registerMainAPI(AnichinProvider())
 
         // Custom host fixes for Anichin:
@@ -16,9 +16,11 @@ class AnichinPlugin : BasePlugin() {
         registerExtractorAPI(Geodailymotion())
 
         // OK.ru supports both current ok.ru and legacy odnoklassniki.ru embeds.
-        registerExtractorAPI(Odnoklassniki())
         registerExtractorAPI(OkRuSSL())
+        registerExtractorAPI(OkRuWWW())
         registerExtractorAPI(OkRuHTTP())
+        registerExtractorAPI(Odnoklassniki())
+        registerExtractorAPI(OdnoklassnikiWWW())
 
         registerExtractorAPI(Rumble())
         registerExtractorAPI(Morencius())
