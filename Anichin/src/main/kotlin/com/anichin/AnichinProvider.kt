@@ -919,7 +919,8 @@ class AnichinProvider : MainAPI() {
             value.contains("anichin.stream") -> 3
             value.contains("anichin-player.web.id") -> 4
             value.contains("streamruby") || value.contains("ruby") -> 5
-            value.contains("vidhide") -> 6
+            value.contains("emturbovid") || value.contains("turboviplay") -> 6
+            value.contains("morencius") || value.contains("vidhide") -> 7
             else -> 20
         }
     }

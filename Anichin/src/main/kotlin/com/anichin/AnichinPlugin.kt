@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 @CloudstreamPlugin
 class AnichinPlugin : BasePlugin() {
     override fun load() {
-        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=22")
+        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=23")
         registerMainAPI(AnichinProvider())
 
         // Custom host fixes for Anichin:
@@ -24,6 +24,7 @@ class AnichinPlugin : BasePlugin() {
 
         registerExtractorAPI(Rumble())
         registerExtractorAPI(Morencius())
+        registerExtractorAPI(EmturbovidAdaptive())
 
         registerExtractorAPI(StreamRuby())
         registerExtractorAPI(StreamRubyCom())
