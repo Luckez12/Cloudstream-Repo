@@ -384,19 +384,20 @@ class msm21 : MainAPI() {
 
         // Fast native servers and fallback servers start together.
         // Direct extractor callbacks are emitted immediately as each source resolves.
-        val selectedFastOptions = options
+        val uniqueOptions = options
+            .distinctBy { it.optionKey() }
+
+        val selectedFastOptions = uniqueOptions
             .filter { it.isFastNativeOption() }
             .sortedBy { it.fastPriority() }
-            .take(MAX_FAST_OPTIONS)
 
         val fastOptionKeys = selectedFastOptions
             .map { it.optionKey() }
             .toSet()
 
-        val fallbackOptions = options
+        val fallbackOptions = uniqueOptions
             .filterNot { it.optionKey() in fastOptionKeys }
             .sortedBy { it.fallbackPriority() }
-            .take(MAX_FALLBACK_OPTIONS)
 
         val laneResults = coroutineScope {
             val fastLane = async {
@@ -921,9 +922,7 @@ class msm21 : MainAPI() {
 
     companion object {
         private const val AJAX_BATCH_SIZE = 4
-        private const val MAX_FAST_OPTIONS = 8
         private const val FALLBACK_BATCH_SIZE = 2
-        private const val MAX_FALLBACK_OPTIONS = 6
         private const val MAX_WEBVIEW_MIRRORS = 3
         private const val STANDARD_EXTRACTOR_TIMEOUT_MS = 12_000L
         private const val MIRROR_CACHE_TTL_MS = 90_000L
