@@ -130,10 +130,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://45.11.57.243&size=%size%",
-        "fileHash": "sha256-f84bd143626ebdbdf42935d1871ab6cc3e1a470fd3b44a370485d11684346cf1",
+        "fileHash": "sha256-cce2f0142c8180c6c385261f0edb40e08b5ebfc441147efdeb5908902e604879",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 48432,
+        "fileSize": 50349,
         "status": 1,
         "language": "id",
         "authors": [
@@ -144,7 +144,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 3,
+        "version": 4,
         "internalName": "OppaDrama",
         "description": "OppaDrama \u2014 Streaming Drama Korean, Movie and TV Series",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/OppaDrama.cs3",
