@@ -43,46 +43,23 @@ open class OkRuExtractor : ExtractorApi() {
         }
 
         /*
-         * Current OK.ru exposes videoPlayerMetadata directly. Try this first:
-         * it avoids relying only on the HTML player's data-options shape.
+         * Fast path: read the embed page first. In the working V17 cases this
+         * already contains data-options/metadata with every quality, so avoid
+         * paying for an extra metadata API request before playback can appear.
          */
-        if (videoId != null) {
-            val apiText = try {
-                app.post(
-                    "https://www.ok.ru/dk?cmd=videoPlayerMetadata",
-                    data = mapOf("mid" to videoId),
-                    referer = embedUrl,
-                    headers = requestHeaders(embedUrl)
-                ).text
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                null
-            }
-
-            apiText
-                ?.let(::parseNode)
-                ?.let(::extractVideos)
-                ?.let(::addVideos)
+        val response = try {
+            app.get(
+                embedUrl,
+                referer = referer ?: "https://anichin.moe/",
+                headers = requestHeaders(embedUrl)
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
         }
 
-        /*
-         * Embed pages are more reliable than normal /video/ pages for guests.
-         * They also cover cases where the metadata API returns no renditions.
-         */
-        if (videos.isEmpty()) {
-            val response = try {
-                app.get(
-                    embedUrl,
-                    referer = referer ?: "https://anichin.moe/",
-                    headers = requestHeaders(embedUrl)
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                return
-            }
-
+        if (response != null) {
             response.document
                 .select("[data-options]")
                 .forEach { element ->
@@ -118,6 +95,10 @@ open class OkRuExtractor : ExtractorApi() {
                         }
                     }
 
+                    /*
+                     * Only hit metadataUrl when inline metadata did not contain
+                     * any renditions.
+                     */
                     if (videos.isEmpty()) {
                         val metadataUrl = flashvars
                             .get("metadataUrl")
@@ -148,8 +129,7 @@ open class OkRuExtractor : ExtractorApi() {
                 }
 
             /*
-             * Last HTML fallback for player variants where "videos" is present
-             * in source but data-options cannot be parsed as a whole.
+             * HTML fallback before the separate metadata API.
              */
             if (videos.isEmpty()) {
                 val normalizedHtml = cleanJsonString(response.text)
@@ -164,6 +144,30 @@ open class OkRuExtractor : ExtractorApi() {
                     ?.let(::extractVideos)
                     ?.let(::addVideos)
             }
+        }
+
+        /*
+         * Slow fallback only. Keep V17's direct metadata endpoint because it
+         * recovered OK.ru on pages where the embed markup was incomplete.
+         */
+        if (videos.isEmpty() && videoId != null) {
+            val apiText = try {
+                app.post(
+                    "https://www.ok.ru/dk?cmd=videoPlayerMetadata",
+                    data = mapOf("mid" to videoId),
+                    referer = embedUrl,
+                    headers = requestHeaders(embedUrl)
+                ).text
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+
+            apiText
+                ?.let(::parseNode)
+                ?.let(::extractVideos)
+                ?.let(::addVideos)
         }
 
         videos.values.forEach { video ->
