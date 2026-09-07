@@ -3,7 +3,6 @@ package com.kisskh
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.mvvm.safeApiCall
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -14,6 +13,7 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import okhttp3.Interceptor
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import kotlinx.coroutines.CancellationException
 import java.net.URLEncoder
 import java.util.ArrayList
 import java.util.concurrent.ConcurrentHashMap
@@ -43,11 +43,13 @@ class KissKH : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val typeHint = typeHintFromRequest(request.data)
+
         val home = app.get(
             "$mainUrl/api/DramaList/List?page=$page${request.data}",
             referer = "$mainUrl/"
         ).parsedSafe<Responses>()?.data
-            ?.mapNotNull { it.toSearchResponse() }
+            ?.mapNotNull { it.toSearchResponse(typeHint) }
             ?: throw ErrorLoadingException("Invalid KissKH response")
 
         return newHomePageResponse(
@@ -60,18 +62,55 @@ class KissKH : MainAPI() {
         )
     }
 
-    private fun Media.toSearchResponse(): SearchResponse? {
+    private fun typeHintFromRequest(data: String): TvType? {
+        val type = Regex("""(?:^|&)type=(\d+)""")
+            .find(data)
+            ?.groupValues
+            ?.getOrNull(1)
+
+        return when (type) {
+            "2" -> TvType.Movie
+            "1", "3", "4" -> TvType.TvSeries
+            else -> null
+        }
+    }
+
+    private fun mediaType(
+        apiType: String?,
+        hint: TvType?
+    ): TvType {
+        return when {
+            apiType.equals("Movie", ignoreCase = true) -> TvType.Movie
+            apiType.equals("Film", ignoreCase = true) -> TvType.Movie
+            hint == TvType.Movie -> TvType.Movie
+            else -> TvType.TvSeries
+        }
+    }
+
+    private fun detailData(
+        title: String,
+        id: Int,
+        type: TvType
+    ): String {
+        val base = "${getTitle(title)}/$id"
+        return if (type == TvType.Movie) "$base#movie" else base
+    }
+
+    private fun Media.toSearchResponse(
+        typeHint: TvType? = null
+    ): SearchResponse? {
         if (!settingsForProvider.enableAdult && label?.contains("RAW", ignoreCase = true) == true) {
             return null
         }
 
         val mediaTitle = title ?: return null
         val mediaId = id ?: return null
+        val tvType = mediaType(type, typeHint)
 
         return newAnimeSearchResponse(
             mediaTitle,
-            "${getTitle(mediaTitle)}/$mediaId",
-            TvType.TvSeries
+            detailData(mediaTitle, mediaId, tvType),
+            tvType
         ) {
             posterUrl = thumbnail
             posterHeaders = mapOf("User-Agent" to USER_AGENT)
@@ -94,8 +133,11 @@ class KissKH : MainAPI() {
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     override suspend fun load(url: String): LoadResponse? {
-        val dramaId = url.substringAfterLast("/")
-        val slug = url.substringBeforeLast("/").substringAfterLast("/")
+        val cleanUrl = url.substringBefore('#')
+        val dramaId = cleanUrl.substringAfterLast("/")
+        val slug = cleanUrl.substringBeforeLast("/").substringAfterLast("/")
+        val movieHint = url.substringAfter('#', "")
+            .equals("movie", ignoreCase = true)
 
         val res = app.get(
             "$mainUrl/api/DramaList/Drama/$dramaId?isq=false",
@@ -114,10 +156,43 @@ class KissKH : MainAPI() {
             }
         } ?: throw ErrorLoadingException("No episodes found")
 
+        val title = res.title ?: return null
+        val isMovie =
+            res.type.equals("Movie", ignoreCase = true) ||
+                res.type.equals("Film", ignoreCase = true) ||
+                movieHint
+
+        if (isMovie) {
+            val movieData = episodes
+                .firstOrNull()
+                ?.data
+                ?: throw ErrorLoadingException("No playable movie source found")
+
+            return newMovieLoadResponse(
+                title,
+                url,
+                TvType.Movie,
+                movieData
+            ) {
+                posterUrl = res.thumbnail?.trim()
+                posterHeaders = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to "$mainUrl/"
+                )
+                year = res.releaseDate?.substringBefore("-")?.toIntOrNull()
+                plot = res.description
+                tags = listOfNotNull(
+                    res.country,
+                    res.status,
+                    res.type
+                ).filter { it.isNotBlank() }
+            }
+        }
+
         return newTvSeriesLoadResponse(
-            res.title ?: return null,
+            title,
             url,
-            if (res.type == "Movie" || episodes.size == 1) TvType.Movie else TvType.TvSeries,
+            TvType.TvSeries,
             episodes.reversed()
         ) {
             posterUrl = res.thumbnail?.trim()
@@ -208,6 +283,8 @@ class KissKH : MainAPI() {
                     "$VIDEO_KEY_API$episodeId&version=$KISSKH_VERSION",
                     timeout = 8000
                 ).parsedSafe<Key>()?.key.orEmpty()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Video kkey request failed: ${e.message}")
                 ""
@@ -226,6 +303,8 @@ class KissKH : MainAPI() {
 
             val source = try {
                 app.get(videoApi, referer = referer, timeout = 10000).parsedSafe<Sources>()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Video API failed: ${e.message}")
                 null
@@ -239,7 +318,7 @@ class KissKH : MainAPI() {
             Log.d(TAG, "Video sources=${sourceLinks.size}")
 
             sourceLinks.amap { link ->
-                safeApiCall {
+                try {
                     when {
                         link.contains(".m3u8", ignoreCase = true) -> {
                             callback(
@@ -288,6 +367,10 @@ class KissKH : MainAPI() {
                             }
                         }
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Source extraction failed: ${e.message}")
                 }
             }
         }
@@ -298,6 +381,8 @@ class KissKH : MainAPI() {
                     "$SUBTITLE_KEY_API$episodeId&version=$KISSKH_VERSION",
                     timeout = 8000
                 ).parsedSafe<Key>()?.key.orEmpty()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Subtitle kkey request failed: ${e.message}")
                 ""
@@ -321,6 +406,8 @@ class KissKH : MainAPI() {
                     val language = getAllowedSubtitleLanguage(sub.label) ?: return@forEach
                     emitSubtitle(SubtitleFile(language, fixUrl(src)))
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Subtitle API failed: ${e.message}")
             }
@@ -392,7 +479,8 @@ data class Media(
     @param:JsonProperty("thumbnail") val thumbnail: String?,
     @param:JsonProperty("label") val label: String?,
     @param:JsonProperty("id") val id: Int?,
-    @param:JsonProperty("title") val title: String?
+    @param:JsonProperty("title") val title: String?,
+    @param:JsonProperty("type") val type: String? = null
 )
 
 data class Data(
