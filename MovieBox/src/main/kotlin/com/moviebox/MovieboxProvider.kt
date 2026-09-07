@@ -213,7 +213,7 @@ class MovieboxProvider : MainAPI() {
         }
 
         jobs.forEach { job ->
-            if (job.isActive) job.cancel()
+            if (job.isActive) job.cancel(CancellationException("MovieBox race completed"))
         }
 
         result
@@ -254,7 +254,7 @@ class MovieboxProvider : MainAPI() {
         }
 
         jobs.forEach { job ->
-            if (job.isActive) job.cancel()
+            if (job.isActive) job.cancel(CancellationException("MovieBox race completed"))
         }
 
         result
@@ -484,7 +484,7 @@ class MovieboxProvider : MainAPI() {
         }
 
         jobs.forEach { job ->
-            if (job.isActive) job.cancel()
+            if (job.isActive) job.cancel(CancellationException("MovieBox race completed"))
         }
 
         result
@@ -586,7 +586,7 @@ class MovieboxProvider : MainAPI() {
         }.orEmpty()
 
         jobs.forEach { job ->
-            if (job.isActive) job.cancel()
+            if (job.isActive) job.cancel(CancellationException("MovieBox race completed"))
         }
 
         result
