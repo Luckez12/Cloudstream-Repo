@@ -40,6 +40,37 @@ class OneTouchTV : MainAPI() {
         println("[OneTouchTV] $message")
     }
 
+    private fun detailUrl(
+        id: String,
+        type: String?
+    ): String {
+        val hint = if (type.equals("movie", ignoreCase = true)) {
+            "movie"
+        } else {
+            "series"
+        }
+
+        return "$mainUrl/vod/$id/detail#$hint"
+    }
+
+    private fun mediaTypeFrom(
+        apiType: String?,
+        url: String
+    ): TvType {
+        if (apiType.equals("movie", ignoreCase = true)) {
+            return TvType.Movie
+        }
+
+        return if (
+            url.substringAfter('#', "")
+                .equals("movie", ignoreCase = true)
+        ) {
+            TvType.Movie
+        } else {
+            TvType.TvSeries
+        }
+    }
+
     private suspend fun getDecrypted(url: String, referer: String? = null): String {
         val raw = try {
             app.get(url, referer = referer).text
@@ -139,7 +170,7 @@ class OneTouchTV : MainAPI() {
             val id = item.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
             newTvSeriesSearchResponse(
                 item.title?.ifBlank { "Unknown" } ?: "Unknown",
-                "$mainUrl/vod/$id/detail",
+                detailUrl(id, item.type),
                 if (item.type.equals("movie", ignoreCase = true)) {
                     TvType.Movie
                 } else {
@@ -155,7 +186,8 @@ class OneTouchTV : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val decrypted = getDecrypted(url)
+        val requestUrl = url.substringBefore('#')
+        val decrypted = getDecrypted(requestUrl)
         val data = try {
             parseJson<DetailResponse>(decrypted)
         } catch (error: Throwable) {
@@ -189,20 +221,64 @@ class OneTouchTV : MainAPI() {
             }
         }
 
-        val episodes = data.episodes
+        val playableEpisodes = data.episodes
             .distinctBy { it.identifier to it.playId }
             .mapNotNull { item ->
-                val identifier = item.identifier?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val playId = item.playId?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                newEpisode("$mainUrl/vod/$identifier/episode/$playId") {
+                val identifier = item.identifier
+                    ?.takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+
+                val playId = item.playId
+                    ?.takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+
+                item to "$mainUrl/vod/$identifier/episode/$playId"
+            }
+
+        val episodes = playableEpisodes
+            .map { (item, episodeUrl) ->
+                newEpisode(episodeUrl) {
                     name = "Episode ${item.episode ?: "?"}"
+                    episode = item.episode
+                        ?.toDoubleOrNull()
+                        ?.takeIf { it % 1.0 == 0.0 }
+                        ?.toInt()
                 }
             }
             .reversed()
 
         val recommendations = loadRecommendations()
+        val tvType = mediaTypeFrom(data.type, url)
 
-        log("load title='$title' episodes=${episodes.size} recs=${recommendations.size}")
+        log(
+            "load title='$title' type=$tvType " +
+                "episodes=${episodes.size} recs=${recommendations.size}"
+        )
+
+        if (tvType == TvType.Movie) {
+            val movieData = playableEpisodes
+                .firstOrNull()
+                ?.second
+                ?: throw ErrorLoadingException(
+                    "OneTouchTV movie stream not found",
+                )
+
+            return newMovieLoadResponse(
+                title,
+                url,
+                TvType.Movie,
+                movieData,
+            ) {
+                backgroundPosterUrl = backgroundPoster
+                posterUrl = poster
+                plot = data.description.orEmpty()
+                this.tags = tags
+                year = data.year?.toIntOrNull()
+                this.actors = actors
+                this.recommendations = recommendations
+            }
+        }
+
         return newTvSeriesLoadResponse(
             title,
             url,
@@ -237,7 +313,7 @@ class OneTouchTV : MainAPI() {
                     val id = item.id ?: item._id ?: return@mapNotNull null
                     newTvSeriesSearchResponse(
                         item.title?.ifBlank { "Unknown Title" } ?: "Unknown Title",
-                        "$mainUrl/vod/$id/detail",
+                        detailUrl(id, item.type),
                         if (item.type.equals("movie", ignoreCase = true)) {
                             TvType.Movie
                         } else {
@@ -315,7 +391,7 @@ class OneTouchTV : MainAPI() {
         val id = (item.id2 ?: item.id)?.takeIf { it.isNotBlank() } ?: return null
         return newTvSeriesSearchResponse(
             item.title?.ifBlank { "Unknown Title" } ?: "Unknown Title",
-            "$mainUrl/vod/$id/detail",
+            detailUrl(id, item.type),
             if (item.type.equals("movie", ignoreCase = true)) TvType.Movie else TvType.TvSeries,
         ) {
             posterUrl = item.image

@@ -50,6 +50,7 @@ data class SearchItem(
 
 data class DetailResponse(
     val title: String? = null,
+    val type: String? = null,
     val image: String? = null,
     val poster: String? = null,
     val description: String? = null,
