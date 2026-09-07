@@ -34,6 +34,7 @@ open class OkRuExtractor : ExtractorApi() {
 
         val videos = linkedMapOf<String, OkRuVideo>()
         var adaptiveHlsUrl: String? = null
+        var discoveredMetadataUrl: String? = null
 
         fun addVideos(items: List<OkRuVideo>) {
             items.forEach { video ->
@@ -104,35 +105,38 @@ open class OkRuExtractor : ExtractorApi() {
                         }
                     }
 
+                    discoveredMetadataUrl = flashvars
+                        .get("metadataUrl")
+                        ?.asText()
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let(::cleanJsonString)
+                        ?.let(::decodeUrl)
+                        ?: discoveredMetadataUrl
+
                     /*
-                     * Only hit metadataUrl when inline metadata did not contain
-                     * any renditions.
+                     * For OK.ru track selection, HLS is preferred even when
+                     * inline metadata already contains MP4 videos[].
+                     * Probe metadataUrl whenever HLS was not exposed inline.
                      */
-                    if (videos.isEmpty()) {
-                        val metadataUrl = flashvars
-                            .get("metadataUrl")
-                            ?.asText()
-                            ?.takeIf { it.isNotBlank() }
-                            ?.let(::cleanJsonString)
-                            ?.let(::decodeUrl)
-
-                        if (!metadataUrl.isNullOrBlank()) {
-                            val metadataText = try {
-                                app.get(
-                                    metadataUrl,
-                                    referer = embedUrl,
-                                    headers = requestHeaders(embedUrl)
-                                ).text
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (_: Exception) {
-                                null
-                            }
-
-                            metadataText
-                                ?.let(::parseNode)
-                                ?.let(::addMetadata)
+                    if (
+                        adaptiveHlsUrl.isNullOrBlank() &&
+                        !discoveredMetadataUrl.isNullOrBlank()
+                    ) {
+                        val metadataText = try {
+                            app.get(
+                                discoveredMetadataUrl!!,
+                                referer = embedUrl,
+                                headers = requestHeaders(embedUrl)
+                            ).text
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            null
                         }
+
+                        metadataText
+                            ?.let(::parseNode)
+                            ?.let(::addMetadata)
                     }
                 }
 
@@ -166,7 +170,7 @@ open class OkRuExtractor : ExtractorApi() {
          * Slow fallback only. Keep V17's direct metadata endpoint because it
          * recovered OK.ru on pages where the embed markup was incomplete.
          */
-        if (videos.isEmpty() && adaptiveHlsUrl.isNullOrBlank() && videoId != null) {
+        if (adaptiveHlsUrl.isNullOrBlank() && videoId != null) {
             val apiText = try {
                 app.post(
                     "https://www.ok.ru/dk?cmd=videoPlayerMetadata",
@@ -329,7 +333,8 @@ open class OkRuExtractor : ExtractorApi() {
     private fun extractAdaptiveHls(node: JsonNode): String? {
         val preferredKeys = listOf(
             "hlsMasterPlaylistUrl",
-            "hlsManifestUrl"
+            "hlsManifestUrl",
+            "ondemandHls"
         )
 
         for (key in preferredKeys) {
@@ -388,7 +393,7 @@ open class OkRuExtractor : ExtractorApi() {
 
     companion object {
         private val HLS_FIELD_REGEX = Regex(
-            """"(?:hlsMasterPlaylistUrl|hlsManifestUrl)"\s*:\s*"([^"]+)"""",
+            """"(?:hlsMasterPlaylistUrl|hlsManifestUrl|ondemandHls)"\s*:\s*"([^"]+)"""",
             RegexOption.IGNORE_CASE
         )
     }
