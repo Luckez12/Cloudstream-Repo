@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
@@ -32,6 +33,7 @@ open class OkRuExtractor : ExtractorApi() {
         }
 
         val videos = linkedMapOf<String, OkRuVideo>()
+        var adaptiveHlsUrl: String? = null
 
         fun addVideos(items: List<OkRuVideo>) {
             items.forEach { video ->
@@ -40,6 +42,16 @@ open class OkRuExtractor : ExtractorApi() {
                     videos[normalized] = video.copy(url = normalized)
                 }
             }
+        }
+
+        fun addMetadata(node: JsonNode) {
+            if (adaptiveHlsUrl.isNullOrBlank()) {
+                adaptiveHlsUrl = extractAdaptiveHls(node)
+                    ?.let(::normalizeMediaUrl)
+                    ?.takeIf { it.isNotBlank() }
+            }
+
+            addVideos(extractVideos(node))
         }
 
         /*
@@ -80,9 +92,7 @@ open class OkRuExtractor : ExtractorApi() {
                         metadataNode == null || metadataNode.isNull -> Unit
 
                         metadataNode.isObject || metadataNode.isArray -> {
-                            addVideos(
-                                extractVideos(metadataNode)
-                            )
+                            addMetadata(metadataNode)
                         }
 
                         metadataNode.isTextual -> {
@@ -90,8 +100,7 @@ open class OkRuExtractor : ExtractorApi() {
                                 cleanJsonString(
                                     metadataNode.asText()
                                 )
-                            )?.let(::extractVideos)
-                                ?.let(::addVideos)
+                            )?.let(::addMetadata)
                         }
                     }
 
@@ -122,8 +131,7 @@ open class OkRuExtractor : ExtractorApi() {
 
                             metadataText
                                 ?.let(::parseNode)
-                                ?.let(::extractVideos)
-                                ?.let(::addVideos)
+                                ?.let(::addMetadata)
                         }
                     }
                 }
@@ -131,8 +139,16 @@ open class OkRuExtractor : ExtractorApi() {
             /*
              * HTML fallback before the separate metadata API.
              */
-            if (videos.isEmpty()) {
+            if (videos.isEmpty() && adaptiveHlsUrl.isNullOrBlank()) {
                 val normalizedHtml = cleanJsonString(response.text)
+
+                adaptiveHlsUrl = HLS_FIELD_REGEX
+                    .find(normalizedHtml)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?.let(::cleanJsonString)
+                    ?.let(::normalizeMediaUrl)
+                    ?.takeIf { it.isNotBlank() }
 
                 Regex(
                     """"videos"\s*:\s*(\[[\s\S]*?])""",
@@ -150,7 +166,7 @@ open class OkRuExtractor : ExtractorApi() {
          * Slow fallback only. Keep V17's direct metadata endpoint because it
          * recovered OK.ru on pages where the embed markup was incomplete.
          */
-        if (videos.isEmpty() && videoId != null) {
+        if (videos.isEmpty() && adaptiveHlsUrl.isNullOrBlank() && videoId != null) {
             val apiText = try {
                 app.post(
                     "https://www.ok.ru/dk?cmd=videoPlayerMetadata",
@@ -166,8 +182,35 @@ open class OkRuExtractor : ExtractorApi() {
 
             apiText
                 ?.let(::parseNode)
-                ?.let(::extractVideos)
-                ?.let(::addVideos)
+                ?.let(::addMetadata)
+        }
+
+        /*
+         * Preferred path: OK.ru metadata often exposes an HLS master playlist.
+         * Emit that as ONE source. Cloudstream/ExoPlayer reads its variants and
+         * exposes 1080p/720p/480p/etc inside the player's video-track selector,
+         * the same way Rumble's HLS master behaves.
+         *
+         * If a page has no HLS master, keep the old per-quality MP4 fallback so
+         * no working OK.ru rendition is lost.
+         */
+        adaptiveHlsUrl?.let { hlsUrl ->
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = hlsUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = embedUrl
+                    this.headers = mapOf(
+                        "User-Agent" to USER_AGENT,
+                        "Referer" to embedUrl,
+                        "Origin" to "https://ok.ru"
+                    )
+                }
+            )
+            return
         }
 
         videos.values.forEach { video ->
@@ -283,6 +326,33 @@ open class OkRuExtractor : ExtractorApi() {
         return AppUtils.tryParseJson<JsonNode>(value)
     }
 
+    private fun extractAdaptiveHls(node: JsonNode): String? {
+        val preferredKeys = listOf(
+            "hlsMasterPlaylistUrl",
+            "hlsManifestUrl"
+        )
+
+        for (key in preferredKeys) {
+            val direct = node.get(key)
+                ?.asText()
+                ?.takeIf { it.isNotBlank() }
+
+            if (direct != null) {
+                return cleanJsonString(direct)
+            }
+
+            val nested = node.findValue(key)
+                ?.asText()
+                ?.takeIf { it.isNotBlank() }
+
+            if (nested != null) {
+                return cleanJsonString(nested)
+            }
+        }
+
+        return null
+    }
+
     private fun extractVideos(node: JsonNode): List<OkRuVideo> {
         val videosNode = when {
             node.isArray -> node
@@ -315,6 +385,13 @@ open class OkRuExtractor : ExtractorApi() {
         val name: String,
         val url: String
     )
+
+    companion object {
+        private val HLS_FIELD_REGEX = Regex(
+            """"(?:hlsMasterPlaylistUrl|hlsManifestUrl)"\s*:\s*"([^"]+)"""",
+            RegexOption.IGNORE_CASE
+        )
+    }
 }
 
 class OkRuSSL : OkRuExtractor() {
