@@ -53,7 +53,7 @@ class MixDropTop : MixDrop() {
  */
 object MsmWebViewProbe {
     private const val MAX_WAIT_MS = 14_000L
-    private const val FINISH_AFTER_FIRST_STREAM_MS = 1_200L
+    private const val FINISH_AFTER_FIRST_STREAM_MS = 2_500L
 
     data class CapturedStream(
         val label: String,
@@ -452,6 +452,7 @@ object MsmWebViewProbe {
 
         return value.contains("/sora/") ||
             value.contains(".m3u8") ||
+            value.contains(".mpd") ||
             value.contains(".mp4") ||
             value.contains(".m4v")
     }

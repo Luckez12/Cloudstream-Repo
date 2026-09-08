@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 class msm21 : MainAPI() {
-    override var mainUrl = "https://pencurimoviesubmalay26.site"
+    override var mainUrl = "https://movisubmalay.org"
     override var name = "MSM21 👾"
     override var lang = "ms"
 
@@ -330,7 +330,12 @@ class msm21 : MainAPI() {
         )
 
         val options = response.document
-            .select("li.zetaflix_player_option[data-post][data-nume][data-type]")
+            .select(
+                "li.zetaflix_player_option[data-post][data-nume][data-type], " +
+                    "li[data-post][data-nume][data-type], " +
+                    "[class*=player_option][data-post][data-nume][data-type], " +
+                    "[data-post][data-nume][data-type]"
+            )
             .mapNotNull { element ->
                 val nume = element.attr("data-nume").trim()
                 if (nume.isBlank() || nume.equals("fake", true)) {
@@ -346,10 +351,9 @@ class msm21 : MainAPI() {
                     nume = nume,
                     type = type,
                     label = cleanText(
-                        listOfNotNull(
-                            element.selectFirst(".opt-titl")?.text(),
-                            element.selectFirst(".opt-name")?.text()
-                        ).joinToString(" ")
+                        element.selectFirst(".opt-titl")?.text()
+                            ?: element.selectFirst(".opt-name")?.text()
+                            ?: element.text()
                     ).ifBlank { "Server $nume" }
                 )
             }
@@ -493,15 +497,70 @@ class msm21 : MainAPI() {
             async {
                 val emitted = AtomicBoolean(false)
                 try {
-                    withTimeoutOrNull(STANDARD_EXTRACTOR_TIMEOUT_MS) {
-                        loadExtractor(
-                            mirror.url,
-                            pageUrl,
-                            subtitleCallback
-                        ) { link ->
-                            emitted.set(true)
-                            foundStream.set(true)
-                            if (emittedUrls.add(link.url)) callback(link)
+                    withTimeoutOrNull(MIRROR_PIPELINE_TIMEOUT_MS) {
+                        // Keep the normal Cloudstream extractor path first. Only
+                        // resolve redirects or inspect a nested iframe if it did
+                        // not actually emit a playable link.
+                        withTimeoutOrNull(STANDARD_EXTRACTOR_TIMEOUT_MS) {
+                            loadExtractor(
+                                mirror.url,
+                                pageUrl,
+                                subtitleCallback
+                            ) { link ->
+                                emitted.set(true)
+                                foundStream.set(true)
+                                if (emittedUrls.add(link.url)) callback(link)
+                            }
+                        }
+
+                        val finalUrl = if (!emitted.get()) {
+                            followRedirect(
+                                mirror.url,
+                                maxHops = 4
+                            ).ifBlank { mirror.url }
+                        } else {
+                            mirror.url
+                        }
+
+                        if (!emitted.get() && finalUrl != mirror.url) {
+                            withTimeoutOrNull(STANDARD_EXTRACTOR_TIMEOUT_MS) {
+                                loadExtractor(
+                                    finalUrl,
+                                    pageUrl,
+                                    subtitleCallback
+                                ) { link ->
+                                    emitted.set(true)
+                                    foundStream.set(true)
+                                    if (emittedUrls.add(link.url)) callback(link)
+                                }
+                            }
+                        }
+
+                        if (!emitted.get()) {
+                            val nestedUrl = findNestedEmbed(
+                                finalUrl,
+                                pageUrl
+                            )
+                            if (!nestedUrl.isNullOrBlank() &&
+                                nestedUrl != finalUrl
+                            ) {
+                                val nestedFinal = followRedirect(
+                                    nestedUrl,
+                                    maxHops = 3
+                                ).ifBlank { nestedUrl }
+
+                                withTimeoutOrNull(STANDARD_EXTRACTOR_TIMEOUT_MS) {
+                                    loadExtractor(
+                                        nestedFinal,
+                                        finalUrl,
+                                        subtitleCallback
+                                    ) { link ->
+                                        emitted.set(true)
+                                        foundStream.set(true)
+                                        if (emittedUrls.add(link.url)) callback(link)
+                                    }
+                                }
+                            }
                         }
                     }
                 } catch (cancelled: CancellationException) {
@@ -559,10 +618,10 @@ class msm21 : MainAPI() {
                         put("Referer", get("Referer") ?: mirror.url)
                     }
 
-                val linkType = if (stream.url.contains(".m3u8", true)) {
-                    ExtractorLinkType.M3U8
-                } else {
-                    ExtractorLinkType.VIDEO
+                val linkType = when {
+                    stream.url.contains(".m3u8", true) -> ExtractorLinkType.M3U8
+                    stream.url.contains(".mpd", true) -> ExtractorLinkType.DASH
+                    else -> ExtractorLinkType.VIDEO
                 }
 
                 callback(
@@ -627,8 +686,22 @@ class msm21 : MainAPI() {
             )
 
             val payload = tryParseJson<ZetaPlayerResponse>(response.text)
-            val mirrors = extractEmbedUrls(payload?.embedUrl.orEmpty(), pageUrl)
-                .map { EmbedMirror(it, option.label) }
+            val found = linkedSetOf<String>()
+
+            extractEmbedUrls(
+                payload?.embedUrl.orEmpty(),
+                pageUrl
+            ).forEach(found::add)
+
+            // Some Zeta/player versions return raw HTML or a slightly different
+            // JSON envelope. Scan the full response as a fallback instead of
+            // treating it as a dead server.
+            if (found.isEmpty()) {
+                extractEmbedUrls(response.text, pageUrl)
+                    .forEach(found::add)
+            }
+
+            val mirrors = found.map { EmbedMirror(it, option.label) }
             if (mirrors.isNotEmpty()) cacheMirrors(cacheKey, mirrors)
             mirrors
         } catch (cancelled: CancellationException) {
@@ -737,6 +810,124 @@ class msm21 : MainAPI() {
         return found.toList()
     }
 
+    private suspend fun findNestedEmbed(
+        url: String,
+        referer: String
+    ): String? {
+        return try {
+            val response = app.get(
+                url,
+                headers = mapOf("Referer" to referer),
+                timeout = 15L
+            )
+
+            val candidate = response.document.selectFirst(
+                "iframe[data-src], iframe[src], " +
+                    "[data-video], [data-url], [data-embed], [data-link]"
+            )?.let { element ->
+                listOf(
+                    element.attr("data-src"),
+                    element.attr("src"),
+                    element.attr("data-video"),
+                    element.attr("data-url"),
+                    element.attr("data-embed"),
+                    element.attr("data-link")
+                ).firstOrNull { it.isNotBlank() }
+            }
+
+            val direct = candidate
+                ?.let { normaliseEmbedUrl(it, url) }
+            if (!direct.isNullOrBlank() && direct != url) {
+                direct
+            } else {
+                extractEmbedUrls(response.text, url)
+                    .firstOrNull { it != url }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun followRedirect(
+        url: String,
+        maxHops: Int = 4
+    ): String {
+        var current = url.trim()
+        if (current.isBlank()) return current
+
+        repeat(maxHops) {
+            val next = try {
+                val response = app.get(
+                    current,
+                    allowRedirects = false,
+                    timeout = 10L
+                )
+                val location = response.headers["Location"]
+                    ?: response.headers["location"]
+
+                when {
+                    !location.isNullOrBlank() -> resolveUrl(current, location)
+                    else -> {
+                        val metaRefresh = response.document
+                            .selectFirst("meta[http-equiv~=(?i)refresh]")
+                            ?.attr("content")
+                            ?.let(::extractMetaRefreshUrl)
+
+                        if (!metaRefresh.isNullOrBlank()) {
+                            resolveUrl(current, metaRefresh)
+                        } else {
+                            extractJavascriptRedirect(response.text)
+                                ?.let { resolveUrl(current, it) }
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+
+            if (next.isNullOrBlank() || next == current) {
+                return current
+            }
+            current = next
+        }
+
+        return current
+    }
+
+    private fun extractMetaRefreshUrl(content: String): String? {
+        return Regex(
+            """(?i)url\s*=\s*['"]?([^'";]+)"""
+        ).find(content)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+    }
+
+    private fun extractJavascriptRedirect(html: String): String? {
+        val patterns = listOf(
+            Regex(
+                """(?i)window\.location(?:\.href)?\s*=\s*['"]([^'"]+)['"]"""
+            ),
+            Regex(
+                """(?i)location\.href\s*=\s*['"]([^'"]+)['"]"""
+            ),
+            Regex(
+                """(?i)location\.replace\(\s*['"]([^'"]+)['"]\s*\)"""
+            )
+        )
+
+        return patterns.firstNotNullOfOrNull { regex ->
+            regex.find(html)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.trim()
+        }
+    }
+
     private fun normaliseEmbedUrl(
         raw: String,
         baseUrl: String
@@ -782,13 +973,18 @@ class msm21 : MainAPI() {
     private fun PlayerOption.fastPriority(): Int {
         val value = label.lowercase()
         return when {
-            value.contains("fire") || value.contains("wish") -> 0
-            value.contains("playm") -> 1
-            value.contains("byse") -> 2
-            value.contains("voe") -> 3
-            value.contains("mix") -> 4
-            value.contains("dsv") || value.contains("dood") -> 5
-            else -> 6
+            value.contains("gomsm") -> 0
+            value.contains("netu") -> 1
+            value.contains("upns") -> 2
+            value.contains("rpmpl") -> 3
+            value.contains("full hd") -> 4
+            value.contains("fire") || value.contains("wish") -> 5
+            value.contains("playm") -> 6
+            value.contains("byse") -> 7
+            value.contains("voe") -> 8
+            value.contains("mix") -> 9
+            value.contains("dsv") || value.contains("dood") -> 10
+            else -> 11
         }
     }
 
@@ -923,8 +1119,9 @@ class msm21 : MainAPI() {
     companion object {
         private const val AJAX_BATCH_SIZE = 4
         private const val FALLBACK_BATCH_SIZE = 2
-        private const val MAX_WEBVIEW_MIRRORS = 3
+        private const val MAX_WEBVIEW_MIRRORS = 5
         private const val STANDARD_EXTRACTOR_TIMEOUT_MS = 12_000L
+        private const val MIRROR_PIPELINE_TIMEOUT_MS = 40_000L
         private const val MIRROR_CACHE_TTL_MS = 90_000L
         private const val MAX_MIRROR_CACHE_ENTRIES = 80
 
@@ -939,7 +1136,12 @@ class msm21 : MainAPI() {
             "dood",
             "hgl",
             "playm",
-            "voe"
+            "voe",
+            "gomsm",
+            "netu",
+            "upns",
+            "rpmpl",
+            "full hd"
         )
 
         private val YEAR_AT_END = Regex("\\s*\\(((?:19|20)\\d{2})\\)\\s*$")
@@ -970,8 +1172,7 @@ class msm21 : MainAPI() {
             "host",
             "connection",
             "accept-encoding",
-            "range",
-            "origin"
+            "range"
         )
     }
 }
