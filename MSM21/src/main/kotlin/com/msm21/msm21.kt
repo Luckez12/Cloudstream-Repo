@@ -1,5 +1,6 @@
 package com.msm21
 
+import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
@@ -328,6 +329,7 @@ class msm21 : MainAPI() {
             headers = mapOf("Referer" to mainUrl),
             timeout = 50L
         )
+        Log.i(TAG, "MSM21_LOADLINKS page=${urlForLog(pageUrl)} code=${response.code}")
 
         val options = response.document
             .select(
@@ -365,6 +367,14 @@ class msm21 : MainAPI() {
                         .ifBlank { "Server $nume" }
                 )
             }
+
+        Log.i(
+            TAG,
+            "MSM21_OPTIONS count=${options.size} " +
+                options.joinToString(" || ") { option ->
+                    "${option.label}[nume=${option.nume},type=${option.type}]"
+                }
+        )
 
         val emittedUrls = ConcurrentHashMap.newKeySet<String>()
 
@@ -517,6 +527,7 @@ class msm21 : MainAPI() {
                             ) { link ->
                                 emitted.set(true)
                                 foundStream.set(true)
+                                Log.i(TAG, "MSM21_EXTRACT_OK label=${mirror.label} link=${urlForLog(link.url)}")
                                 if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
                             }
                         }
@@ -539,6 +550,7 @@ class msm21 : MainAPI() {
                                 ) { link ->
                                     emitted.set(true)
                                     foundStream.set(true)
+                                    Log.i(TAG, "MSM21_EXTRACT_OK label=${mirror.label} link=${urlForLog(link.url)}")
                                     if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
                                 }
                             }
@@ -565,6 +577,7 @@ class msm21 : MainAPI() {
                                     ) { link ->
                                         emitted.set(true)
                                         foundStream.set(true)
+                                        Log.i(TAG, "MSM21_EXTRACT_OK label=${mirror.label} link=${urlForLog(link.url)}")
                                         if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
                                     }
                                 }
@@ -577,6 +590,9 @@ class msm21 : MainAPI() {
                     false
                 }
 
+                if (!emitted.get()) {
+                    Log.i(TAG, "MSM21_EXTRACT_EMPTY label=${mirror.label} mirror=${urlForLog(mirror.url)}")
+                }
                 mirror.takeUnless { emitted.get() }
             }
         }.awaitAll().filterNotNull()
@@ -605,8 +621,10 @@ class msm21 : MainAPI() {
         // JavaScript players in parallel so all mirrors can be attempted without
         // making loadLinks exceed Cloudstream's timeout.
         val semaphore = Semaphore(WEBVIEW_CONCURRENCY)
+        Log.i(TAG, "MSM21_WEBVIEW_BATCH count=${candidates.size} labels=${candidates.joinToString { it.label }}")
         val results = candidates.map { mirror ->
             async {
+                Log.i(TAG, "MSM21_WEBVIEW_START label=${mirror.label} mirror=${urlForLog(mirror.url)}")
                 val streams = try {
                     semaphore.withPermit {
                         MsmWebViewProbe.extractFast(
@@ -619,6 +637,7 @@ class msm21 : MainAPI() {
                 } catch (_: Exception) {
                     emptyList()
                 }
+                Log.i(TAG, "MSM21_WEBVIEW_DONE label=${mirror.label} streams=${streams.size}")
                 mirror to streams
             }
         }.awaitAll()
@@ -693,6 +712,7 @@ class msm21 : MainAPI() {
         getCachedMirrors(cacheKey)?.let { return it }
 
         return try {
+            Log.i(TAG, "MSM21_AJAX_START label=${option.label} nume=${option.nume} type=${option.type}")
             val response = app.post(
                 "$mainUrl/wp-admin/admin-ajax.php",
                 headers = mapOf(
@@ -708,6 +728,7 @@ class msm21 : MainAPI() {
                 ),
                 timeout = 35L
             )
+            Log.i(TAG, "MSM21_AJAX_HTTP label=${option.label} code=${response.code} bytes=${response.text.length}")
 
             val payload = tryParseJson<ZetaPlayerResponse>(response.text)
             val found = linkedSetOf<String>()
@@ -726,11 +747,17 @@ class msm21 : MainAPI() {
             }
 
             val mirrors = found.map { EmbedMirror(it, option.label) }
+            Log.i(
+                TAG,
+                "MSM21_AJAX_RESULT label=${option.label} mirrors=${mirrors.size} " +
+                    mirrors.joinToString { urlForLog(it.url) }
+            )
             if (mirrors.isNotEmpty()) cacheMirrors(cacheKey, mirrors)
             mirrors
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.e(TAG, "MSM21_AJAX_ERROR label=${option.label} error=${error.javaClass.simpleName}:${error.message}")
             emptyList()
         }
     }
@@ -1116,6 +1143,17 @@ class msm21 : MainAPI() {
         }.orEmpty()
     }
 
+    private fun urlForLog(value: String): String {
+        return try {
+            val uri = URI(value)
+            val host = uri.host.orEmpty()
+            val path = uri.path.orEmpty().take(90)
+            if (host.isBlank()) value.substringBefore('?').take(120) else "$host$path"
+        } catch (_: Exception) {
+            value.substringBefore('?').take(120)
+        }
+    }
+
     private fun cleanText(value: String): String {
         return value
             .replace(INVISIBLE_CHARS, "")
@@ -1150,6 +1188,7 @@ class msm21 : MainAPI() {
     )
 
     companion object {
+        private const val TAG = "MSM21_TRACE"
         private const val AJAX_BATCH_SIZE = 4
         private const val FALLBACK_BATCH_SIZE = 2
         private const val MAX_WEBVIEW_MIRRORS = 12

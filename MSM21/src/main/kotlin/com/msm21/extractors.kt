@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.view.MotionEvent
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -76,7 +77,11 @@ object MsmWebViewProbe {
         referer: String
     ): List<CapturedStream> = withContext(Dispatchers.Main) {
         val context = MsmRuntime.resolveContext()
-            ?: return@withContext emptyList()
+        if (context == null) {
+            Log.e(TAG, "MSM21_WEBVIEW_CONTEXT_MISSING")
+            return@withContext emptyList()
+        }
+        Log.i(TAG, "MSM21_WEBVIEW_PROBE target=${safeUrl(url)}")
 
         suspendCancellableCoroutine { continuation ->
             val handler = Handler(Looper.getMainLooper())
@@ -109,6 +114,7 @@ object MsmWebViewProbe {
                 handler.post {
                     if (continuation.isActive) {
                         val result = sortedResult()
+                        Log.i(TAG, "MSM21_WEBVIEW_FINISH target=${safeUrl(url)} streams=${result.size}")
                         safeDestroy()
                         continuation.resume(result)
                     }
@@ -145,6 +151,7 @@ object MsmWebViewProbe {
 
                 val existing = streams[fixedUrl]
                 if (existing == null) {
+                    Log.i(TAG, "MSM21_WEBVIEW_CAPTURE label=$label url=${safeUrl(fixedUrl)} mime=${mimeType.orEmpty()}")
                     streams[fixedUrl] = CapturedStream(
                         label = label.trim().ifBlank {
                             guessLabel(fixedUrl)
@@ -328,6 +335,8 @@ object MsmWebViewProbe {
                                     pageUrl = requestUrl,
                                     referer = referer
                                 )
+                            }.onFailure { error ->
+                                Log.e(TAG, "MSM21_WEBVIEW_INJECT_ERROR target=${safeUrl(requestUrl)} error=${error.javaClass.simpleName}:${error.message}")
                             }.getOrNull()
                         }
 
@@ -408,7 +417,10 @@ object MsmWebViewProbe {
             }
 
             runCatching { setup() }
-                .onFailure { finish() }
+                .onFailure { error ->
+                    Log.e(TAG, "MSM21_WEBVIEW_SETUP_ERROR error=${error.javaClass.simpleName}:${error.message}")
+                    finish()
+                }
         }
     }
 
@@ -436,6 +448,7 @@ object MsmWebViewProbe {
         val html = connection.inputStream
             .bufferedReader()
             .use { it.readText() }
+        val finalPageUrl = connection.url.toString()
 
         connection.headerFields
             .filterKeys { it?.equals("Set-Cookie", true) == true }
@@ -443,19 +456,28 @@ object MsmWebViewProbe {
             .flatten()
             .forEach { cookie ->
                 runCatching {
-                    CookieManager.getInstance().setCookie(pageUrl, cookie)
+                    CookieManager.getInstance().setCookie(finalPageUrl, cookie)
                 }
             }
         runCatching { CookieManager.getInstance().flush() }
+        Log.i(TAG, "MSM21_WEBVIEW_INJECT from=${safeUrl(pageUrl)} final=${safeUrl(finalPageUrl)} bytes=${html.length}")
         connection.disconnect()
 
+        // HttpURLConnection follows redirects before returning the HTML. WebView, however,
+        // still associates this intercepted response with the original iframe URL. A base
+        // element keeps relative scripts, API calls and media paths pointed at the final host.
+        val baseTag = if (Regex("<base\\s", RegexOption.IGNORE_CASE).containsMatchIn(html)) {
+            ""
+        } else {
+            "<base href=\"${htmlEscape(finalPageUrl)}\">"
+        }
         val injected = if (html.contains("<head>", true)) {
             html.replaceFirst(
                 Regex("<head>", RegexOption.IGNORE_CASE),
-                "<head>$HOOK_JS"
+                "<head>$baseTag$HOOK_JS"
             )
         } else {
-            "$HOOK_JS$html"
+            "$baseTag$HOOK_JS$html"
         }
 
         return WebResourceResponse(
@@ -555,6 +577,15 @@ object MsmWebViewProbe {
             .replace("<", "&lt;")
             .replace(">", "&gt;")
     }
+
+    private fun safeUrl(value: String): String {
+        return runCatching {
+            val uri = URI(value)
+            "${uri.host.orEmpty()}${uri.path.orEmpty().take(90)}"
+        }.getOrDefault(value.substringBefore('?').take(120))
+    }
+
+    private const val TAG = "MSM21_TRACE"
 
     private val BLOCKED_MEDIA_PARTS = listOf(
         "googlesyndication",
