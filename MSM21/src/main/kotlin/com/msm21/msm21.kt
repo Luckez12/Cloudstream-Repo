@@ -31,7 +31,7 @@ class msm21 : MainAPI() {
     override val hasMainPage = true
     override val hasDownloadSupport = true
     override val usesWebView = true
-    override val loadLinksTimeoutMs = 180_000L
+    override val loadLinksTimeoutMs = 60_000L
 
     override val supportedTypes = setOf(
         TvType.Movie,
@@ -406,8 +406,12 @@ class msm21 : MainAPI() {
 
         // Fast native servers and fallback servers start together.
         // Direct extractor callbacks are emitted immediately as each source resolves.
+        // Abyss is intentionally disabled for now. Current MSM Abyss links resolve to
+        // Google Storage objects that consistently return HTTP 403 in Cloudstream,
+        // and probing them adds a long delay without producing a usable source.
         val uniqueOptions = options
             .distinctBy { it.optionKey() }
+            .filterNot { it.isDisabledOption() }
 
         val selectedFastOptions = uniqueOptions
             .filter { it.isFastNativeOption() }
@@ -487,7 +491,10 @@ class msm21 : MainAPI() {
             .sortedBy { it.webViewPriority() }
             .take(MAX_WEBVIEW_MIRRORS)
 
-        if (webViewCandidates.isNotEmpty()) {
+        // Do not hold Cloudstream open for slow JavaScript mirrors after a normal
+        // extractor has already produced a usable source. This is important for
+        // "skip source selection", which waits for loadLinks() to finish.
+        if (!foundStream && webViewCandidates.isNotEmpty()) {
             foundStream = probeWithWebView(
                 mirrors = webViewCandidates,
                 pageUrl = pageUrl,
@@ -495,6 +502,8 @@ class msm21 : MainAPI() {
                 emittedUrls = emittedUrls,
                 maxMirrors = MAX_WEBVIEW_MIRRORS
             ) || foundStream
+        } else if (foundStream && webViewCandidates.isNotEmpty()) {
+            Log.i(TAG, "MSM21_WEBVIEW_SKIPPED reason=native_source_found count=${webViewCandidates.size}")
         }
 
         if (!foundStream) {
@@ -511,7 +520,10 @@ class msm21 : MainAPI() {
         emittedUrls: MutableSet<String>
     ): ExtractionBatchResult = coroutineScope {
         val foundStream = AtomicBoolean(false)
-        val unresolved = mirrors.distinctBy { it.url }.map { mirror ->
+        val unresolved = mirrors
+            .distinctBy { it.url }
+            .filterNot { it.isDisabledMirror() }
+            .map { mirror ->
             async {
                 val emitted = AtomicBoolean(false)
                 try {
@@ -612,6 +624,7 @@ class msm21 : MainAPI() {
     ): Boolean = coroutineScope {
         val candidates = mirrors
             .distinctBy { it.url }
+            .filterNot { it.isDisabledMirror() }
             .sortedBy { it.webViewPriority() }
             .take(maxMirrors)
 
@@ -730,7 +743,7 @@ class msm21 : MainAPI() {
                     "nume" to option.nume,
                     "type" to option.type
                 ),
-                timeout = 35L
+                timeout = 10L
             )
             Log.i(TAG, "MSM21_AJAX_HTTP label=${option.label} code=${response.code} bytes=${response.text.length}")
 
@@ -1006,6 +1019,16 @@ class msm21 : MainAPI() {
         return resolved
     }
 
+    private fun PlayerOption.isDisabledOption(): Boolean {
+        val value = label.lowercase()
+        return DISABLED_SERVER_HINTS.any(value::contains)
+    }
+
+    private fun EmbedMirror.isDisabledMirror(): Boolean {
+        val value = "${label.lowercase()} ${url.lowercase()}"
+        return DISABLED_SERVER_HINTS.any(value::contains)
+    }
+
     private fun EmbedMirror.webViewPriority(): Int {
         val value = "${label.lowercase()} ${url.lowercase()}"
         return when {
@@ -1193,16 +1216,20 @@ class msm21 : MainAPI() {
 
     companion object {
         private const val TAG = "MSM21_TRACE"
-        private const val AJAX_BATCH_SIZE = 4
-        private const val FALLBACK_BATCH_SIZE = 2
-        private const val MAX_WEBVIEW_MIRRORS = 12
-        private const val WEBVIEW_CONCURRENCY = 1
-        private const val STANDARD_EXTRACTOR_TIMEOUT_MS = 12_000L
-        private const val MIRROR_PIPELINE_TIMEOUT_MS = 40_000L
+        private const val AJAX_BATCH_SIZE = 8
+        private const val FALLBACK_BATCH_SIZE = 6
+        private const val MAX_WEBVIEW_MIRRORS = 3
+        private const val WEBVIEW_CONCURRENCY = 2
+        private const val STANDARD_EXTRACTOR_TIMEOUT_MS = 5_000L
+        private const val MIRROR_PIPELINE_TIMEOUT_MS = 11_000L
         private const val MIRROR_CACHE_TTL_MS = 90_000L
         private const val MAX_MIRROR_CACHE_ENTRIES = 80
 
         private val MIRROR_CACHE = ConcurrentHashMap<String, CachedMirrors>()
+
+        private val DISABLED_SERVER_HINTS = listOf(
+            "abyss"
+        )
 
         private val FAST_NATIVE_SERVER_HINTS = listOf(
             "fire",

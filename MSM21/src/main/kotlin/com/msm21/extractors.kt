@@ -54,8 +54,8 @@ class MixDropTop : MixDrop() {
  * Permintaan media dipintas sebelum token video digunakan oleh WebView.
  */
 object MsmWebViewProbe {
-    private const val MAX_WAIT_MS = 14_000L
-    private const val FINISH_AFTER_FIRST_STREAM_MS = 2_500L
+    private const val MAX_WAIT_MS = 8_000L
+    private const val FINISH_AFTER_FIRST_STREAM_MS = 1_500L
 
     data class CapturedStream(
         val label: String,
@@ -474,9 +474,7 @@ object MsmWebViewProbe {
                     2_200L,
                     3_400L,
                     5_000L,
-                    7_000L,
-                    9_500L,
-                    12_000L
+                    7_000L
                 ).forEach { delay ->
                     handler.postDelayed({ clickWebView() }, delay)
                 }
