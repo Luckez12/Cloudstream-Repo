@@ -142,10 +142,12 @@ jobs:
           if [ "${#TOP_ENTRIES[@]}" -eq 1 ] && [ -d "$EXTRACTED/${TOP_ENTRIES[0]}" ]; then
             WRAPPER="$EXTRACTED/${TOP_ENTRIES[0]}"
 
-            if [ -d "$WRAPPER/app" ] \
-              || [ -d "$WRAPPER/.github" ] \
+            # Treat the sole top-level folder as a full repository wrapper only
+            # when it contains strong repository markers. A provider module also
+            # has build.gradle.kts, so build.gradle.kts alone is not sufficient.
+            if [ -d "$WRAPPER/.github" ] \
               || [ -f "$WRAPPER/settings.gradle.kts" ] \
-              || [ -f "$WRAPPER/build.gradle.kts" ] \
+              || [ -f "$WRAPPER/repo.json" ] \
               || [ -f "$WRAPPER/gradlew" ]; then
               SOURCE_ROOT="$WRAPPER"
               echo "Detected repository wrapper folder: ${TOP_ENTRIES[0]}"
