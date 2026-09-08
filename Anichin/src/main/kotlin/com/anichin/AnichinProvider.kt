@@ -146,7 +146,7 @@ class AnichinProvider : MainAPI() {
                 break
             }
 
-            sectionNodes += sibling
+            sectionNodes.add(sibling)
             sibling = sibling.nextElementSibling()
             inspected += 1
         }
@@ -182,7 +182,7 @@ class AnichinProvider : MainAPI() {
                     break
                 }
 
-                sectionNodes += parentSibling
+                sectionNodes.add(parentSibling)
                 parentSibling =
                     parentSibling.nextElementSibling()
                 inspected += 1
