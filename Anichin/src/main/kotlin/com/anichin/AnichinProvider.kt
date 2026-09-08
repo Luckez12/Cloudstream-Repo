@@ -298,8 +298,30 @@ class AnichinProvider : MainAPI() {
         }
 
         /*
-         * Fallback 2: dedicated episode column for older/unusual pages whose
-         * permalink does not contain -episode-N.
+         * Fallback 2: explicit number in the episode title.
+         *
+         * This must come before .epl-num because Anichin occasionally stores
+         * the WordPress/post counter there instead of the actual episode.
+         * Example:
+         *   .epl-num = 7574
+         *   title    = Martial Master Episode 574 Subtitle Indonesia
+         */
+        val titleNumber = Regex(
+            """(?:Episode|Ep|Eps)\s*(\d+(?:\.\d+)?)""",
+            RegexOption.IGNORE_CASE
+        ).find(title)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toDoubleOrNull()
+
+        if (titleNumber != null) {
+            return titleNumber
+        }
+
+        /*
+         * Last fallback only: dedicated number column.
+         * Keep it for older pages that have neither a numeric permalink nor
+         * an explicit Episode token in the title.
          */
         val globalNumberText = episodeElement
             .selectFirst(".epl-num, .epnum, .episode-number")
@@ -307,23 +329,10 @@ class AnichinProvider : MainAPI() {
             ?.trim()
             .orEmpty()
 
-        val globalNumber = Regex(
+        return Regex(
             """\d+(?:\.\d+)?"""
         ).find(globalNumberText)
             ?.value
-            ?.toDoubleOrNull()
-
-        if (globalNumber != null) {
-            return globalNumber
-        }
-
-        // Final fallback: extract an explicit Episode/Ep/Eps token from title.
-        return Regex(
-            """(?:Episode|Ep|Eps)\s*(\d+(?:\.\d+)?)""",
-            RegexOption.IGNORE_CASE
-        ).find(title)
-            ?.groupValues
-            ?.getOrNull(1)
             ?.toDoubleOrNull()
     }
 
