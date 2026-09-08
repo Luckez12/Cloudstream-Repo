@@ -31,11 +31,12 @@ class AnichinProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "anime/?order=update" to "Latest Update",
-        "anime/?status=ongoing&order=update" to "Series Ongoing",
-        "anime/?status=completed&order=update" to "Series Completed",
-        "anime/?status=hiatus&order=update" to "Series Drop/Hiatus",
-        "anime/?type=movie&order=update" to "Movie"
+        "anime/?order=update" to "Latest Release",
+        "home:popular-today" to "Popular Today",
+        "anime/?status=ongoing&order=update" to "Ongoing",
+        "anime/?type=movie&order=update" to "Movie Baru",
+        "anime/?order=popular" to "Popular",
+        "anime/?status=completed&order=update" to "Completed"
     )
 
     private data class PlayerOption(
@@ -59,6 +60,31 @@ class AnichinProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
+
+        if (request.data == "home:popular-today") {
+            if (page > 1) {
+                return newHomePageResponse(
+                    list = HomePageList(
+                        name = request.name,
+                        list = emptyList(),
+                        isHorizontalImages = false
+                    ),
+                    hasNext = false
+                )
+            }
+
+            val document = app.get(mainUrl).document
+            val home = document.parsePopularToday()
+
+            return newHomePageResponse(
+                list = HomePageList(
+                    name = request.name,
+                    list = home,
+                    isHorizontalImages = false
+                ),
+                hasNext = false
+            )
+        }
 
         val document = app.get(
             "${mainUrl}/${request.data}&page=$page"
@@ -88,6 +114,169 @@ class AnichinProvider : MainAPI() {
             ),
             hasNext = hasNext
         )
+    }
+
+    private fun Document.parsePopularToday(): List<SearchResponse> {
+        val heading = select("h2, h3, h4, h5")
+            .firstOrNull {
+                it.text().contains(
+                    "Terpopuler Hari Ini",
+                    ignoreCase = true
+                )
+            }
+            ?: return emptyList()
+
+        val sectionNodes = mutableListOf<Element>()
+
+        var sibling = heading.nextElementSibling()
+        var inspected = 0
+
+        while (sibling != null && inspected < 16) {
+            val nextHeading = sibling.selectFirst(
+                "h2, h3, h4, h5"
+            )
+
+            if (
+                nextHeading != null &&
+                !nextHeading.text().contains(
+                    "Terpopuler Hari Ini",
+                    ignoreCase = true
+                )
+            ) {
+                break
+            }
+
+            sectionNodes += sibling
+            sibling = sibling.nextElementSibling()
+            inspected += 1
+        }
+
+        /*
+         * Some Anichin templates wrap the heading and cards in one parent.
+         * Use the parent's following siblings only when direct siblings did
+         * not expose episode cards.
+         */
+        if (
+            sectionNodes.flatMap { it.select("a[href]") }
+                .none { it.isEpisodeCardLink() }
+        ) {
+            sectionNodes.clear()
+
+            var parentSibling = heading.parent()
+                ?.nextElementSibling()
+
+            inspected = 0
+
+            while (
+                parentSibling != null &&
+                inspected < 12
+            ) {
+                val text = parentSibling.text()
+
+                if (
+                    text.contains(
+                        "Rilisan Terbaru",
+                        ignoreCase = true
+                    )
+                ) {
+                    break
+                }
+
+                sectionNodes += parentSibling
+                parentSibling =
+                    parentSibling.nextElementSibling()
+                inspected += 1
+            }
+        }
+
+        return sectionNodes
+            .flatMap { node -> node.select("a[href]") }
+            .filter { it.isEpisodeCardLink() }
+            .mapNotNull { it.toPopularTodayResult() }
+            .distinctBy { it.url }
+            .take(12)
+    }
+
+    private fun Element.isEpisodeCardLink(): Boolean {
+        val href = attr("href")
+        val label = attr("title")
+            .ifBlank { text() }
+
+        return href.contains(
+            "-episode-",
+            ignoreCase = true
+        ) || Regex(
+            """\bEpisode\s+(?:\d+(?:\.\d+)?|Movie)\b""",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(label)
+    }
+
+    private fun Element.toPopularTodayResult(): SearchResponse? {
+        val rawHref = attr("href")
+            .trim()
+
+        if (rawHref.isBlank()) return null
+
+        val episodeUrl = fixUrl(rawHref)
+
+        val seriesUrl = Regex(
+            """-episode-(?:\d+(?:\.\d+)?|movie)(?:-[^/?#]*)?/?(?:[?#].*)?$""",
+            RegexOption.IGNORE_CASE
+        ).replace(
+            episodeUrl,
+            "/"
+        )
+
+        if (seriesUrl == episodeUrl) {
+            return null
+        }
+
+        val rawTitle = attr("title")
+            .trim()
+            .ifBlank { text().trim() }
+
+        val title = rawTitle
+            .replace(
+                Regex(
+                    """\s+Episode\s+(?:\d+(?:\.\d+)?|Movie).*?$""",
+                    RegexOption.IGNORE_CASE
+                ),
+                ""
+            )
+            .replace(
+                "Subtitle Indonesia",
+                "",
+                ignoreCase = true
+            )
+            .trim()
+
+        if (title.isBlank()) return null
+
+        var card: Element? = this
+        var posterUrl: String? = null
+        var depth = 0
+
+        while (
+            card != null &&
+            posterUrl == null &&
+            depth < 5
+        ) {
+            posterUrl = card
+                .selectFirst("img")
+                ?.getImageUrl()
+                ?.let { fixUrlNull(it) }
+
+            card = card.parent()
+            depth += 1
+        }
+
+        return newAnimeSearchResponse(
+            title,
+            seriesUrl,
+            TvType.Anime
+        ) {
+            this.posterUrl = posterUrl
+        }
     }
 
     private fun Element.toSearchResult(
