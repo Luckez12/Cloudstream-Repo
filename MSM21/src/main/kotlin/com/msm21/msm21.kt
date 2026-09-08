@@ -346,15 +346,23 @@ class msm21 : MainAPI() {
                 val type = element.attr("data-type").trim()
                 if (post.isBlank() || type.isBlank()) return@mapNotNull null
 
+                val fullOptionLabel = cleanText(element.text())
+                val titleOnlyLabel = cleanText(
+                    element.selectFirst(".opt-titl")?.text()
+                        ?: element.selectFirst(".opt-name")?.text()
+                        .orEmpty()
+                )
+
                 PlayerOption(
                     post = post,
                     nume = nume,
                     type = type,
-                    label = cleanText(
-                        element.selectFirst(".opt-titl")?.text()
-                            ?: element.selectFirst(".opt-name")?.text()
-                            ?: element.text()
-                    ).ifBlank { "Server $nume" }
+                    // Current MSM pages expose the server slug separately from
+                    // the visible MalaySub title. Using only .opt-titl loses
+                    // values such as abyss, rpmpl, upns, byses and mixdr.
+                    label = fullOptionLabel
+                        .ifBlank { titleOnlyLabel }
+                        .ifBlank { "Server $nume" }
                 )
             }
 
@@ -509,7 +517,7 @@ class msm21 : MainAPI() {
                             ) { link ->
                                 emitted.set(true)
                                 foundStream.set(true)
-                                if (emittedUrls.add(link.url)) callback(link)
+                                if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
                             }
                         }
 
@@ -531,7 +539,7 @@ class msm21 : MainAPI() {
                                 ) { link ->
                                     emitted.set(true)
                                     foundStream.set(true)
-                                    if (emittedUrls.add(link.url)) callback(link)
+                                    if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
                                 }
                             }
                         }
@@ -557,7 +565,7 @@ class msm21 : MainAPI() {
                                     ) { link ->
                                         emitted.set(true)
                                         foundStream.set(true)
-                                        if (emittedUrls.add(link.url)) callback(link)
+                                        if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
                                     }
                                 }
                             }
@@ -585,27 +593,42 @@ class msm21 : MainAPI() {
         callback: (ExtractorLink) -> Unit,
         emittedUrls: MutableSet<String>,
         maxMirrors: Int
-    ): Boolean {
-        var foundAny = false
-
-        for (mirror in mirrors
+    ): Boolean = coroutineScope {
+        val candidates = mirrors
             .distinctBy { it.url }
             .sortedBy { it.webViewPriority() }
             .take(maxMirrors)
-        ) {
-            val streams = try {
-                MsmWebViewProbe.extractFast(
-                    url = mirror.url,
-                    referer = pageUrl
-                )
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                emptyList()
-            }
 
+        if (candidates.isEmpty()) return@coroutineScope false
+
+        // MSM currently exposes more than five player choices. Probe unresolved
+        // JavaScript players in parallel so all mirrors can be attempted without
+        // making loadLinks exceed Cloudstream's timeout.
+        val semaphore = Semaphore(WEBVIEW_CONCURRENCY)
+        val results = candidates.map { mirror ->
+            async {
+                val streams = try {
+                    semaphore.withPermit {
+                        MsmWebViewProbe.extractFast(
+                            url = mirror.url,
+                            referer = pageUrl
+                        )
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                mirror to streams
+            }
+        }.awaitAll()
+
+        var foundAny = false
+
+        results.forEach { (mirror, streams) ->
             streams.forEach { stream ->
-                if (!emittedUrls.add(stream.url)) return@forEach
+                val emitKey = "${mirror.label}\u0000${stream.url}"
+                if (!emittedUrls.add(emitKey)) return@forEach
 
                 val headers = stream.headers
                     .filterKeys { key ->
@@ -638,12 +661,10 @@ class msm21 : MainAPI() {
                 )
             }
 
-            if (streams.isNotEmpty()) {
-                foundAny = true
-            }
+            if (streams.isNotEmpty()) foundAny = true
         }
 
-        return foundAny
+        foundAny
     }
 
     private suspend fun fetchMirrors(
@@ -955,9 +976,18 @@ class msm21 : MainAPI() {
         val value = "${label.lowercase()} ${url.lowercase()}"
         return when {
             value.contains("abyss") -> 0
-            value.contains("playerx") -> 1
-            value.contains("veev") -> 2
-            else -> 3
+            value.contains("playe") || value.contains("playerx") -> 1
+            value.contains("rpmpl") -> 2
+            value.contains("seekp") -> 3
+            value.contains("p2pst") -> 4
+            value.contains("upns") -> 5
+            value.contains("byse") -> 6
+            value.contains("mixdr") || value.contains("mixdrop") -> 7
+            value.contains("dsvpl") || value.contains("dood") -> 8
+            value.contains("playm") -> 9
+            value.contains("full hd") -> 10
+            value.contains("veev") -> 11
+            else -> 12
         }
     }
 
@@ -973,17 +1003,17 @@ class msm21 : MainAPI() {
     private fun PlayerOption.fastPriority(): Int {
         val value = label.lowercase()
         return when {
-            value.contains("gomsm") -> 0
-            value.contains("netu") -> 1
-            value.contains("upns") -> 2
-            value.contains("rpmpl") -> 3
-            value.contains("full hd") -> 4
-            value.contains("fire") || value.contains("wish") -> 5
-            value.contains("playm") -> 6
-            value.contains("byse") -> 7
-            value.contains("voe") -> 8
-            value.contains("mix") -> 9
-            value.contains("dsv") || value.contains("dood") -> 10
+            value.contains("mixdr") || value.contains("mixdrop") -> 0
+            value.contains("dsvpl") || value.contains("dood") -> 1
+            value.contains("playm") -> 2
+            value.contains("byse") -> 3
+            value.contains("upns") -> 4
+            value.contains("rpmpl") -> 5
+            value.contains("gomsm") -> 6
+            value.contains("netu") -> 7
+            value.contains("full hd") -> 8
+            value.contains("fire") || value.contains("wish") -> 9
+            value.contains("voe") -> 10
             else -> 11
         }
     }
@@ -1119,7 +1149,8 @@ class msm21 : MainAPI() {
     companion object {
         private const val AJAX_BATCH_SIZE = 4
         private const val FALLBACK_BATCH_SIZE = 2
-        private const val MAX_WEBVIEW_MIRRORS = 5
+        private const val MAX_WEBVIEW_MIRRORS = 12
+        private const val WEBVIEW_CONCURRENCY = 3
         private const val STANDARD_EXTRACTOR_TIMEOUT_MS = 12_000L
         private const val MIRROR_PIPELINE_TIMEOUT_MS = 40_000L
         private const val MIRROR_CACHE_TTL_MS = 90_000L
@@ -1136,11 +1167,17 @@ class msm21 : MainAPI() {
             "dood",
             "hgl",
             "playm",
+            "playe",
             "voe",
             "gomsm",
             "netu",
             "upns",
             "rpmpl",
+            "seekp",
+            "p2pst",
+            "abyss",
+            "mixdr",
+            "dsvpl",
             "full hd"
         )
 
