@@ -27,6 +27,7 @@ import java.io.ByteArrayInputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 
 class Hglink : StreamWishExtractor() {
@@ -60,7 +61,9 @@ object MsmWebViewProbe {
         val label: String,
         val url: String,
         val headers: Map<String, String>,
-        val mimeType: String? = null
+        val mimeType: String? = null,
+        val captureSource: String = "unknown",
+        val confidence: Int = 0
     )
 
     private class Bridge(
@@ -87,6 +90,7 @@ object MsmWebViewProbe {
             val handler = Handler(Looper.getMainLooper())
             val webView = WebView(context)
             val streams = linkedMapOf<String, CapturedStream>()
+            val activePlayerUrl = AtomicReference(url)
             var finishScheduled = false
 
             fun safeDestroy() {
@@ -102,11 +106,19 @@ object MsmWebViewProbe {
 
             fun sortedResult(): List<CapturedStream> {
                 return streams.values
-                    .distinctBy { it.url }
+                    .groupBy { canonicalMediaKey(it.url) }
+                    .values
+                    .mapNotNull { group ->
+                        group.maxWithOrNull(
+                            compareBy<CapturedStream> { it.confidence }
+                                .thenBy { qualityScore(it.label, it.url) }
+                        )
+                    }
                     .sortedWith(
                         compareByDescending<CapturedStream> {
                             qualityScore(it.label, it.url)
-                        }.thenBy { it.label }
+                        }.thenByDescending { it.confidence }
+                            .thenBy { it.label }
                     )
             }
 
@@ -135,36 +147,70 @@ object MsmWebViewProbe {
                 rawUrl: String?,
                 headers: Map<String, String>,
                 mimeType: String? = null,
-                forcePlayable: Boolean = false
+                forcePlayable: Boolean = false,
+                captureSource: String = "unknown",
+                confidence: Int = 0,
+                finishSoon: Boolean = false
             ) {
+                val playerUrl = activePlayerUrl.get()
                 val fixedUrl = rawUrl
                     ?.trim()
-                    ?.toAbsoluteUrl(url)
+                    ?.toAbsoluteUrl(playerUrl)
+                    ?.normaliseCapturedMediaUrl()
                     ?.takeIf { forcePlayable || isStreamUrl(it) }
                     ?: return
 
                 val fixedHeaders = headers.toMutableMap().apply {
                     put("User-Agent", get("User-Agent") ?: USER_AGENT)
                     put("Accept", get("Accept") ?: "*/*")
-                    put("Referer", get("Referer") ?: url)
+                    put("Referer", get("Referer") ?: playerUrl)
+
+                    if (keys.none { it.equals("Origin", ignoreCase = true) }) {
+                        originOf(playerUrl)?.let { put("Origin", it) }
+                    }
+
+                    val mediaCookie = runCatching {
+                        CookieManager.getInstance().getCookie(fixedUrl)
+                    }.getOrNull().orEmpty()
+                    val playerCookie = runCatching {
+                        CookieManager.getInstance().getCookie(playerUrl)
+                    }.getOrNull().orEmpty()
+                    val mergedCookie = listOf(
+                        get("Cookie").orEmpty(),
+                        mediaCookie,
+                        playerCookie
+                    ).filter { it.isNotBlank() }
+                        .joinToString("; ")
+                    if (mergedCookie.isNotBlank()) put("Cookie", mergedCookie)
                 }
 
-                val existing = streams[fixedUrl]
-                if (existing == null) {
-                    Log.i(TAG, "MSM21_WEBVIEW_CAPTURE label=$label url=${safeUrl(fixedUrl)} mime=${mimeType.orEmpty()}")
-                    streams[fixedUrl] = CapturedStream(
-                        label = label.trim().ifBlank {
-                            guessLabel(fixedUrl)
-                        },
-                        url = fixedUrl,
-                        headers = fixedHeaders,
-                        mimeType = mimeType
+                val key = canonicalMediaKey(fixedUrl)
+                val candidate = CapturedStream(
+                    label = label.trim().ifBlank { guessLabel(fixedUrl) },
+                    url = fixedUrl,
+                    headers = fixedHeaders,
+                    mimeType = mimeType,
+                    captureSource = captureSource,
+                    confidence = confidence
+                )
+                val existing = streams[key]
+
+                if (existing == null || candidate.confidence > existing.confidence) {
+                    Log.i(
+                        TAG,
+                        "MSM21_WEBVIEW_CAPTURE source=$captureSource confidence=$confidence " +
+                            "label=${candidate.label} url=${safeUrl(fixedUrl)} mime=${mimeType.orEmpty()}"
                     )
+                    streams[key] = candidate
                 } else if (existing.mimeType.isNullOrBlank() && !mimeType.isNullOrBlank()) {
-                    streams[fixedUrl] = existing.copy(mimeType = mimeType)
+                    streams[key] = existing.copy(mimeType = mimeType)
                 }
 
-                scheduleFinishSoon()
+                // JWPlayer config URLs may be placeholders containing fragment metadata.
+                // Do not terminate the WebView merely because one of those appeared.
+                // Wait for the actual browser media request, which carries the URL and
+                // headers that the site itself really used.
+                if (finishSoon) scheduleFinishSoon()
             }
 
             fun handleBridgeCapture(value: String) {
@@ -178,8 +224,11 @@ object MsmWebViewProbe {
                             addStream(
                                 label = parts[1],
                                 rawUrl = parts[3],
-                                headers = defaultHeaders(url),
-                                mimeType = parts[2].takeIf { it.isNotBlank() }
+                                headers = defaultHeaders(activePlayerUrl.get()),
+                                mimeType = parts[2].takeIf { it.isNotBlank() },
+                                captureSource = "jwplayer-config",
+                                confidence = 10,
+                                finishSoon = false
                             )
                         }
                     }
@@ -189,7 +238,10 @@ object MsmWebViewProbe {
                         addStream(
                             label = guessLabel(file),
                             rawUrl = file,
-                            headers = defaultHeaders(url)
+                            headers = defaultHeaders(activePlayerUrl.get()),
+                            captureSource = "video-element",
+                            confidence = 35,
+                            finishSoon = false
                         )
                     }
 
@@ -203,9 +255,12 @@ object MsmWebViewProbe {
                                 addStream(
                                     label = guessLabel(file),
                                     rawUrl = file,
-                                    headers = defaultHeaders(url),
+                                    headers = defaultHeaders(activePlayerUrl.get()),
                                     mimeType = mime,
-                                    forcePlayable = true
+                                    forcePlayable = true,
+                                    captureSource = if (clean.startsWith("MSM_FETCH_MEDIA|")) "fetch-media" else "xhr-media",
+                                    confidence = 70,
+                                    finishSoon = true
                                 )
                             }
                         }
@@ -218,7 +273,10 @@ object MsmWebViewProbe {
                             addStream(
                                 label = guessLabel(file),
                                 rawUrl = file,
-                                headers = defaultHeaders(url)
+                                headers = defaultHeaders(activePlayerUrl.get()),
+                                captureSource = if (clean.startsWith("MSM_FETCH|")) "fetch" else "xhr",
+                                confidence = 55,
+                                finishSoon = true
                             )
                         }
                     }
@@ -226,7 +284,10 @@ object MsmWebViewProbe {
             }
 
             fun clickWebView() {
-                if (streams.isNotEmpty()) return
+                // A JWPlayer config entry is not proof that the browser has actually
+                // requested the media. Keep clicking until we capture a real network
+                // request or response.
+                if (streams.values.any { it.confidence >= 70 }) return
 
                 runCatching {
                     val now = SystemClock.uptimeMillis()
@@ -275,7 +336,10 @@ object MsmWebViewProbe {
                 addStream(
                     label = guessLabel(requestUrl),
                     rawUrl = requestUrl,
-                    headers = headers
+                    headers = headers,
+                    captureSource = "webview-request",
+                    confidence = 100,
+                    finishSoon = true
                 )
             }
 
@@ -333,7 +397,11 @@ object MsmWebViewProbe {
                             return runCatching {
                                 injectIntoPlayerPage(
                                     pageUrl = requestUrl,
-                                    referer = referer
+                                    referer = referer,
+                                    onFinalUrl = { finalUrl ->
+                                        activePlayerUrl.set(finalUrl)
+                                        Log.i(TAG, "MSM21_WEBVIEW_PLAYER_URL ${safeUrl(finalUrl)}")
+                                    }
                                 )
                             }.onFailure { error ->
                                 Log.e(TAG, "MSM21_WEBVIEW_INJECT_ERROR target=${safeUrl(requestUrl)} error=${error.javaClass.simpleName}:${error.message}")
@@ -426,7 +494,8 @@ object MsmWebViewProbe {
 
     private fun injectIntoPlayerPage(
         pageUrl: String,
-        referer: String
+        referer: String,
+        onFinalUrl: (String) -> Unit
     ): WebResourceResponse {
         val connection = URL(pageUrl).openConnection() as HttpURLConnection
         connection.requestMethod = "GET"
@@ -449,6 +518,7 @@ object MsmWebViewProbe {
             .bufferedReader()
             .use { it.readText() }
         val finalPageUrl = connection.url.toString()
+        onFinalUrl(finalPageUrl)
 
         connection.headerFields
             .filterKeys { it?.equals("Set-Cookie", true) == true }
@@ -499,6 +569,35 @@ object MsmWebViewProbe {
             normalise(targetUrl),
             ignoreCase = true
         )
+    }
+
+    private fun String.normaliseCapturedMediaUrl(): String {
+        val value = trim()
+        if (!value.startsWith("http", ignoreCase = true)) return value
+
+        // URI fragments are never sent in HTTP requests. Abyss/JWPlayer can expose
+        // source strings such as `video.mp4#mp4/.../480p/h264`. Passing the fragment
+        // through to Media3 can make diagnostics look like a signed URL even though
+        // the browser actually requests only the object URL before '#'.
+        return if (value.contains('#')) value.substringBefore('#') else value
+    }
+
+    private fun canonicalMediaKey(raw: String): String {
+        return raw.trim().substringBefore('#')
+    }
+
+    private fun originOf(rawUrl: String): String? {
+        return runCatching {
+            val uri = URI(rawUrl)
+            val scheme = uri.scheme ?: return@runCatching null
+            val host = uri.host ?: return@runCatching null
+            val port = uri.port
+            if (port == -1 || (scheme == "https" && port == 443) || (scheme == "http" && port == 80)) {
+                "$scheme://$host"
+            } else {
+                "$scheme://$host:$port"
+            }
+        }.getOrNull()
     }
 
     private fun isPlayableContentType(raw: String?): Boolean {

@@ -676,7 +676,11 @@ class msm21 : MainAPI() {
                         url = stream.url,
                         type = linkType
                     ) {
-                        referer = mirror.url
+                        referer = headers.entries
+                            .firstOrNull { it.key.equals("Referer", ignoreCase = true) }
+                            ?.value
+                            .orEmpty()
+                            .ifBlank { mirror.url }
                         quality = getQualityFromName(stream.label)
                         this.headers = headers
                     }
