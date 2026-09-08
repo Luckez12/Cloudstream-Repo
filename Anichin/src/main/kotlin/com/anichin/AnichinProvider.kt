@@ -32,9 +32,7 @@ class AnichinProvider : MainAPI() {
 
     override val mainPage = mainPageOf(
         "anime/?order=update" to "Latest Release",
-        "home:popular-today" to "Popular Today",
-        "anime/?status=ongoing&order=update" to "Ongoing",
-        "anime/?type=movie&order=update" to "Movie Baru",
+        "anime/?type=movie&order=update" to "Movie",
         "anime/?order=popular" to "Popular",
         "anime/?status=completed&order=update" to "Completed"
     )
