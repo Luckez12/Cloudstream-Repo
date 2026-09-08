@@ -276,14 +276,30 @@ class AnichinProvider : MainAPI() {
         title: String
     ): Double? {
         /*
-         * Anichin episode rows have TWO episode numbers for many long-running
-         * donghua:
-         *   epl-num = 190              <- global episode number
-         *   title   = "... Arc Episode 14"
+         * V25: trust the episode permalink first.
          *
-         * Always trust the dedicated global-number column first. Reading the
-         * arc title first is what caused Cloudstream to group episodes as
-         * 1-20 / 21-40 / 61-76 / 178-178.
+         * Some Anichin rows expose an internal/global counter in .epl-num.
+         * Martial Master is one example: the row can show 7574 while the
+         * actual episode permalink is ...-episode-690-....
+         *
+         * The permalink represents the playable episode, so it is the most
+         * reliable source for Cloudstream episode grouping.
+         */
+        val urlNumber = Regex(
+            """-episode-(\d+(?:\.\d+)?)""",
+            RegexOption.IGNORE_CASE
+        ).find(link)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toDoubleOrNull()
+
+        if (urlNumber != null) {
+            return urlNumber
+        }
+
+        /*
+         * Fallback 2: dedicated episode column for older/unusual pages whose
+         * permalink does not contain -episode-N.
          */
         val globalNumberText = episodeElement
             .selectFirst(".epl-num, .epnum, .episode-number")
@@ -301,23 +317,7 @@ class AnichinProvider : MainAPI() {
             return globalNumber
         }
 
-        /*
-         * URL is the second safest source because Anichin normally uses
-         * ...-episode-190-subtitle-indonesia/.
-         */
-        val urlNumber = Regex(
-            """-episode-(\d+(?:\.\d+)?)""",
-            RegexOption.IGNORE_CASE
-        ).find(link)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toDoubleOrNull()
-
-        if (urlNumber != null) {
-            return urlNumber
-        }
-
-        // Last fallback only, for unusual rows without a numeric column/URL.
+        // Final fallback: extract an explicit Episode/Ep/Eps token from title.
         return Regex(
             """(?:Episode|Ep|Eps)\s*(\d+(?:\.\d+)?)""",
             RegexOption.IGNORE_CASE
@@ -325,6 +325,58 @@ class AnichinProvider : MainAPI() {
             ?.groupValues
             ?.getOrNull(1)
             ?.toDoubleOrNull()
+    }
+
+    private fun cleanEpisodeDisplayTitle(
+        rawTitle: String,
+        episodeNumber: Double?
+    ): String {
+        var cleaned = rawTitle
+            .replace(
+                Regex(
+                    """Episode\s*\d+(?:\.\d+)?\s*Subtitle Indonesia""",
+                    RegexOption.IGNORE_CASE
+                ),
+                ""
+            )
+            .replace(
+                "Subtitle Indonesia",
+                "",
+                ignoreCase = true
+            )
+            .trim()
+
+        /*
+         * Some templates prefix the visible title with the same bad internal
+         * counter that appears in .epl-num, e.g. "7574. - Martial Master".
+         * Strip that prefix only when it disagrees with the permalink episode.
+         */
+        val leadingCounter = Regex(
+            """^\s*(\d+(?:\.\d+)?)\s*[.\-:]+\s*"""
+        ).find(cleaned)
+
+        if (leadingCounter != null && episodeNumber != null) {
+            val counter = leadingCounter
+                .groupValues
+                .getOrNull(1)
+                ?.toDoubleOrNull()
+
+            if (counter != null && counter != episodeNumber) {
+                cleaned = cleaned
+                    .removeRange(leadingCounter.range)
+                    .trim()
+            }
+        }
+
+        return cleaned.ifBlank {
+            episodeNumber?.let { number ->
+                if (number % 1.0 == 0.0) {
+                    "Episode ${number.toInt()}"
+                } else {
+                    "Episode $number"
+                }
+            } ?: rawTitle
+        }
     }
 
     override suspend fun load(
@@ -406,33 +458,33 @@ class AnichinProvider : MainAPI() {
                         ?.let { fixUrlNull(it) }
                         ?: fixUrlNull(poster)
 
-                    val cleanTitle = episodeTitle
-                        .replace(
-                            Regex(
-                                "Episode\\s*\\d+\\s*Subtitle Indonesia",
-                                RegexOption.IGNORE_CASE
-                            ),
-                            ""
-                        )
-                        .replace(
-                            "Subtitle Indonesia",
-                            ""
-                        )
-                        .trim()
-
-                    val episodeName =
-                        "- $cleanTitle $episodeSub Indonesia".trim()
-
-                    val episodeDescription =
-                        episodeDate
-                            .takeIf { it.isNotEmpty() }
-                            ?.let { "Rilis: $it" }
-
                     val episodeNumber = episodeNumberFrom(
                         episodeElement,
                         link,
                         episodeTitle
                     )
+
+                    val cleanTitle = cleanEpisodeDisplayTitle(
+                        episodeTitle,
+                        episodeNumber
+                    )
+
+                    val episodeName = buildString {
+                        if (cleanTitle.isNotBlank()) {
+                            append(cleanTitle)
+                        }
+
+                        if (episodeSub.isNotBlank()) {
+                            if (isNotEmpty()) append(" ")
+                            append(episodeSub)
+                            append(" Indonesia")
+                        }
+                    }.trim()
+
+                    val episodeDescription =
+                        episodeDate
+                            .takeIf { it.isNotEmpty() }
+                            ?.let { "Rilis: $it" }
 
                     newEpisode(link) {
                         this.name = episodeName
