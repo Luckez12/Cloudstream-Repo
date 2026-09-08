@@ -58,7 +58,8 @@ object MsmWebViewProbe {
     data class CapturedStream(
         val label: String,
         val url: String,
-        val headers: Map<String, String>
+        val headers: Map<String, String>,
+        val mimeType: String? = null
     )
 
     private class Bridge(
@@ -126,12 +127,14 @@ object MsmWebViewProbe {
             fun addStream(
                 label: String,
                 rawUrl: String?,
-                headers: Map<String, String>
+                headers: Map<String, String>,
+                mimeType: String? = null,
+                forcePlayable: Boolean = false
             ) {
                 val fixedUrl = rawUrl
                     ?.trim()
                     ?.toAbsoluteUrl(url)
-                    ?.takeIf(::isStreamUrl)
+                    ?.takeIf { forcePlayable || isStreamUrl(it) }
                     ?: return
 
                 val fixedHeaders = headers.toMutableMap().apply {
@@ -140,14 +143,18 @@ object MsmWebViewProbe {
                     put("Referer", get("Referer") ?: url)
                 }
 
-                if (!streams.containsKey(fixedUrl)) {
+                val existing = streams[fixedUrl]
+                if (existing == null) {
                     streams[fixedUrl] = CapturedStream(
                         label = label.trim().ifBlank {
                             guessLabel(fixedUrl)
                         },
                         url = fixedUrl,
-                        headers = fixedHeaders
+                        headers = fixedHeaders,
+                        mimeType = mimeType
                     )
+                } else if (existing.mimeType.isNullOrBlank() && !mimeType.isNullOrBlank()) {
+                    streams[fixedUrl] = existing.copy(mimeType = mimeType)
                 }
 
                 scheduleFinishSoon()
@@ -164,7 +171,8 @@ object MsmWebViewProbe {
                             addStream(
                                 label = parts[1],
                                 rawUrl = parts[3],
-                                headers = defaultHeaders(url)
+                                headers = defaultHeaders(url),
+                                mimeType = parts[2].takeIf { it.isNotBlank() }
                             )
                         }
                     }
@@ -176,6 +184,24 @@ object MsmWebViewProbe {
                             rawUrl = file,
                             headers = defaultHeaders(url)
                         )
+                    }
+
+                    clean.startsWith("MSM_FETCH_MEDIA|") ||
+                        clean.startsWith("MSM_XHR_MEDIA|") -> {
+                        val parts = clean.split("|", limit = 3)
+                        if (parts.size >= 3) {
+                            val mime = parts[1].trim()
+                            val file = parts[2].trim()
+                            if (isPlayableContentType(mime)) {
+                                addStream(
+                                    label = guessLabel(file),
+                                    rawUrl = file,
+                                    headers = defaultHeaders(url),
+                                    mimeType = mime,
+                                    forcePlayable = true
+                                )
+                            }
+                        }
                     }
 
                     clean.startsWith("MSM_FETCH|") ||
@@ -259,7 +285,9 @@ object MsmWebViewProbe {
                 cookieManager.setAcceptThirdPartyCookies(webView, true)
 
                 webView.addJavascriptInterface(
-                    Bridge(::handleBridgeCapture),
+                    Bridge { value ->
+                        handler.post { handleBridgeCapture(value) }
+                    },
                     "msmBridge"
                 )
                 webView.layout(0, 0, 1080, 1080)
@@ -294,9 +322,9 @@ object MsmWebViewProbe {
                     ): WebResourceResponse? {
                         val requestUrl = request?.url?.toString().orEmpty()
 
-                        if (shouldInjectAbyssPage(requestUrl)) {
+                        if (shouldInjectPlayerPage(requestUrl, url)) {
                             return runCatching {
-                                injectIntoAbyssPage(
+                                injectIntoPlayerPage(
                                     pageUrl = requestUrl,
                                     referer = referer
                                 )
@@ -384,7 +412,7 @@ object MsmWebViewProbe {
         }
     }
 
-    private fun injectIntoAbyssPage(
+    private fun injectIntoPlayerPage(
         pageUrl: String,
         referer: String
     ): WebResourceResponse {
@@ -439,10 +467,25 @@ object MsmWebViewProbe {
         }
     }
 
-    private fun shouldInjectAbyssPage(url: String): Boolean {
-        val value = url.lowercase()
-        return value.contains("abyss") &&
-            (value.contains("?v=") || value.contains("&v="))
+    private fun shouldInjectPlayerPage(requestUrl: String, targetUrl: String): Boolean {
+        fun normalise(value: String): String = value
+            .substringBefore('#')
+            .trim()
+            .trimEnd('/')
+
+        return normalise(requestUrl).equals(
+            normalise(targetUrl),
+            ignoreCase = true
+        )
+    }
+
+    private fun isPlayableContentType(raw: String?): Boolean {
+        val value = raw?.lowercase().orEmpty()
+        return value.contains("application/vnd.apple.mpegurl") ||
+            value.contains("application/x-mpegurl") ||
+            value.contains("application/dash+xml") ||
+            value.contains("video/mp4") ||
+            value.contains("video/webm")
     }
 
     private fun isStreamUrl(rawUrl: String?): Boolean {
@@ -454,7 +497,10 @@ object MsmWebViewProbe {
             value.contains(".m3u8") ||
             value.contains(".mpd") ||
             value.contains(".mp4") ||
-            value.contains(".m4v")
+            value.contains(".m4v") ||
+            value.contains("/manifest/") ||
+            value.contains("/master.m3u") ||
+            value.contains("playlist.m3u")
     }
 
     private fun guessLabel(url: String): String {
@@ -594,15 +640,48 @@ object MsmWebViewProbe {
         var src = videos[v].currentSrc || videos[v].src || "";
         if (src) cap("MSM_VIDEO|" + abs(src));
       }
+
+      var sources = document.querySelectorAll("source[src]");
+      for (var s = 0; s < sources.length; s++) {
+        var sourceUrl = sources[s].src || sources[s].getAttribute("src") || "";
+        var sourceType = sources[s].type || sources[s].getAttribute("type") || "";
+        if (sourceUrl) {
+          cap("MSM_SOURCE|Auto|" + sourceType + "|" + abs(sourceUrl));
+        }
+      }
     } catch(e) {}
+  }
+
+  function mediaType(contentType) {
+    contentType = String(contentType || "").toLowerCase();
+    return contentType.indexOf("application/vnd.apple.mpegurl") >= 0 ||
+      contentType.indexOf("application/x-mpegurl") >= 0 ||
+      contentType.indexOf("application/dash+xml") >= 0 ||
+      contentType.indexOf("video/mp4") >= 0 ||
+      contentType.indexOf("video/webm") >= 0;
   }
 
   try {
     var oldFetch = window.fetch;
     if (oldFetch) {
       window.fetch = function() {
-        try { cap("MSM_FETCH|" + abs(arguments[0])); } catch(e) {}
-        return oldFetch.apply(this, arguments);
+        var requestUrl = "";
+        try {
+          requestUrl = arguments[0] && arguments[0].url ? arguments[0].url : arguments[0];
+          cap("MSM_FETCH|" + abs(requestUrl));
+        } catch(e) {}
+
+        return oldFetch.apply(this, arguments).then(function(response) {
+          try {
+            var contentType = response && response.headers ?
+              (response.headers.get("content-type") || "") : "";
+            var finalUrl = response && response.url ? response.url : requestUrl;
+            if (mediaType(contentType)) {
+              cap("MSM_FETCH_MEDIA|" + contentType + "|" + abs(finalUrl));
+            }
+          } catch(e) {}
+          return response;
+        });
       };
     }
   } catch(e) {}
@@ -610,7 +689,24 @@ object MsmWebViewProbe {
   try {
     var oldOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, requestUrl) {
-      try { cap("MSM_XHR|" + abs(requestUrl)); } catch(e) {}
+      try {
+        this.__msmRequestUrl = requestUrl;
+        cap("MSM_XHR|" + abs(requestUrl));
+
+        if (!this.__msmMediaHooked) {
+          this.__msmMediaHooked = true;
+          this.addEventListener("readystatechange", function() {
+            try {
+              if (this.readyState !== 2 && this.readyState !== 4) return;
+              var contentType = this.getResponseHeader("content-type") || "";
+              if (mediaType(contentType)) {
+                var finalUrl = this.responseURL || this.__msmRequestUrl || "";
+                cap("MSM_XHR_MEDIA|" + contentType + "|" + abs(finalUrl));
+              }
+            } catch(e) {}
+          });
+        }
+      } catch(e) {}
       return oldOpen.apply(this, arguments);
     };
   } catch(e) {}

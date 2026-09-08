@@ -30,7 +30,7 @@ class msm21 : MainAPI() {
     override val hasMainPage = true
     override val hasDownloadSupport = true
     override val usesWebView = true
-    override val loadLinksTimeoutMs = 120_000L
+    override val loadLinksTimeoutMs = 180_000L
 
     override val supportedTypes = setOf(
         TvType.Movie,
@@ -641,9 +641,12 @@ class msm21 : MainAPI() {
                         put("Referer", get("Referer") ?: mirror.url)
                     }
 
+                val mimeType = stream.mimeType.orEmpty().lowercase()
                 val linkType = when {
-                    stream.url.contains(".m3u8", true) -> ExtractorLinkType.M3U8
-                    stream.url.contains(".mpd", true) -> ExtractorLinkType.DASH
+                    stream.url.contains(".m3u8", true) ||
+                        mimeType.contains("mpegurl") -> ExtractorLinkType.M3U8
+                    stream.url.contains(".mpd", true) ||
+                        mimeType.contains("dash+xml") -> ExtractorLinkType.DASH
                     else -> ExtractorLinkType.VIDEO
                 }
 
@@ -1150,7 +1153,7 @@ class msm21 : MainAPI() {
         private const val AJAX_BATCH_SIZE = 4
         private const val FALLBACK_BATCH_SIZE = 2
         private const val MAX_WEBVIEW_MIRRORS = 12
-        private const val WEBVIEW_CONCURRENCY = 3
+        private const val WEBVIEW_CONCURRENCY = 1
         private const val STANDARD_EXTRACTOR_TIMEOUT_MS = 12_000L
         private const val MIRROR_PIPELINE_TIMEOUT_MS = 40_000L
         private const val MIRROR_CACHE_TTL_MS = 90_000L
