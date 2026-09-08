@@ -86,10 +86,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ww03.pencurimovie.bond&size=%size%",
-        "fileHash": "sha256-286c6496c6631e6532b7f6b146029753bc993c1c63b8a879ee765a3cc2d48915",
+        "fileHash": "sha256-54dc282baa7c48d207e1f689085b41310c6db9b60cca9e45e11375b31fed211b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 74091,
+        "fileSize": 78108,
         "status": 1,
         "language": "ms",
         "authors": [
@@ -99,7 +99,7 @@
             "Movie",
             "TvSeries"
         ],
-        "version": 8,
+        "version": 9,
         "internalName": "MSM21",
         "description": "MSM21 \u2014 Streaming Movie and TV Series",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/MSM21.cs3",
