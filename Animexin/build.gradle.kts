@@ -1,11 +1,11 @@
 // use an integer for version numbers
-version = 1
+version = 2
 
 
 cloudstream {
     // All of these properties are optional, you can safely remove them
 
-    description = "Animexin — Streaming Donghua Subtitle Indonesia"
+    description = "Animexin - Streaming Donghua Subtitle Indonesia"
     language    = "id"
     authors = listOf("Luckez")
 
