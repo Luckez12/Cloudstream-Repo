@@ -42,6 +42,28 @@
         "name": "Anichin"
     },
     {
+        "iconUrl": "https://animexin.dev/wp-content/uploads/2020/06/animexinv1.png",
+        "fileHash": "sha256-979281b60bae822a575aaebebeb179a6fc246db8f6863ad47f452303f78e414e",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
+        "fileSize": 14613,
+        "status": 1,
+        "language": "id",
+        "authors": [
+            "Luckez"
+        ],
+        "tvTypes": [
+            "AnimeMovie",
+            "Anime",
+            "Cartoon"
+        ],
+        "version": 1,
+        "internalName": "Animexin",
+        "description": "Animexin \u2014 Streaming Donghua Subtitle Indonesia",
+        "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/Animexin.cs3",
+        "name": "Animexin"
+    },
+    {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://kisskh.id/&size=256",
         "fileHash": "sha256-e4bbf0e91cc50ac926c3b99d0276ac0cd5e9f35bc68118854a09b8a79024b747",
         "apiVersion": 1,
