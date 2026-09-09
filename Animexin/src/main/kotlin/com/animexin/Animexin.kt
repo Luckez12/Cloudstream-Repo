@@ -12,8 +12,8 @@ import kotlinx.coroutines.sync.withPermit
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Document
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentLinkedQueue
 import java.net.URI
+import java.net.URLEncoder
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import com.lagradost.cloudstream3.*
@@ -30,10 +30,10 @@ class Animexin : MainAPI() {
 
     override val mainPage = mainPageOf(
         "anime/?status=ongoing&order=update" to "Recently Updated",
-        "anime/?status=ongoing&order&order=popular" to "Popular",
-        "anime/?" to "Donghua",
-        "anime/?status=&type=movie&page=" to "Movies",
-        "anime/?sub=raw" to "Anime (RAW)",
+        "anime/?status=ongoing&order=popular" to "Popular",
+        "anime/?order=update" to "Donghua",
+        "anime/?type=movie&order=update" to "Movies",
+        "anime/?sub=raw&order=update" to "Anime (RAW)"
     )
 
     // AnimeXin currently returns 403 for poster requests made by Coil on some
@@ -118,7 +118,7 @@ class Animexin : MainAPI() {
                     fixedUrl,
                     referer = referer.ifBlank { "$mainUrl/" },
                     headers = imageHeaders,
-                    timeout = 15L
+                    timeout = 5L
                 )
 
                 if (!response.isSuccessful) {
@@ -164,15 +164,48 @@ class Animexin : MainAPI() {
         }
     }
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+    // Fast list/search poster path. Never perform an HTTP image request here.
+    // If the detail page has already cached an inline poster use it, otherwise
+    // return the normal URL immediately and let Cloudstream render the page.
+    private fun fastPosterUrl(rawUrl: String?): String? {
+        val fixedUrl = rawUrl
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { fixUrlNull(it) }
+            ?: return null
+
+        return posterCache[fixedUrl] ?: fixedUrl
+    }
+
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse {
+        val started = System.currentTimeMillis()
         val pageUrl = "$mainUrl/${request.data}&page=$page"
         val document = app.get(pageUrl).document
-        val home = coroutineScope {
-            document.select("div.listupd > article")
-                .map { element -> async { element.toSearchResult(pageUrl) } }
-                .awaitAll()
-                .filterNotNull()
+
+        val typeHint = if (
+            request.data.contains("type=movie", ignoreCase = true)
+        ) {
+            TvType.Movie
+        } else {
+            null
         }
+
+        // Anichin-style: pure HTML mapping, no poster network calls.
+        val home = document
+            .select("div.listupd > article")
+            .mapNotNull { it.toSearchResult(typeHint) }
+
+        val hasNext = document.selectFirst(
+            "a.next.page-numbers, .pagination .next a, .hpage a.r, a[rel=next]"
+        ) != null
+
+        Log.w(
+            "Animexin",
+            "ANIMEXIN_V13_PAGE items=${home.size} ms=${System.currentTimeMillis() - started}"
+        )
 
         return newHomePageResponse(
             list = HomePageList(
@@ -180,86 +213,204 @@ class Animexin : MainAPI() {
                 list = home,
                 isHorizontalImages = false
             ),
-            hasNext = true
+            hasNext = hasNext
         )
     }
 
-    private suspend fun Element.toSearchResult(pageReferer: String): SearchResponse? {
-        val anchor = this.selectFirst("div.bsx > a[href], a[href]") ?: return null
-        val title = anchor.attr("title").trim().ifBlank {
-            this.selectFirst(".tt, h2, h3")?.text()?.trim().orEmpty()
-        }
+    private fun Element.toSearchResult(
+        typeHint: TvType? = null
+    ): SearchResponse? {
+        val anchor = selectFirst("div.bsx > a[href], a[href]")
+            ?: return null
+
+        val title = anchor
+            .attr("title")
+            .trim()
+            .ifBlank {
+                selectFirst(".tt, h2, h3")
+                    ?.text()
+                    ?.trim()
+                    .orEmpty()
+            }
+
         if (title.isBlank()) return null
 
         val href = fixUrl(anchor.attr("href"))
-        val rawPoster = this.selectFirst("div.bsx > a img, img")?.getImageUrl()
-        val posterUrl = resolvePosterUrl(rawPoster, pageReferer)
+        val posterUrl = selectFirst("div.bsx > a img, img")
+            ?.getImageUrl()
+            ?.let(::fastPosterUrl)
 
-        return newMovieSearchResponse(title, href, TvType.Movie) {
+        val badge = selectFirst(".typez, .type, .status")
+            ?.text()
+            .orEmpty()
+
+        val tvType = when {
+            typeHint == TvType.Movie -> TvType.Movie
+            badge.contains("Movie", ignoreCase = true) -> TvType.Movie
+            href.contains("-movie-", ignoreCase = true) -> TvType.Movie
+            else -> TvType.Anime
+        }
+
+        return newAnimeSearchResponse(
+            title,
+            href,
+            tvType
+        ) {
             this.posterUrl = posterUrl
+            this.posterHeaders = imageHeaders
         }
     }
 
-    override suspend fun search(query: String, page: Int): SearchResponseList {
-        val pageUrl = "${mainUrl}/page/$page/?s=$query"
-        val document = app.get(pageUrl).document
-        val results = coroutineScope {
-            document.select("div.listupd > article")
-                .map { element -> async { element.toSearchResult(pageUrl) } }
-                .awaitAll()
-                .filterNotNull()
-                .toNewSearchResponseList()
+    override suspend fun search(
+        query: String,
+        page: Int
+    ): SearchResponseList {
+        val started = System.currentTimeMillis()
+        val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
+
+        if (encodedQuery.isBlank()) {
+            return emptyList<SearchResponse>().toNewSearchResponseList()
         }
+
+        val pageUrl = "$mainUrl/page/$page/?s=$encodedQuery"
+        val document = app.get(pageUrl).document
+
+        val results = document
+            .select("div.listupd > article")
+            .mapNotNull { it.toSearchResult() }
+            .toNewSearchResponseList()
+
+        Log.w(
+            "Animexin",
+            "ANIMEXIN_V13_SEARCH items=${results.size} ms=${System.currentTimeMillis() - started}"
+        )
+
         return results
     }
 
-    @Suppress("SuspiciousIndentation")
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
-        val title = document.selectFirst("h1.entry-title")?.text()?.trim().toString()
-        val href=document.selectFirst("div.eplister > ul > li a")?.attr("href") ?:""
-        val rawPoster = document.selectFirst("div.thumb img, div.ime img, img.wp-post-image")
+        val started = System.currentTimeMillis()
+        val fixedUrl = fixUrl(url)
+        val document = app.get(fixedUrl).document
+
+        val title = document
+            .selectFirst("h1.entry-title")
+            ?.text()
+            ?.trim()
+            .orEmpty()
+
+        val rawPoster = document
+            .selectFirst("div.thumb img, div.ime img, img.wp-post-image")
             ?.getImageUrl()
-            ?: document.selectFirst("meta[property=og:image]")
+            ?: document
+                .selectFirst("meta[property=og:image]")
                 ?.attr("content")
                 ?.trim()
-        val poster = resolvePosterUrl(rawPoster, url)
-        val description = document.selectFirst("div.entry-content")?.text()?.trim()
-        val type=document.selectFirst(".spe")?.text().toString()
-        val tvtag=if (type.contains("Movie")) TvType.Movie else TvType.TvSeries
-        return if (tvtag == TvType.TvSeries) {
-            val episodeRegex = Regex("(\\d+)")
 
-            val episodes = coroutineScope {
-                document.select("div.eplister > ul > li").map { info ->
-                    async {
-                        val href1 = info.select("a").attr("href")
-                        val rawEpisodePoster = info.selectFirst("a img")?.getImageUrl()
-                        val posterr = if (rawEpisodePoster != null) {
-                            resolvePosterUrl(rawEpisodePoster, url) ?: poster
-                        } else {
-                            poster
-                        }
+        // One image request maximum for the whole detail page.
+        // Episodes reuse this poster instead of fetching one image per episode.
+        val poster = resolvePosterUrl(rawPoster, fixedUrl)
+            ?: fastPosterUrl(rawPoster)
 
-                        val epText = info.selectFirst("div.epl-num")?.text().orEmpty()
-                        val epnum = episodeRegex.find(epText)?.groupValues?.get(1)?.toIntOrNull()
+        val description = document
+            .selectFirst("div.entry-content, .synopsis, .sinopsis, .desc")
+            ?.text()
+            ?.trim()
 
-                        newEpisode(href1) {
-                            this.episode = epnum
-                            this.name = epnum?.let { "Episode $it" } ?: epText
-                            this.posterUrl = posterr
-                        }
+        val typeText = document
+            .selectFirst(".spe")
+            ?.text()
+            .orEmpty()
+
+        val isMovie = typeText.contains("Movie", ignoreCase = true)
+
+        return if (!isMovie) {
+            val episodeRegex = Regex("""(\d+)""")
+
+            // Anichin-style: local DOM parsing only, no async poster downloads.
+            val episodes = document
+                .select("div.eplister > ul > li, .eplister li")
+                .mapNotNull { info ->
+                    val rawHref = info
+                        .selectFirst("a[href]")
+                        ?.attr("href")
+                        ?.trim()
+                        .orEmpty()
+
+                    if (rawHref.isBlank()) return@mapNotNull null
+
+                    val episodeUrl = fixUrl(rawHref)
+                    val epText = info
+                        .selectFirst("div.epl-num, .epl-num")
+                        ?.text()
+                        .orEmpty()
+
+                    val epNumber = Regex(
+                        """-episode-(\d+)""",
+                        RegexOption.IGNORE_CASE
+                    ).find(episodeUrl)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+                        ?: episodeRegex
+                            .find(epText)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+
+                    val episodeTitle = info
+                        .selectFirst(".epl-title")
+                        ?.text()
+                        ?.trim()
+                        .orEmpty()
+
+                    newEpisode(episodeUrl) {
+                        this.episode = epNumber
+                        this.name = episodeTitle
+                            .takeIf { it.isNotBlank() }
+                            ?: epNumber?.let { "Episode $it" }
+                            ?: epText
+                        this.posterUrl = poster
                     }
-                }.awaitAll()
-            }
+                }
+                .reversed()
 
-            newTvSeriesLoadResponse(title, url, TvType.Anime, episodes.reversed()) {
+            Log.w(
+                "Animexin",
+                "ANIMEXIN_V13_LOAD type=series episodes=${episodes.size} ms=${System.currentTimeMillis() - started}"
+            )
+
+            newTvSeriesLoadResponse(
+                title,
+                fixedUrl,
+                TvType.Anime,
+                episodes
+            ) {
                 this.posterUrl = poster
+                this.posterHeaders = imageHeaders
                 this.plot = description
             }
         } else {
-            newMovieLoadResponse(title, url, TvType.Movie, href) {
+            val movieHref = document
+                .selectFirst(".eplister li > a[href]")
+                ?.attr("href")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { fixUrl(it) }
+                ?: fixedUrl
+
+            Log.w(
+                "Animexin",
+                "ANIMEXIN_V13_LOAD type=movie ms=${System.currentTimeMillis() - started}"
+            )
+
+            newMovieLoadResponse(
+                title,
+                fixedUrl,
+                TvType.Movie,
+                movieHref
+            ) {
                 this.posterUrl = poster
+                this.posterHeaders = imageHeaders
                 this.plot = description
             }
         }
@@ -598,173 +749,89 @@ class Animexin : MainAPI() {
         return urls.distinct()
     }
 
-    private fun isDirectMedia(url: String): Boolean {
-        val clean = url.substringBefore('#').substringBefore('?').lowercase()
-        return clean.endsWith(".m3u8") ||
-            clean.endsWith(".mpd") ||
+    private fun directMediaType(url: String): ExtractorLinkType? {
+        val clean = url
+            .substringBefore('#')
+            .substringBefore('?')
+            .lowercase()
+
+        return when {
+            clean.endsWith(".m3u8") -> ExtractorLinkType.M3U8
+            clean.endsWith(".mpd") -> ExtractorLinkType.DASH
             clean.endsWith(".mp4") ||
-            clean.endsWith(".webm")
+                clean.endsWith(".webm") -> ExtractorLinkType.VIDEO
+            else -> null
+        }
     }
 
-    private fun normalizedQuality(link: ExtractorLink): Int {
-        // Cloudstream uses Qualities.Unknown.value == 400 as a sentinel.
-        // It is not a real 400p resolution. Treat it as unknown so HLS
-        // master playlists can be inspected for actual 720p+ variants.
-        if (link.quality > 0 && link.quality != Qualities.Unknown.value) {
-            return link.quality
-        }
-
+    private fun explicitQuality(text: String): Int? {
         return Regex(
             """(?<!\d)(2160|1440|1080|900|720|576|540|480|432|360|270|240|144)p?(?!\d)""",
             RegexOption.IGNORE_CASE
-        ).find("${link.name} ${link.url}")
+        ).find(text)
             ?.groupValues
             ?.getOrNull(1)
             ?.toIntOrNull()
-            ?: 0
     }
 
-    private fun normalizedQualityFromUrl(url: String): Int {
-        return Regex(
-            """(?<!\d)(2160|1440|1080|900|720|576|540|480|432|360|270|240|144)p?(?!\d)""",
-            RegexOption.IGNORE_CASE
-        ).find(url)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-            ?: 0
-    }
+    /*
+     * V13 policy requested by user:
+     * - known 720p+ => accept
+     * - known below 720p => reject
+     * - Qualities.Unknown (400 sentinel) => accept immediately
+     *
+     * Unknown is not treated as 400p and no extra HLS manifest request is made.
+     */
+    private fun acceptedQuality(link: ExtractorLink): Int? {
+        val explicit = explicitQuality("${link.name} ${link.url}")
 
-    private fun resolveManifestUrl(baseUrl: String, rawUrl: String): String? {
-        val clean = rawUrl.trim()
-        if (clean.isBlank()) return null
-
-        return try {
-            when {
-                clean.startsWith("http://", true) || clean.startsWith("https://", true) -> clean
-                clean.startsWith("//") -> "https:$clean"
-                else -> URI(baseUrl).resolve(clean).toString()
+        if (
+            link.quality == Qualities.Unknown.value ||
+            link.quality <= 0
+        ) {
+            if (explicit != null && explicit < MIN_KNOWN_QUALITY) {
+                return null
             }
-        } catch (_: Exception) {
-            null
-        }
-    }
 
-    private suspend fun expandHls720Plus(
-        player: PlayerCandidate,
-        link: ExtractorLink
-    ): List<ExtractorLink> {
-        val looksHls = link.type == ExtractorLinkType.M3U8 ||
-            link.url.substringBefore('?').substringBefore('#').endsWith(".m3u8", true)
-
-        if (!looksHls) return emptyList()
-
-        val manifest = try {
-            withTimeoutOrNull(8_000L) {
-                app.get(
-                    link.url,
-                    headers = link.headers,
-                    referer = link.referer
-                ).text
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            null
-        } ?: return emptyList()
-
-        val lines = manifest
-            .replace("\r", "")
-            .lines()
-            .map { it.trim() }
-
-        val variants = mutableListOf<Pair<Int, String>>()
-
-        for (index in lines.indices) {
-            val line = lines[index]
-            if (!line.startsWith("#EXT-X-STREAM-INF", ignoreCase = true)) continue
-
-            val height = Regex(
-                """RESOLUTION\s*=\s*\d+\s*x\s*(\d+)""",
-                RegexOption.IGNORE_CASE
-            ).find(line)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.toIntOrNull()
-                ?: continue
-
-            if (height < MIN_QUALITY) continue
-
-            val rawVariant = lines
-                .drop(index + 1)
-                .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
-                ?: continue
-
-            val variantUrl = resolveManifestUrl(link.url, rawVariant) ?: continue
-            variants += height to variantUrl
+            return explicit ?: Qualities.Unknown.value
         }
 
-        return variants
-            .distinctBy { it.second }
-            .sortedByDescending { it.first }
-            .map { (height, variantUrl) ->
-                @Suppress("DEPRECATION")
-                ExtractorLink(
-                    source = link.source,
-                    name = "${player.language.displayName} • ${link.name} ${height}p",
-                    url = variantUrl,
-                    referer = link.referer,
-                    quality = height,
-                    headers = link.headers,
-                    extractorData = link.extractorData,
-                    type = ExtractorLinkType.M3U8,
-                    audioTracks = link.audioTracks
-                )
-            }
+        if (link.quality < MIN_KNOWN_QUALITY) {
+            return null
+        }
+
+        return link.quality
     }
 
-    private suspend fun emitFilteredLink(
+    private fun emitFilteredLink(
         player: PlayerCandidate,
         link: ExtractorLink,
-        emitted: MutableSet<String>,
+        emittedUrls: MutableSet<String>,
         acceptedCount: AtomicInteger,
-        droppedBelow720: AtomicInteger,
-        droppedUnknown: AtomicInteger,
-        expandedAdaptive: AtomicInteger,
+        acceptedUnknown: AtomicInteger,
+        droppedKnownLow: AtomicInteger,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val quality = normalizedQuality(link)
+        val quality = acceptedQuality(link)
 
-        if (quality in 1 until MIN_QUALITY) {
-            droppedBelow720.incrementAndGet()
-            return false
-        }
-
-        if (quality <= 0) {
-            val expanded = expandHls720Plus(player, link)
-            if (expanded.isNotEmpty()) {
-                var emittedAny = false
-                expanded.forEach { variant ->
-                    val emitKey = "${player.language.name}\u0000${variant.url}"
-                    if (emitted.add(emitKey)) {
-                        callback(variant)
-                        acceptedCount.incrementAndGet()
-                        expandedAdaptive.incrementAndGet()
-                        emittedAny = true
-                    }
-                }
-                if (emittedAny) return true
-            }
-
-            droppedUnknown.incrementAndGet()
+        if (quality == null) {
+            droppedKnownLow.incrementAndGet()
             return false
         }
 
         val emitKey = "${player.language.name}\u0000${link.url}"
-        if (!emitted.add(emitKey)) return false
+        if (!emittedUrls.add(emitKey)) return false
+
+        if (
+            quality == Qualities.Unknown.value ||
+            link.quality == Qualities.Unknown.value ||
+            link.quality <= 0
+        ) {
+            acceptedUnknown.incrementAndGet()
+        }
 
         @Suppress("DEPRECATION")
-        val relabeledLink = ExtractorLink(
+        val relabeled = ExtractorLink(
             source = link.source,
             name = "${player.language.displayName} • ${link.name}",
             url = link.url,
@@ -775,186 +842,313 @@ class Animexin : MainAPI() {
             type = link.type,
             audioTracks = link.audioTracks
         )
-        callback(relabeledLink)
+
+        // Important: emit immediately, same fast behavior as Anichin.
+        callback(relabeled)
         acceptedCount.incrementAndGet()
         return true
     }
 
-    private suspend fun tryPlayerCandidate(
+    private fun emitDirectMedia(
         player: PlayerCandidate,
-        episodeUrl: String,
-        attempted: MutableSet<String>,
-        emitted: MutableSet<String>,
+        url: String,
+        referer: String,
+        emittedUrls: MutableSet<String>,
         acceptedCount: AtomicInteger,
-        droppedBelow720: AtomicInteger,
-        droppedUnknown: AtomicInteger,
-        expandedAdaptive: AtomicInteger,
+        acceptedUnknown: AtomicInteger,
+        droppedKnownLow: AtomicInteger,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val attemptKey = "${player.language.name}\u0000${player.url}\u0000$episodeUrl"
-        if (!attempted.add(attemptKey)) return false
+        val type = directMediaType(url) ?: return false
+        val explicit = explicitQuality(url)
 
-        val produced = AtomicBoolean(false)
+        if (explicit != null && explicit < MIN_KNOWN_QUALITY) {
+            droppedKnownLow.incrementAndGet()
+            return false
+        }
+
+        val emitKey = "${player.language.name}\u0000$url"
+        if (!emittedUrls.add(emitKey)) return false
+
+        val quality = explicit ?: Qualities.Unknown.value
+        if (explicit == null) acceptedUnknown.incrementAndGet()
+
+        @Suppress("DEPRECATION")
+        val direct = ExtractorLink(
+            source = "Animexin",
+            name = "${player.language.displayName} • Direct",
+            url = url,
+            referer = referer,
+            quality = quality,
+            headers = emptyMap(),
+            extractorData = null,
+            type = type,
+            audioTracks = emptyList()
+        )
+
+        callback(direct)
+        acceptedCount.incrementAndGet()
+        return true
+    }
+
+    private suspend fun tryLoadExtractorFast(
+        player: PlayerCandidate,
+        url: String,
+        referer: String,
+        attemptedUrls: MutableSet<String>,
+        emittedUrls: MutableSet<String>,
+        acceptedCount: AtomicInteger,
+        acceptedUnknown: AtomicInteger,
+        droppedKnownLow: AtomicInteger,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val attemptKey =
+            "${player.language.name}\u0000$url\u0000$referer"
+
+        if (!attemptedUrls.add(attemptKey)) {
+            return false
+        }
+
+        if (directMediaType(url) != null) {
+            return emitDirectMedia(
+                player,
+                url,
+                referer,
+                emittedUrls,
+                acceptedCount,
+                acceptedUnknown,
+                droppedKnownLow,
+                callback
+            )
+        }
+
+        val emitted = AtomicBoolean(false)
         val noSubtitles: (SubtitleFile) -> Unit = { }
-        val capturedLinks = ConcurrentLinkedQueue<ExtractorLink>()
+
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
-            capturedLinks.add(link)
-        }
-
-        suspend fun flushCapturedLinks() {
-            while (true) {
-                val link = capturedLinks.poll() ?: break
-                if (
-                    emitFilteredLink(
-                        player,
-                        link,
-                        emitted,
-                        acceptedCount,
-                        droppedBelow720,
-                        droppedUnknown,
-                        expandedAdaptive,
-                        callback
-                    )
-                ) {
-                    produced.set(true)
-                }
+            if (
+                emitFilteredLink(
+                    player,
+                    link,
+                    emittedUrls,
+                    acceptedCount,
+                    acceptedUnknown,
+                    droppedKnownLow,
+                    callback
+                )
+            ) {
+                emitted.set(true)
             }
         }
 
-        if (isDirectMedia(player.url)) {
-            val quality = normalizedQualityFromUrl(player.url)
-            if (quality >= MIN_QUALITY) {
-                val type = when {
-                    player.url.substringBefore('?').contains(".m3u8", true) -> ExtractorLinkType.M3U8
-                    player.url.substringBefore('?').contains(".mpd", true) -> ExtractorLinkType.DASH
-                    else -> ExtractorLinkType.VIDEO
-                }
-
-                val directLink = newExtractorLink(
-                    source = "Animexin",
-                    name = "${player.language.displayName} • Direct",
-                    url = player.url,
-                    type = type
-                ) {
-                    this.referer = episodeUrl
-                    this.quality = quality
-                }
-
-                if (
-                    emitFilteredLink(
-                        player,
-                        directLink,
-                        emitted,
-                        acceptedCount,
-                        droppedBelow720,
-                        droppedUnknown,
-                        expandedAdaptive,
-                        callback
-                    )
-                ) {
-                    produced.set(true)
-                }
-            } else if (quality > 0) {
-                droppedBelow720.incrementAndGet()
-            } else {
-                droppedUnknown.incrementAndGet()
-            }
-            return produced.get()
-        }
-
-        try {
-            withTimeoutOrNull(12_000L) {
+        return try {
+            withTimeoutOrNull(EXTRACTOR_TIMEOUT_MS) {
                 loadExtractor(
-                    player.url,
-                    episodeUrl,
+                    url,
+                    referer,
                     noSubtitles,
                     wrappedCallback
                 )
             }
-            flushCapturedLinks()
+
+            emitted.get()
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
-            // Continue into wrapper parsing.
+            false
         }
+    }
 
-        if (produced.get()) return true
-
-        val wrapperDocument = try {
-            withTimeoutOrNull(8_000L) {
-                app.get(player.url, referer = episodeUrl).document
+    private suspend fun fetchPlayerDocumentFast(
+        url: String,
+        referer: String
+    ): Document? {
+        return try {
+            withTimeoutOrNull(PLAYER_REQUEST_TIMEOUT_MS) {
+                app.get(url, referer = referer).document
             }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
             null
-        } ?: return false
+        }
+    }
 
-        val nested = wrapperDocument.collectNestedPlayerUrls(player.url)
-
-        for (nestedUrl in nested) {
-            if (isDirectMedia(nestedUrl)) {
-                val quality = normalizedQualityFromUrl(nestedUrl)
-                if (quality < MIN_QUALITY) {
-                    if (quality > 0) droppedBelow720.incrementAndGet()
-                    else droppedUnknown.incrementAndGet()
-                    continue
-                }
-
-                val type = when {
-                    nestedUrl.substringBefore('?').contains(".m3u8", true) -> ExtractorLinkType.M3U8
-                    nestedUrl.substringBefore('?').contains(".mpd", true) -> ExtractorLinkType.DASH
-                    else -> ExtractorLinkType.VIDEO
-                }
-
-                val directLink = newExtractorLink(
-                    source = "Animexin",
-                    name = "${player.language.displayName} • Direct",
-                    url = nestedUrl,
-                    type = type
-                ) {
-                    this.referer = player.url
-                    this.quality = quality
-                }
-
-                if (
-                    emitFilteredLink(
-                        player,
-                        directLink,
-                        emitted,
-                        acceptedCount,
-                        droppedBelow720,
-                        droppedUnknown,
-                        expandedAdaptive,
-                        callback
-                    )
-                ) {
-                    produced.set(true)
-                }
-                continue
-            }
-
-            val nestedKey = "${player.language.name}\u0000$nestedUrl\u0000${player.url}"
-            if (!attempted.add(nestedKey)) continue
-
-            try {
-                withTimeoutOrNull(9_000L) {
-                    loadExtractor(
-                        nestedUrl,
-                        player.url,
-                        noSubtitles,
-                        wrappedCallback
-                    )
-                }
-                flushCapturedLinks()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                // Keep trying remaining hardsub mirrors.
-            }
+    private suspend fun <T> collectSuccessful(
+        items: List<T>,
+        concurrency: Int,
+        block: suspend (T) -> Boolean
+    ): Boolean = coroutineScope {
+        if (items.isEmpty()) {
+            return@coroutineScope false
         }
 
-        return produced.get()
+        val semaphore = Semaphore(concurrency.coerceAtLeast(1))
+
+        items.map { item ->
+            async {
+                semaphore.withPermit {
+                    try {
+                        block(item)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+            }
+        }
+            .awaitAll()
+            .any { it }
+    }
+
+    private suspend fun <T> collectTwoLane(
+        items: List<T>,
+        block: suspend (T) -> Boolean
+    ): Boolean = coroutineScope {
+        if (items.isEmpty()) {
+            return@coroutineScope false
+        }
+
+        val fastLane = items.take(FAST_LANE_SIZE)
+        val fullLane = items.drop(FAST_LANE_SIZE)
+
+        val fastJob = async {
+            collectSuccessful(
+                fastLane,
+                FAST_LANE_CONCURRENCY,
+                block
+            )
+        }
+
+        val fullJob = async {
+            collectSuccessful(
+                fullLane,
+                FULL_LANE_CONCURRENCY,
+                block
+            )
+        }
+
+        listOf(fastJob, fullJob)
+            .awaitAll()
+            .any { it }
+    }
+
+    private fun PlayerCandidate.priority(): Int {
+        val value = "$label $url".lowercase()
+
+        return when {
+            value.contains("vtbe") -> 0
+            value.contains("streamwish") ||
+                value.contains("wishfast") -> 1
+            value.contains("filemoon") -> 2
+            value.contains("dailymotion") -> 3
+            value.contains("waaw") -> 4
+            else -> 20
+        }
+    }
+
+    private fun balancedPlayers(
+        players: List<PlayerCandidate>
+    ): List<PlayerCandidate> {
+        val indo = players
+            .filter { it.language == HardSubLanguage.INDONESIA }
+            .sortedBy { it.priority() }
+
+        val english = players
+            .filter { it.language == HardSubLanguage.ENGLISH }
+            .sortedBy { it.priority() }
+
+        return buildList {
+            val count = maxOf(indo.size, english.size)
+            for (index in 0 until count) {
+                indo.getOrNull(index)?.let(::add)
+                english.getOrNull(index)?.let(::add)
+            }
+        }
+    }
+
+    private suspend fun resolvePlayerPipelineFast(
+        player: PlayerCandidate,
+        episodeUrl: String,
+        attemptedUrls: MutableSet<String>,
+        emittedUrls: MutableSet<String>,
+        acceptedCount: AtomicInteger,
+        acceptedUnknown: AtomicInteger,
+        droppedKnownLow: AtomicInteger,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val directSuccess = tryLoadExtractorFast(
+            player,
+            player.url,
+            episodeUrl,
+            attemptedUrls,
+            emittedUrls,
+            acceptedCount,
+            acceptedUnknown,
+            droppedKnownLow,
+            callback
+        )
+
+        if (directSuccess) return true
+
+        val wrapperDocument = fetchPlayerDocumentFast(
+            player.url,
+            episodeUrl
+        ) ?: return false
+
+        val playerUrls = wrapperDocument
+            .collectNestedPlayerUrls(player.url)
+
+        return collectSuccessful(
+            playerUrls,
+            MAX_NESTED_CONCURRENCY
+        ) { playerUrl ->
+            val playerSuccess = tryLoadExtractorFast(
+                player,
+                playerUrl,
+                player.url,
+                attemptedUrls,
+                emittedUrls,
+                acceptedCount,
+                acceptedUnknown,
+                droppedKnownLow,
+                callback
+            )
+
+            if (playerSuccess) {
+                true
+            } else {
+                val nestedDocument = fetchPlayerDocumentFast(
+                    playerUrl,
+                    player.url
+                )
+
+                if (nestedDocument == null) {
+                    false
+                } else {
+                    val nestedUrls = nestedDocument
+                        .collectNestedPlayerUrls(playerUrl)
+
+                    collectSuccessful(
+                        nestedUrls,
+                        MAX_NESTED_CONCURRENCY
+                    ) { nestedUrl ->
+                        tryLoadExtractorFast(
+                            player,
+                            nestedUrl,
+                            playerUrl,
+                            attemptedUrls,
+                            emittedUrls,
+                            acceptedCount,
+                            acceptedUnknown,
+                            droppedKnownLow,
+                            callback
+                        )
+                    }
+                }
+            }
+        }
     }
 
     override suspend fun loadLinks(
@@ -963,77 +1157,107 @@ class Animexin : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.w("Animexin", "ANIMEXIN_V12_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en unknownSentinel=${Qualities.Unknown.value}")
+        val started = System.currentTimeMillis()
+        val firstLinkMs = AtomicInteger(-1)
+
+        Log.w(
+            "Animexin",
+            "ANIMEXIN_V13_LOADLINKS start mode=hardsub-id-en unknown=accept flow=anichin-fast"
+        )
 
         val document = try {
-            withTimeoutOrNull(12_000L) {
+            withTimeoutOrNull(EPISODE_REQUEST_TIMEOUT_MS) {
                 app.get(data).document
             }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
             null
-        } ?: run {
-            Log.w("Animexin", "ANIMEXIN_V12_LOADLINKS pageFetch=false")
-            return false
-        }
+        } ?: return false
 
         val discovery = document.collectHardSubCandidates(data)
-        val players = discovery.players
-        val indoCount = players.count { it.language == HardSubLanguage.INDONESIA }
-        val englishCount = players.count { it.language == HardSubLanguage.ENGLISH }
+        val players = balancedPlayers(discovery.players)
+
+        val indoCount = players.count {
+            it.language == HardSubLanguage.INDONESIA
+        }
+
+        val englishCount = players.count {
+            it.language == HardSubLanguage.ENGLISH
+        }
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V12_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
-                "indo=$indoCount english=$englishCount rejected=${discovery.rejectedCount} " +
+            "ANIMEXIN_V13_DISCOVERY raw=${discovery.rawCount} " +
+                "selected=${players.size} indo=$indoCount english=$englishCount " +
+                "rejected=${discovery.rejectedCount} " +
                 "samples=${discovery.rejectedSamples.joinToString(" || ")}"
         )
 
-        if (players.isEmpty()) {
-            Log.w("Animexin", "ANIMEXIN_V12_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
-            return false
+        if (players.isEmpty()) return false
+
+        val attemptedUrls: MutableSet<String> =
+            ConcurrentHashMap.newKeySet()
+
+        val emittedUrls: MutableSet<String> =
+            ConcurrentHashMap.newKeySet()
+
+        val acceptedCount = AtomicInteger(0)
+        val acceptedUnknown = AtomicInteger(0)
+        val droppedKnownLow = AtomicInteger(0)
+
+        val immediateCallback: (ExtractorLink) -> Unit = { link ->
+            val elapsed = (
+                System.currentTimeMillis() - started
+            ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+
+            if (firstLinkMs.compareAndSet(-1, elapsed)) {
+                Log.w(
+                    "Animexin",
+                    "ANIMEXIN_V13_FIRST_LINK ms=$elapsed name=${link.name}"
+                )
+            }
+
+            callback(link)
         }
 
-        val attempted: MutableSet<String> = ConcurrentHashMap.newKeySet()
-        val emitted: MutableSet<String> = ConcurrentHashMap.newKeySet()
-        val acceptedCount = AtomicInteger(0)
-        val droppedBelow720 = AtomicInteger(0)
-        val droppedUnknown = AtomicInteger(0)
-        val expandedAdaptive = AtomicInteger(0)
-        val semaphore = Semaphore(3)
-
-        val success = coroutineScope {
-            players.map { player ->
-                async {
-                    semaphore.withPermit {
-                        tryPlayerCandidate(
-                            player,
-                            data,
-                            attempted,
-                            emitted,
-                            acceptedCount,
-                            droppedBelow720,
-                            droppedUnknown,
-                            expandedAdaptive,
-                            callback
-                        )
-                    }
-                }
-            }.awaitAll().any { it }
+        val success = collectTwoLane(players) { player ->
+            resolvePlayerPipelineFast(
+                player,
+                data,
+                attemptedUrls,
+                emittedUrls,
+                acceptedCount,
+                acceptedUnknown,
+                droppedKnownLow,
+                immediateCallback
+            )
         }
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V12_DONE players=${players.size} accepted=${acceptedCount.get()} " +
-                "dropBelow720=${droppedBelow720.get()} dropUnknown=${droppedUnknown.get()} " +
-                    "expandedHls720=${expandedAdaptive.get()} success=$success"
+            "ANIMEXIN_V13_DONE players=${players.size} " +
+                "accepted=${acceptedCount.get()} " +
+                "acceptedUnknown=${acceptedUnknown.get()} " +
+                "dropKnownBelow720=${droppedKnownLow.get()} " +
+                "firstMs=${firstLinkMs.get()} " +
+                "totalMs=${System.currentTimeMillis() - started} " +
+                "success=$success"
         )
 
         return success
     }
 
     companion object {
-        private const val MIN_QUALITY = 720
+        private const val MIN_KNOWN_QUALITY = 720
+
+        private const val FAST_LANE_SIZE = 4
+        private const val FAST_LANE_CONCURRENCY = 4
+        private const val FULL_LANE_CONCURRENCY = 3
+        private const val MAX_NESTED_CONCURRENCY = 2
+
+        private const val EPISODE_REQUEST_TIMEOUT_MS = 8_000L
+        private const val PLAYER_REQUEST_TIMEOUT_MS = 5_000L
+        private const val EXTRACTOR_TIMEOUT_MS = 7_000L
     }
 }
