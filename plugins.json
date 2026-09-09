@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=4khdhub.one&sz=%size%",
-        "fileHash": "sha256-25cb89e0e28b76f65f5b3088abf0bfdf07a9b188420576e851b904de1113d379",
+        "fileHash": "sha256-52e90988d1b2a6be9249ecc598fe1fc4533385b90d02c2b10c8430941bec1951",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 81529,
+        "fileSize": 81524,
         "status": 1,
         "language": "en",
         "authors": [
@@ -22,7 +22,7 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://anichin.moe&size=%size%",
-        "fileHash": "sha256-897b45ca8669f55ff767fa04f15702f0effa21b5a8d727d3a866ca456f65404e",
+        "fileHash": "sha256-cdd4edeef061f4d66929fcd0a187215474858e8abe2fd2259b55ad958fe1ad86",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
         "fileSize": 75274,
@@ -43,10 +43,10 @@
     },
     {
         "iconUrl": "https://animexin.dev/wp-content/uploads/2020/06/animexinv1.png",
-        "fileHash": "sha256-979281b60bae822a575aaebebeb179a6fc246db8f6863ad47f452303f78e414e",
+        "fileHash": "sha256-db44eb9162ecd30a5caeeff328deb13f2cf5ce684c4d4c08a087b4b103c3117c",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 14613,
+        "fileSize": 39205,
         "status": 1,
         "language": "id",
         "authors": [
@@ -57,7 +57,7 @@
             "Anime",
             "Cartoon"
         ],
-        "version": 1,
+        "version": 3,
         "internalName": "Animexin",
         "description": "Animexin \u2014 Streaming Donghua Subtitle Indonesia",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/Animexin.cs3",
@@ -65,10 +65,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://kisskh.id/&size=256",
-        "fileHash": "sha256-e4bbf0e91cc50ac926c3b99d0276ac0cd5e9f35bc68118854a09b8a79024b747",
+        "fileHash": "sha256-3c181a5a5276ea5e0df748a86599a020ce75270e5dd9903554db29686ad3e0e9",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 37526,
+        "fileSize": 37518,
         "status": 1,
         "language": "en",
         "authors": [
@@ -85,10 +85,10 @@
     },
     {
         "iconUrl": "https://movieboxph.app/wp-content/uploads/2025/11/Movie-Box-icon.webp",
-        "fileHash": "sha256-9273b925d26182f89ca43a5e7f54652ab98a549b8e72ee1c3e1bdda08d2d4554",
+        "fileHash": "sha256-c78efa40f67570c7536cacdeaf3b5693686c1ba616e7e4dff41e785e2f345d90",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 61003,
+        "fileSize": 61009,
         "status": 1,
         "language": "en",
         "authors": [
@@ -108,10 +108,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ww03.pencurimovie.bond&size=%size%",
-        "fileHash": "sha256-08288b84a56c087da884be0607fbb0b84d544b13339214bfe31b00ca6089e60b",
+        "fileHash": "sha256-ab28279e038d448f4b1506942fe4e7834f4715cd96e883b8448a1e06127ea827",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 78769,
+        "fileSize": 78775,
         "status": 1,
         "language": "ms",
         "authors": [
@@ -129,10 +129,10 @@
     },
     {
         "iconUrl": "https://cdn.animaapp.com/projects/6215178219a2fd7886bf5a52/releases/621519ce72dadb5503e24f9f/img/app-icon%401x.png",
-        "fileHash": "sha256-fcf1b64cee69d6b2cc35718de70413d1c4fd3cea3ad3ee59b37f8fe1658c5168",
+        "fileHash": "sha256-718276ab603c58c32ce924585d18197e6a03c252589f805e19e886a3d37277b3",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 41607,
+        "fileSize": 41613,
         "status": 1,
         "language": "en",
         "authors": [
@@ -152,10 +152,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://45.11.57.243&size=%size%",
-        "fileHash": "sha256-cce2f0142c8180c6c385261f0edb40e08b5ebfc441147efdeb5908902e604879",
+        "fileHash": "sha256-039eb5f05a6713c5579885f31d121ba40d77d85ed21ba38e2e9f3d61f86e7b73",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 50349,
+        "fileSize": 50342,
         "status": 1,
         "language": "id",
         "authors": [
@@ -174,10 +174,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ww03.pencurimovie.bond&size=%size%",
-        "fileHash": "sha256-51ac41337b6d4e494dd5759f98a5d4c04174733e025023881eebfbd247eddcb1",
+        "fileHash": "sha256-7279c10491c00ec2ca788957a3658a38a60b2a911443ffce8e1123a0ee086429",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 29555,
+        "fileSize": 29552,
         "status": 1,
         "language": "ms",
         "authors": [
