@@ -2,6 +2,7 @@ package com.moviebox
 
 import android.util.Base64
 import android.util.Log
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
@@ -203,6 +204,59 @@ class MovieboxProvider : MainAPI() {
     private data class DetailRaceResult(
         val host: String,
         val detail: MediaDetail.Data
+    )
+
+    private inline fun <reified T> parseJsonSafe(raw: String): T? = try {
+        parseJson<T>(raw)
+    } catch (_: Throwable) {
+        null
+    }
+
+    /*
+     * Mobile search currently returns some metadata fields with inconsistent
+     * scalar types between titles, for example duration may be a formatted
+     * string instead of a number. Search only needs these four fields, so keep
+     * this response model deliberately narrow and permissive. This prevents an
+     * unrelated metadata field from making the whole JSON response unparsable.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private data class MobileSearchEnvelope(
+        @JsonProperty("code") val code: Int? = null,
+        @JsonProperty("message") val message: String? = null,
+        @JsonProperty("data") val data: MobileSearchData? = null,
+    )
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private data class MobileSearchData(
+        @JsonProperty("items") val items: List<MobileSearchItem>? = null,
+    )
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private data class MobileSearchItem(
+        @JsonProperty("subjectId") val subjectId: Any? = null,
+        @JsonProperty("subjectType") val subjectType: Any? = null,
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("cover") val cover: MobileSearchCover? = null,
+    ) {
+        fun toItem(): Items? {
+            val id = subjectId?.toString()?.takeIf { it.isNotBlank() } ?: return null
+            val name = title?.takeIf { it.isNotBlank() } ?: return null
+            val type = when (val raw = subjectType) {
+                is Number -> raw.toInt()
+                else -> raw?.toString()?.toIntOrNull()
+            }
+            return Items(
+                subjectId = id,
+                subjectType = type,
+                title = name,
+                cover = cover?.url?.let { Items.Cover(url = it) }
+            )
+        }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private data class MobileSearchCover(
+        @JsonProperty("url") val url: String? = null,
     )
 
     private fun md5Hex(bytes: ByteArray): String {
@@ -467,14 +521,27 @@ class MovieboxProvider : MainAPI() {
                     continue
                 }
 
-                val parsed = response.parsedSafe<Media>()
-                val items = parsed?.data?.items.orEmpty()
+                val raw = response.text
+                val envelope = parseJsonSafe<MobileSearchEnvelope>(raw)
+                val directData = if (envelope == null) parseJsonSafe<MobileSearchData>(raw) else null
+                val mobileItems = envelope?.data?.items ?: directData?.items
+                val items = mobileItems.orEmpty().mapNotNull { it.toItem() }
+                val apiCode = envelope?.code
+
+                val parsedOk = envelope != null || directData != null
                 Log.i(
                     "MovieBox",
-                    "MOVIEBOX_SEARCH host=$host http=${response.code} api=${parsed?.code} items=${items.size} query=${query.trim()}"
+                    "MOVIEBOX_SEARCH host=$host http=${response.code} api=$apiCode parsed=$parsedOk items=${items.size} query=${query.trim()}"
                 )
+                if (!parsedOk) {
+                    val prefix = raw.take(180).replace(Regex("\\s+"), " ")
+                    Log.w(
+                        "MovieBox",
+                        "MOVIEBOX_SEARCH_PARSE_FAIL host=$host http=${response.code} bytes=${raw.length} body=$prefix"
+                    )
+                }
 
-                if (parsed?.code == 0) {
+                if (response.code in 200..299 && (apiCode == 0 || apiCode == null) && items.isNotEmpty()) {
                     preferredMobileHost = host
                     return SearchRaceResult(host, items)
                 }
@@ -552,17 +619,20 @@ class MovieboxProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
 
-        // Current H5 SDK uses the web subject search endpoint on the H5 API
-        // mirror pool. Keep signed mobile search only as a fallback.
-        raceH5SearchHosts(query)?.let { result ->
-            preferredWebHost = result.host
-            return result.items.map { it.toSearchResponse(this) }
+        // The current MovieBox architecture uses the signed Android API for
+        // search. H5 is retained only as a last-resort compatibility fallback.
+        raceSearchHosts(query)?.let { mobileResult ->
+            preferredMobileHost = mobileResult.host
+            return mobileResult.items
+                .filter { !it.subjectId.isNullOrBlank() && !it.title.isNullOrBlank() }
+                .map { it.toSearchResponse(this) }
         }
 
-        val mobileResult = raceSearchHosts(query) ?: return emptyList()
-        preferredMobileHost = mobileResult.host
-        return mobileResult.items
-            .filter { !it.subjectId.isNullOrBlank() && !it.title.isNullOrBlank() }
+        Log.w("MovieBox", "MOVIEBOX_SEARCH_MOBILE_EMPTY query=${query.trim()} fallback=h5")
+        return raceH5SearchHosts(query)
+            ?.also { preferredWebHost = it.host }
+            ?.items
+            .orEmpty()
             .map { it.toSearchResponse(this) }
     }
 
@@ -1030,7 +1100,7 @@ class MovieboxProvider : MainAPI() {
         @JsonProperty("title") val title: String? = null,
         @JsonProperty("description") val description: String? = null,
         @JsonProperty("releaseDate") val releaseDate: String? = null,
-        @JsonProperty("duration") val duration: Long? = null,
+        @JsonProperty("duration") val duration: Any? = null,
         @JsonProperty("genre") val genre: String? = null,
         @JsonProperty("cover") val cover: Cover? = null,
         @JsonProperty("imdbRatingValue") val imdbRatingValue: String? = null,
