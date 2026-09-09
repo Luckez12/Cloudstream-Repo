@@ -607,7 +607,12 @@ class Animexin : MainAPI() {
     }
 
     private fun normalizedQuality(link: ExtractorLink): Int {
-        if (link.quality > 0) return link.quality
+        // Cloudstream uses Qualities.Unknown.value == 400 as a sentinel.
+        // It is not a real 400p resolution. Treat it as unknown so HLS
+        // master playlists can be inspected for actual 720p+ variants.
+        if (link.quality > 0 && link.quality != Qualities.Unknown.value) {
+            return link.quality
+        }
 
         return Regex(
             """(?<!\d)(2160|1440|1080|900|720|576|540|480|432|360|270|240|144)p?(?!\d)""",
@@ -958,7 +963,7 @@ class Animexin : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.w("Animexin", "ANIMEXIN_V11_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en")
+        Log.w("Animexin", "ANIMEXIN_V12_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en unknownSentinel=${Qualities.Unknown.value}")
 
         val document = try {
             withTimeoutOrNull(12_000L) {
@@ -969,7 +974,7 @@ class Animexin : MainAPI() {
         } catch (_: Exception) {
             null
         } ?: run {
-            Log.w("Animexin", "ANIMEXIN_V11_LOADLINKS pageFetch=false")
+            Log.w("Animexin", "ANIMEXIN_V12_LOADLINKS pageFetch=false")
             return false
         }
 
@@ -980,13 +985,13 @@ class Animexin : MainAPI() {
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V11_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
+            "ANIMEXIN_V12_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
                 "indo=$indoCount english=$englishCount rejected=${discovery.rejectedCount} " +
                 "samples=${discovery.rejectedSamples.joinToString(" || ")}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Animexin", "ANIMEXIN_V11_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
+            Log.w("Animexin", "ANIMEXIN_V12_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
             return false
         }
 
@@ -1020,7 +1025,7 @@ class Animexin : MainAPI() {
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V11_DONE players=${players.size} accepted=${acceptedCount.get()} " +
+            "ANIMEXIN_V12_DONE players=${players.size} accepted=${acceptedCount.get()} " +
                 "dropBelow720=${droppedBelow720.get()} dropUnknown=${droppedUnknown.get()} " +
                     "expandedHls720=${expandedAdaptive.get()} success=$success"
         )
