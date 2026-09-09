@@ -21,6 +21,20 @@ class Animexin : MainAPI() {
         "anime/?sub=raw" to "Anime (RAW)",
     )
 
+    // AnimeXin and AniChin use a very similar WordPress theme.
+    // Posters are commonly lazy-loaded, so src can be only a placeholder.
+    private fun Element.getImageUrl(): String? {
+        return listOf(
+            attr("data-src"),
+            attr("data-lazy-src"),
+            attr("data-original"),
+            attr("src")
+        ).firstOrNull { imageUrl ->
+            imageUrl.isNotBlank() &&
+                !imageUrl.startsWith("data:", ignoreCase = true)
+        }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
 val document = app.get("$mainUrl/${request.data}&page=$page").documentLarge
         val home     = document.select("div.listupd > article").mapNotNull { it.toSearchResult() }
@@ -38,7 +52,9 @@ val document = app.get("$mainUrl/${request.data}&page=$page").documentLarge
     private fun Element.toSearchResult(): SearchResponse {
         val title     = this.select("div.bsx > a").attr("title")
         val href      = fixUrl(this.select("div.bsx > a").attr("href"))
-        val posterUrl = fixUrlNull(this.select("div.bsx > a img").attr("src"))
+        val posterUrl = this.selectFirst("div.bsx > a img, img")
+            ?.getImageUrl()
+            ?.let { fixUrlNull(it) }
         return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = posterUrl
         }
@@ -56,7 +72,15 @@ val document = app.get("$mainUrl/${request.data}&page=$page").documentLarge
         val document = app.get(url).documentLarge
         val title = document.selectFirst("h1.entry-title")?.text()?.trim().toString()
         val href=document.selectFirst("div.eplister > ul > li a")?.attr("href") ?:""
-        val poster = document.select("div.thumb img").attr("src").ifEmpty { document.selectFirst("meta[property=og:image]")?.attr("content")?.trim().toString() }
+        val poster = (
+            document
+                .selectFirst("div.thumb img, div.ime img, img.wp-post-image")
+                ?.getImageUrl()
+                ?: document
+                    .selectFirst("meta[property=og:image]")
+                    ?.attr("content")
+                    ?.trim()
+        ).orEmpty()
         val description = document.selectFirst("div.entry-content")?.text()?.trim()
         val type=document.selectFirst(".spe")?.text().toString()
         val tvtag=if (type.contains("Movie")) TvType.Movie else TvType.TvSeries
@@ -65,7 +89,10 @@ val document = app.get("$mainUrl/${request.data}&page=$page").documentLarge
 
             val episodes = document.select("div.eplister > ul > li").map { info ->
                 val href1 = info.select("a").attr("href")
-                val posterr = info.selectFirst("a img")?.attr("src") ?: ""
+                val posterr = info.selectFirst("a img")
+                    ?.getImageUrl()
+                    ?.let { fixUrlNull(it) }
+                    ?: fixUrlNull(poster)
 
                 val epText = info.selectFirst("div.epl-num")?.text().orEmpty()
                 val epnum = episodeRegex.find(epText)?.groupValues?.get(1)?.toIntOrNull()
@@ -78,12 +105,12 @@ val document = app.get("$mainUrl/${request.data}&page=$page").documentLarge
             }
 
             newTvSeriesLoadResponse(title, url, TvType.Anime, episodes.reversed()) {
-                this.posterUrl = poster
+                this.posterUrl = fixUrlNull(poster)
                 this.plot = description
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, href) {
-                this.posterUrl = poster
+                this.posterUrl = fixUrlNull(poster)
                 this.plot = description
             }
         }
