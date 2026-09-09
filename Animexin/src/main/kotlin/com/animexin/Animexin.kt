@@ -39,37 +39,200 @@ class Animexin : MainAPI() {
         val url: String
     )
 
+    private data class CardData(
+        val title: String,
+        val href: String,
+        val poster: String?,
+        val type: TvType
+    )
+
+    private val posterCache = ConcurrentHashMap<String, String>()
+    private val posterMisses: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    private fun String.cleanImageCandidate(): String? {
+        val value = trim()
+            .replace("&amp;", "&")
+            .replace("&#038;", "&")
+            .replace("\\/", "/")
+        if (value.isBlank()) return null
+        val lower = value.lowercase()
+        if (lower.startsWith("data:")) return null
+        if (lower.contains("blank.gif") || lower.contains("lazy.svg") ||
+            lower.contains("placeholder") || lower.contains("loading.gif")) return null
+        return value
+    }
+
+    private fun Element.bestSrcSetUrl(attribute: String): String? {
+        val srcset = attr(attribute).trim()
+        if (srcset.isBlank()) return null
+        return srcset.split(',')
+            .mapNotNull { item ->
+                val parts = item.trim().split(Regex("""\s+"""))
+                val url = parts.firstOrNull()?.cleanImageCandidate() ?: return@mapNotNull null
+                val score = parts.getOrNull(1)
+                    ?.removeSuffix("w")
+                    ?.removeSuffix("x")
+                    ?.toDoubleOrNull()
+                    ?: 0.0
+                url to score
+            }
+            .maxByOrNull { it.second }
+            ?.first
+    }
+
     private fun Element.imageUrl(): String? {
-        return listOf(
+        listOf(
             attr("data-src"),
             attr("data-lazy-src"),
             attr("data-original"),
+            attr("data-cfsrc"),
+            attr("data-url"),
             attr("src")
-        ).firstOrNull {
-            it.isNotBlank() && !it.startsWith("data:", ignoreCase = true)
+        ).forEach { raw -> raw.cleanImageCandidate()?.let { return it } }
+
+        bestSrcSetUrl("data-srcset")?.let { return it }
+        bestSrcSetUrl("srcset")?.let { return it }
+
+        listOf(
+            attr("data-bg"),
+            attr("data-background"),
+            attr("data-background-image")
+        ).forEach { raw -> raw.cleanImageCandidate()?.let { return it } }
+
+        Regex("""background(?:-image)?\s*:\s*url\((?:['\"])?([^)'\"]+)(?:['\"])?\)""", RegexOption.IGNORE_CASE)
+            .find(attr("style"))
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.cleanImageCandidate()
+            ?.let { return it }
+
+        return null
+    }
+
+    private fun normalizePoster(raw: String?): String? {
+        val value = raw?.cleanImageCandidate() ?: return null
+        return fixUrlNull(value)
+    }
+
+    private fun Document.extractPoster(title: String? = null): String? {
+        val preferred = select(
+            ".thumb img, .bigcover img, .ime img, .infox .thumb img, " +
+                ".ts-post-image, img.wp-post-image, .postbody img"
+        )
+        preferred.forEach { image -> normalizePoster(image.imageUrl())?.let { return it } }
+
+        if (!title.isNullOrBlank()) {
+            val needle = title.lowercase().replace(Regex("""[^a-z0-9]+"""), " ").trim()
+            select("img").forEach { image ->
+                val alt = image.attr("alt").lowercase().replace(Regex("""[^a-z0-9]+"""), " ").trim()
+                if (needle.isNotBlank() && alt.isNotBlank() && (alt.contains(needle) || needle.contains(alt))) {
+                    normalizePoster(image.imageUrl())?.let { return it }
+                }
+            }
+        }
+
+        selectFirst("meta[property=og:image], meta[name=twitter:image]")
+            ?.attr("content")
+            ?.let(::normalizePoster)
+            ?.let { return it }
+
+        return null
+    }
+
+    private fun Element.toCardData(typeHint: TvType? = null): CardData? {
+        val anchor = selectFirst("div.bsx > a[href]")
+            ?: selectFirst(".bsx a[href]")
+            ?: selectFirst("a[href]")
+            ?: return null
+
+        val title = anchor.attr("title").trim().ifBlank {
+            selectFirst(".tt, .tt h2, h2, h3")?.text()?.trim().orEmpty()
+        }
+        if (title.isBlank()) return null
+
+        val href = fixUrl(anchor.attr("href"))
+        val image = selectFirst(
+            "div.bsx > a img, .bsx img, .limit img, img.ts-post-image, img.wp-post-image, img"
+        )
+        val poster = normalizePoster(image?.imageUrl())
+            ?: normalizePoster(selectFirst("[data-bg], [data-background], [style*=background]")?.imageUrl())
+
+        val badge = selectFirst(".typez, .type, .status, .bt .epx")?.text().orEmpty()
+        val tvType = when {
+            typeHint == TvType.Movie -> TvType.Movie
+            badge.contains("Movie", ignoreCase = true) -> TvType.Movie
+            href.contains("-movie-", ignoreCase = true) -> TvType.Movie
+            else -> TvType.Anime
+        }
+
+        return CardData(title, href, poster, tvType)
+    }
+
+    private suspend fun fetchPosterFromDetail(card: CardData): String? {
+        posterCache[card.href]?.let { return it }
+        if (posterMisses.contains(card.href)) return null
+
+        val poster = try {
+            withTimeoutOrNull(POSTER_FALLBACK_TIMEOUT_MS) {
+                app.get(card.href, referer = "$mainUrl/").document.extractPoster(card.title)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        if (poster != null) {
+            posterCache[card.href] = poster
+            Log.i(TAG, "ANIMEXIN_POSTER_FALLBACK title=${card.title.take(45)} host=${runCatching { URI(poster).host }.getOrNull()}")
+        } else {
+            posterMisses.add(card.href)
+        }
+        return poster
+    }
+
+    private suspend fun enrichPosters(cards: List<CardData>): List<CardData> = coroutineScope {
+        val semaphore = Semaphore(POSTER_FALLBACK_CONCURRENCY)
+        cards.map { card ->
+            async {
+                if (card.poster != null) card
+                else semaphore.withPermit {
+                    card.copy(poster = fetchPosterFromDetail(card))
+                }
+            }
+        }.awaitAll()
+    }
+
+    private fun CardData.toSearchResponse(): SearchResponse {
+        return newAnimeSearchResponse(title, href, type) {
+            posterUrl = poster
+            posterHeaders = mapOf(
+                "Referer" to "$mainUrl/",
+                "User-Agent" to USER_AGENT
+            )
         }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val separator = if (request.data.contains("?")) "&" else "?"
         val url = "$mainUrl/${request.data}${separator}page=$page"
-        val document = app.get(url).document
+        val document = app.get(url, referer = "$mainUrl/").document
 
-        val typeHint = if (request.data.contains("type=movie", ignoreCase = true)) {
-            TvType.Movie
-        } else {
-            null
-        }
-
-        val home = document
-            .select("div.listupd > article, .listupd article")
-            .mapNotNull { it.toSearchResult(typeHint) }
+        val typeHint = if (request.data.contains("type=movie", ignoreCase = true)) TvType.Movie else null
+        val cards = document
+            .select("div.listupd > article, .listupd article, article.bs")
+            .mapNotNull { it.toCardData(typeHint) }
+        val enriched = enrichPosters(cards)
+        val home = enriched.map { it.toSearchResponse() }
 
         val hasNext = document.selectFirst(
             "a.next.page-numbers, .pagination .next a, .hpage a.r, a[rel=next]"
         ) != null
 
-        Log.i(TAG, "ANIMEXIN_HOME section=${request.name} page=$page items=${home.size} next=$hasNext")
+        Log.i(
+            TAG,
+            "ANIMEXIN_HOME section=${request.name} page=$page items=${home.size} " +
+                "posters=${enriched.count { it.poster != null }} missing=${enriched.count { it.poster == null }} next=$hasNext"
+        )
 
         return newHomePageResponse(
             HomePageList(
@@ -81,46 +244,23 @@ class Animexin : MainAPI() {
         )
     }
 
-    private fun Element.toSearchResult(typeHint: TvType? = null): SearchResponse? {
-        val anchor = selectFirst("div.bsx > a[href]")
-            ?: selectFirst("a[href]")
-            ?: return null
-
-        val title = anchor.attr("title").trim().ifBlank {
-            selectFirst(".tt, h2, h3")?.text()?.trim().orEmpty()
-        }
-        if (title.isBlank()) return null
-
-        val href = fixUrl(anchor.attr("href"))
-        val poster = selectFirst("div.bsx > a img, img")
-            ?.imageUrl()
-            ?.let { fixUrlNull(it) }
-
-        val badge = selectFirst(".typez, .type, .status")?.text().orEmpty()
-        val tvType = when {
-            typeHint == TvType.Movie -> TvType.Movie
-            badge.contains("Movie", ignoreCase = true) -> TvType.Movie
-            href.contains("-movie-", ignoreCase = true) -> TvType.Movie
-            else -> TvType.Anime
-        }
-
-        return newAnimeSearchResponse(title, href, tvType) {
-            posterUrl = poster
-        }
-    }
-
     override suspend fun search(query: String, page: Int): SearchResponseList {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
         if (encoded.isBlank()) return emptyList<SearchResponse>().toNewSearchResponseList()
 
-        val document = app.get("$mainUrl/page/$page/?s=$encoded").document
-        val results = document
-            .select("div.listupd > article, .listupd article")
-            .mapNotNull { it.toSearchResult() }
-            .distinctBy { it.url }
+        val document = app.get("$mainUrl/page/$page/?s=$encoded", referer = "$mainUrl/").document
+        val cards = document
+            .select("div.listupd > article, .listupd article, article.bs")
+            .mapNotNull { it.toCardData() }
+            .distinctBy { it.href }
+        val enriched = enrichPosters(cards)
 
-        Log.i(TAG, "ANIMEXIN_SEARCH page=$page items=${results.size} query=${query.take(40)}")
-        return results.toNewSearchResponseList()
+        Log.i(
+            TAG,
+            "ANIMEXIN_SEARCH page=$page items=${enriched.size} posters=${enriched.count { it.poster != null }} " +
+                "missing=${enriched.count { it.poster == null }} query=${query.take(40)}"
+        )
+        return enriched.map { it.toSearchResponse() }.toNewSearchResponseList()
     }
 
     private fun cleanSynopsisText(raw: String?): String? {
@@ -216,10 +356,7 @@ class Animexin : MainAPI() {
         val document = app.get(fixedUrl).document
 
         val title = document.selectFirst("h1.entry-title")?.text()?.trim().orEmpty()
-        val poster = (
-            document.selectFirst("div.thumb img, div.ime img, img.wp-post-image")?.imageUrl()
-                ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
-            ).orEmpty()
+        val poster = document.extractPoster(title).orEmpty()
 
         val description = extractSynopsis(document)
         val infoText = document.selectFirst(".spe")?.text().orEmpty()
@@ -236,7 +373,7 @@ class Animexin : MainAPI() {
                 .ifBlank { row.selectFirst("a")?.attr("title")?.trim().orEmpty() }
             val epNumber = episodeNumberFrom(row, link, rowTitle)
             val epDate = row.selectFirst(".epl-date")?.text()?.trim().orEmpty()
-            val epPoster = row.selectFirst("a img")?.imageUrl()?.let { fixUrlNull(it) }
+            val epPoster = normalizePoster(row.selectFirst("a img")?.imageUrl())
                 ?: fixUrlNull(poster)
 
             val displayName = rowTitle.ifBlank {
@@ -258,6 +395,7 @@ class Animexin : MainAPI() {
         return if (!isMovie && episodes.isNotEmpty()) {
             newTvSeriesLoadResponse(title, fixedUrl, TvType.Anime, episodes.reversed()) {
                 posterUrl = fixUrlNull(poster)
+                posterHeaders = mapOf("Referer" to "$mainUrl/", "User-Agent" to USER_AGENT)
                 plot = description
             }
         } else {
@@ -270,6 +408,7 @@ class Animexin : MainAPI() {
 
             newMovieLoadResponse(title, fixedUrl, TvType.Movie, moviePage) {
                 posterUrl = fixUrlNull(poster)
+                posterHeaders = mapOf("Referer" to "$mainUrl/", "User-Agent" to USER_AGENT)
                 plot = description
             }
         }
@@ -679,5 +818,7 @@ class Animexin : MainAPI() {
         private const val EPISODE_REQUEST_TIMEOUT_MS = 10_000L
         private const val PLAYER_REQUEST_TIMEOUT_MS = 7_000L
         private const val EXTRACTOR_TIMEOUT_MS = 9_000L
+        private const val POSTER_FALLBACK_TIMEOUT_MS = 5_000L
+        private const val POSTER_FALLBACK_CONCURRENCY = 4
     }
 }
