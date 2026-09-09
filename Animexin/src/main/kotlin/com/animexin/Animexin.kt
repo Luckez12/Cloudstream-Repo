@@ -12,6 +12,7 @@ import kotlinx.coroutines.sync.withPermit
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Document
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -629,7 +630,7 @@ class Animexin : MainAPI() {
             ?: 0
     }
 
-    private fun emitFilteredLink(
+    private suspend fun emitFilteredLink(
         player: PlayerCandidate,
         link: ExtractorLink,
         emitted: MutableSet<String>,
@@ -684,19 +685,27 @@ class Animexin : MainAPI() {
 
         val produced = AtomicBoolean(false)
         val noSubtitles: (SubtitleFile) -> Unit = { }
+        val capturedLinks = ConcurrentLinkedQueue<ExtractorLink>()
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
-            if (
-                emitFilteredLink(
-                    player,
-                    link,
-                    emitted,
-                    acceptedCount,
-                    droppedBelow720,
-                    droppedUnknown,
-                    callback
-                )
-            ) {
-                produced.set(true)
+            capturedLinks.add(link)
+        }
+
+        suspend fun flushCapturedLinks() {
+            while (true) {
+                val link = capturedLinks.poll() ?: break
+                if (
+                    emitFilteredLink(
+                        player,
+                        link,
+                        emitted,
+                        acceptedCount,
+                        droppedBelow720,
+                        droppedUnknown,
+                        callback
+                    )
+                ) {
+                    produced.set(true)
+                }
             }
         }
 
@@ -749,6 +758,7 @@ class Animexin : MainAPI() {
                     wrappedCallback
                 )
             }
+            flushCapturedLinks()
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -822,6 +832,7 @@ class Animexin : MainAPI() {
                         wrappedCallback
                     )
                 }
+                flushCapturedLinks()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -838,7 +849,7 @@ class Animexin : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.w("Animexin", "ANIMEXIN_V8_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en")
+        Log.w("Animexin", "ANIMEXIN_V9_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en")
 
         val document = try {
             withTimeoutOrNull(12_000L) {
@@ -849,7 +860,7 @@ class Animexin : MainAPI() {
         } catch (_: Exception) {
             null
         } ?: run {
-            Log.w("Animexin", "ANIMEXIN_V8_LOADLINKS pageFetch=false")
+            Log.w("Animexin", "ANIMEXIN_V9_LOADLINKS pageFetch=false")
             return false
         }
 
@@ -860,13 +871,13 @@ class Animexin : MainAPI() {
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V8_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
+            "ANIMEXIN_V9_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
                 "indo=$indoCount english=$englishCount rejected=${discovery.rejectedCount} " +
                 "samples=${discovery.rejectedSamples.joinToString(" || ")}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Animexin", "ANIMEXIN_V8_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
+            Log.w("Animexin", "ANIMEXIN_V9_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
             return false
         }
 
@@ -898,7 +909,7 @@ class Animexin : MainAPI() {
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V8_DONE players=${players.size} accepted=${acceptedCount.get()} " +
+            "ANIMEXIN_V9_DONE players=${players.size} accepted=${acceptedCount.get()} " +
                 "dropBelow720=${droppedBelow720.get()} dropUnknown=${droppedUnknown.get()} success=$success"
         )
 
