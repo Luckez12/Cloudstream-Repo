@@ -24,7 +24,7 @@ import javax.crypto.spec.SecretKeySpec
 class MovieboxProvider : MainAPI() {
 
     override var mainUrl = "https://movieboxhd.net"
-    override var name = "MovieBox 👾 v13"
+    override var name = "MovieBox 👾 v14"
     override var lang = "en"
 
     override val instantLinkLoading = true
@@ -99,25 +99,6 @@ class MovieboxProvider : MainAPI() {
     private var mobileAuthToken: String? = null
 
     private val mobileRequestTimeoutSeconds = 6L
-
-    /*
-     * Playback compatibility path. Search uses the signed Android API, but
-     * playback is intentionally kept on the provider's original H5 flow.
-     * Do not reuse the search/mobile headers for these legacy play requests.
-     */
-    private val legacyPlayHosts = listOf(
-        "https://moviebox.ph",
-        "https://moviebox.pk",
-        "https://moviebox.ng",
-        "https://filmboom.top"
-    )
-
-    private val legacyPlayHeaders = mapOf(
-        "Accept" to "application/json",
-        "Accept-Language" to "en-US,en;q=0.9",
-        "X-Client-Info" to "{\"timezone\":\"Asia/Kuala_Lumpur\"}",
-        "User-Agent" to "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36"
-    )
 
     private val searchHostTimeoutSeconds = 4L
     private val detailHostTimeoutSeconds = 5L
@@ -602,14 +583,14 @@ class MovieboxProvider : MainAPI() {
 
                 Log.i(
                     "MovieBox",
-                    "MOVIEBOX_V13_SEARCH host=$host http=${response.code} api=$apiCode parsed=$parsedOk items=${items.size} bytes=${raw.length} query=${query.trim()}"
+                    "MOVIEBOX_V10_SEARCH host=$host http=${response.code} api=$apiCode parsed=$parsedOk items=${items.size} bytes=${raw.length} query=${query.trim()}"
                 )
 
                 if (!parsedOk) {
                     val prefix = raw.take(220).replace(Regex("\\s+"), " ")
                     Log.w(
                         "MovieBox",
-                        "MOVIEBOX_V13_SEARCH_PARSE_FAIL host=$host http=${response.code} bytes=${raw.length} body=$prefix"
+                        "MOVIEBOX_V10_SEARCH_PARSE_FAIL host=$host http=${response.code} bytes=${raw.length} body=$prefix"
                     )
                 }
 
@@ -622,13 +603,13 @@ class MovieboxProvider : MainAPI() {
             } catch (error: Throwable) {
                 Log.w(
                     "MovieBox",
-                    "MOVIEBOX_V13_SEARCH_FAIL host=$host type=${error::class.simpleName}"
+                    "MOVIEBOX_V10_SEARCH_FAIL host=$host type=${error::class.simpleName}"
                 )
             }
         }
 
         if (sawAuthFailure && retryAuthOnce) {
-            Log.w("MovieBox", "MOVIEBOX_V13_SEARCH_REAUTH query=${query.trim()}")
+            Log.w("MovieBox", "MOVIEBOX_V10_SEARCH_REAUTH query=${query.trim()}")
             mobileAuthToken = null
             preferredMobileHost = null
             return raceSearchHosts(query, retryAuthOnce = false)
@@ -696,7 +677,7 @@ class MovieboxProvider : MainAPI() {
         // not search, so avoiding H5 here removes dead-host delay and noise.
         val mobileResult = raceSearchHosts(query)
         if (mobileResult == null) {
-            Log.w("MovieBox", "MOVIEBOX_V13_SEARCH_EMPTY query=${query.trim()}")
+            Log.w("MovieBox", "MOVIEBOX_V10_SEARCH_EMPTY query=${query.trim()}")
             return emptyList()
         }
 
@@ -840,20 +821,29 @@ class MovieboxProvider : MainAPI() {
         media: LoadData,
         subjectId: String
     ): String {
-        val detailPath = media.detailPath.orEmpty()
-        return if (detailPath.isNotBlank()) {
-            "$host/spa/videoPlayPage/movies/$detailPath?id=$subjectId&type=/movie/detail&lang=en"
-        } else {
-            "$host/"
-        }
+        val detailPath = media.detailPath.orEmpty().trim().trim('/')
+        val slug = detailPath.split('/').lastOrNull().orEmpty()
+
+        // Current H5 client sends the play request with /movies/{slug} as
+        // Referer. subjectId belongs in the API query, not in the Referer.
+        return if (slug.isNotBlank()) "$host/movies/$slug" else "$host/"
     }
 
-    private fun orderedLegacyPlayHosts(seedHost: String? = null): List<String> = buildList {
-        seedHost
-            ?.takeIf { it in legacyPlayHosts }
-            ?.let { add(it) }
-        legacyPlayHosts.forEach { host ->
-            if (!contains(host)) add(host)
+    private suspend fun warmH5Session(host: String) {
+        try {
+            val response = app.get(
+                "$host/wefeed-h5-bff/app/get-latest-app-pkgs?app_name=moviebox",
+                headers = commonHeaders,
+                referer = "$host/",
+                timeout = 3L
+            )
+            Log.i("MovieBox", "MOVIEBOX_H5_SESSION host=$host http=${response.code}")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            // Cookie bootstrap is best effort. Some mirrors set the session
+            // cookie directly on the play request.
+            Log.w("MovieBox", "MOVIEBOX_H5_SESSION_FAIL host=$host type=${error::class.simpleName}")
         }
     }
 
@@ -863,51 +853,53 @@ class MovieboxProvider : MainAPI() {
         season: Int,
         episode: Int
     ): List<ResolvedStream> {
-        val resolved = mutableListOf<ResolvedStream>()
-
-        for (host in orderedLegacyPlayHosts(media.apiHost)) {
+        /*
+         * These domains are mirrors of the same H5 backend. Once one host
+         * returns a non-empty stream list, use that complete list immediately.
+         * Checking every mirror after success only duplicates links and adds
+         * several seconds to source loading.
+         */
+        for (host in orderedWebHosts(media.apiHost)) {
             try {
+                warmH5Session(host)
+
                 val referer = buildPlayReferer(
                     host = host,
                     media = media,
                     subjectId = subjectId
                 )
 
-                val response = app.get(
+                val streams = app.get(
                     "$host/wefeed-h5-bff/web/subject/play?subjectId=$subjectId&se=$season&ep=$episode",
-                    headers = legacyPlayHeaders,
+                    headers = commonHeaders,
                     referer = referer,
                     timeout = playHostTimeoutSeconds
-                )
-                val streams = response.parsedSafe<Media>()
+                ).parsedSafe<Media>()
                     ?.data
                     ?.streams
                     .orEmpty()
                     .filter { !it.url.isNullOrBlank() }
 
-                Log.i(
-                    "MovieBox",
-                    "MOVIEBOX_V13_PLAY host=$host http=${response.code} streams=${streams.size} se=$season ep=$episode"
-                )
-
-                streams.forEach { stream ->
-                    resolved += ResolvedStream(
-                        host = host,
-                        referer = referer,
-                        stream = stream
-                    )
+                if (streams.isNotEmpty()) {
+                    preferredWebHost = host
+                    Log.i("MovieBox", "MOVIEBOX_PLAY host=$host streams=${streams.size} se=$season ep=$episode")
+                    return streams.map { stream ->
+                        ResolvedStream(
+                            host = host,
+                            referer = referer,
+                            stream = stream
+                        )
+                    }.distinctBy { it.stream.url }
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                Log.w(
-                    "MovieBox",
-                    "MOVIEBOX_V13_PLAY_FAIL host=$host type=${error::class.simpleName}"
-                )
+                Log.w("MovieBox", "MOVIEBOX_PLAY_FAIL host=$host type=${error::class.simpleName}")
             }
         }
 
-        return resolved.distinctBy { it.stream.url }
+        Log.w("MovieBox", "MOVIEBOX_PLAY_EMPTY subject=$subjectId se=$season ep=$episode")
+        return emptyList()
     }
 
     private fun allowedSubtitleLanguage(caption: Media.Data.Captions): String? {
@@ -963,22 +955,27 @@ class MovieboxProvider : MainAPI() {
     ): List<Media.Data.Captions> {
         val captions = mutableListOf<Media.Data.Captions>()
 
+        /*
+         * Caption metadata is keyed by stream id + format. Try the stream's
+         * origin host first, then fall back only when that host returns no
+         * usable EN/MS/ID captions. Do not query every mirror after success.
+         */
         val captionSeeds = seeds
             .filter {
                 !it.stream.id.isNullOrBlank() &&
                     !it.stream.format.isNullOrBlank()
             }
-            .distinctBy { it.host }
+            .distinctBy { "${it.stream.id}|${it.stream.format}" }
 
         for (seed in captionSeeds) {
             val streamId = seed.stream.id ?: continue
             val format = seed.stream.format ?: continue
 
-            for (host in orderedLegacyPlayHosts(seed.host)) {
+            for (host in orderedWebHosts(seed.host)) {
                 try {
                     val hostCaptions = app.get(
                         "$host/wefeed-h5-bff/web/subject/caption?format=$format&id=$streamId&subjectId=$subjectId",
-                        headers = legacyPlayHeaders,
+                        headers = commonHeaders,
                         referer = "$host/",
                         timeout = captionHostTimeoutSeconds
                     ).parsedSafe<Media>()
@@ -990,11 +987,15 @@ class MovieboxProvider : MainAPI() {
                                 allowedSubtitleLanguage(caption) != null
                         }
 
-                    captions += hostCaptions
+                    if (hostCaptions.isNotEmpty()) {
+                        captions += hostCaptions
+                        Log.i("MovieBox", "MOVIEBOX_CAPTION host=$host count=${hostCaptions.size}")
+                        break
+                    }
                 } catch (error: CancellationException) {
                     throw error
-                } catch (_: Throwable) {
-                    // Subtitle mirrors are independent of playback.
+                } catch (error: Throwable) {
+                    Log.w("MovieBox", "MOVIEBOX_CAPTION_FAIL host=$host type=${error::class.simpleName}")
                 }
             }
         }
@@ -1019,6 +1020,12 @@ class MovieboxProvider : MainAPI() {
         val season = media.season ?: 0
         val episode = media.episode ?: 0
 
+        /*
+         * Compatibility path:
+         * - no manual child-task cancellation machinery
+         * - every MovieBox web mirror is checked
+         * - unique streams from every successful host are emitted
+         */
         val resolvedStreams = loadPlayHosts(
             media = media,
             subjectId = subjectId,
@@ -1026,10 +1033,7 @@ class MovieboxProvider : MainAPI() {
             episode = episode
         )
 
-        if (resolvedStreams.isEmpty()) {
-            Log.w("MovieBox", "MOVIEBOX_V13_PLAY_EMPTY subject=$subjectId se=$season ep=$episode")
-            return false
-        }
+        if (resolvedStreams.isEmpty()) return false
 
         resolvedStreams
             .sortedByDescending {
@@ -1038,6 +1042,11 @@ class MovieboxProvider : MainAPI() {
             .forEach { resolved ->
                 val source = resolved.stream
                 val streamUrl = source.url ?: return@forEach
+
+                Log.i(
+                    "MovieBox",
+                    "MOVIEBOX_V14_EMIT apiHost=${resolved.host} quality=${source.resolutions} cdn=${runCatching { URI(streamUrl).host }.getOrNull()} finalHeaders=none"
+                )
 
                 callback.invoke(
                     newExtractorLink(
@@ -1051,10 +1060,14 @@ class MovieboxProvider : MainAPI() {
                         streamUrl,
                         INFER_TYPE
                     ) {
-                        // This is intentionally the original playback contract:
-                        // Referer + quality only. Do not inject search/mobile UA
-                        // or Origin headers into the CDN request.
-                        this.referer = resolved.referer
+                        /*
+                         * Important: the H5 page Referer belongs to the API
+                         * request that resolves the signed URL. The current
+                         * MovieBox SDK downloads the signed CDN URL directly
+                         * and does not forward the H5 Referer or SDK UA to the
+                         * CDN. Forwarding those headers caused 403/429 in
+                         * Cloudstream on bcdn*.hakunaymatata.com.
+                         */
                         this.quality = getQualityFromName(source.resolutions)
                     }
                 )
