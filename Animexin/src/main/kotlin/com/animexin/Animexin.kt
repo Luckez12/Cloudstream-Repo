@@ -21,8 +21,8 @@ class Animexin : MainAPI() {
         "anime/?sub=raw" to "Anime (RAW)",
     )
 
-    // AnimeXin and AniChin use a very similar WordPress theme.
-    // Posters are commonly lazy-loaded, so src can be only a placeholder.
+    // AnimeXin uses lazy-loaded WordPress images. The real poster can live in
+    // data-* attributes while src contains a placeholder.
     private fun Element.getImageUrl(): String? {
         return listOf(
             attr("data-src"),
@@ -36,7 +36,7 @@ class Animexin : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-val document = app.get("$mainUrl/${request.data}&page=$page").documentLarge
+val document = app.get("$mainUrl/${request.data}&page=$page").document
         val home     = document.select("div.listupd > article").mapNotNull { it.toSearchResult() }
 
         return newHomePageResponse(
@@ -62,25 +62,23 @@ val document = app.get("$mainUrl/${request.data}&page=$page").documentLarge
 
 
     override suspend fun search(query: String,page: Int): SearchResponseList {
-        val document = app.get("${mainUrl}/page/$page/?s=$query").documentLarge
+        val document = app.get("${mainUrl}/page/$page/?s=$query").document
         val results = document.select("div.listupd > article").mapNotNull { it.toSearchResult() }.toNewSearchResponseList()
         return results
     }
 
     @Suppress("SuspiciousIndentation")
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).documentLarge
+        val document = app.get(url).document
         val title = document.selectFirst("h1.entry-title")?.text()?.trim().toString()
         val href=document.selectFirst("div.eplister > ul > li a")?.attr("href") ?:""
         val poster = (
-            document
-                .selectFirst("div.thumb img, div.ime img, img.wp-post-image")
+            document.selectFirst("div.thumb img, div.ime img, img.wp-post-image")
                 ?.getImageUrl()
-                ?: document
-                    .selectFirst("meta[property=og:image]")
+                ?: document.selectFirst("meta[property=og:image]")
                     ?.attr("content")
                     ?.trim()
-        ).orEmpty()
+        )?.let { fixUrlNull(it) }
         val description = document.selectFirst("div.entry-content")?.text()?.trim()
         val type=document.selectFirst(".spe")?.text().toString()
         val tvtag=if (type.contains("Movie")) TvType.Movie else TvType.TvSeries
@@ -92,7 +90,7 @@ val document = app.get("$mainUrl/${request.data}&page=$page").documentLarge
                 val posterr = info.selectFirst("a img")
                     ?.getImageUrl()
                     ?.let { fixUrlNull(it) }
-                    ?: fixUrlNull(poster)
+                    ?: poster
 
                 val epText = info.selectFirst("div.epl-num")?.text().orEmpty()
                 val epnum = episodeRegex.find(epText)?.groupValues?.get(1)?.toIntOrNull()
@@ -105,19 +103,19 @@ val document = app.get("$mainUrl/${request.data}&page=$page").documentLarge
             }
 
             newTvSeriesLoadResponse(title, url, TvType.Anime, episodes.reversed()) {
-                this.posterUrl = fixUrlNull(poster)
+                this.posterUrl = poster
                 this.plot = description
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, href) {
-                this.posterUrl = fixUrlNull(poster)
+                this.posterUrl = poster
                 this.plot = description
             }
         }
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val document = app.get(data).documentLarge
+        val document = app.get(data).document
         document.select(".mobius option").forEach { server->
             val base64 = server.attr("value")
             val decoded=base64Decode(base64)
