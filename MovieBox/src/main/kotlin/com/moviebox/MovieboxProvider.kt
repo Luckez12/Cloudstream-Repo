@@ -1,5 +1,6 @@
 package com.moviebox
 
+import android.util.Base64
 import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
@@ -10,7 +11,13 @@ import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.nicehttp.RequestBodyTypes
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.URI
+import java.net.URLDecoder
+import java.security.MessageDigest
+import java.util.UUID
 import java.util.concurrent.CancellationException
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 class MovieboxProvider : MainAPI() {
 
@@ -57,6 +64,37 @@ class MovieboxProvider : MainAPI() {
      */
     @Volatile
     private var preferredWebHost: String? = null
+
+    /*
+     * Current MovieBox search no longer lives on the H5 web API.
+     * Search is served by the signed Android mobile API host pool.
+     */
+    private val mobileHosts = listOf(
+        "https://api6.aoneroom.com",
+        "https://api5.aoneroom.com",
+        "https://api4.aoneroom.com",
+        "https://api4sg.aoneroom.com",
+        "https://api3.aoneroom.com",
+        "https://api6sg.aoneroom.com",
+        "https://api.inmoviebox.com"
+    )
+
+    private val mobileSearchPath = "/wefeed-mobile-bff/subject-api/search"
+    private val mobileBootstrapPath = "/wefeed-mobile-bff/tab-operating"
+    private val mobileSigningSecretB64 = "76iRl07s0xSN9jqmEWAt79EBJZulIQIsV64FZr2O"
+    private val mobileUserAgent =
+        "com.community.oneroom/50020044 (Linux; U; Android 13; en_US; 23078RKD5C; Build/TQ2A.230405.003; Cronet/135.0.7012.3)"
+
+    private val mobileDeviceId = UUID.randomUUID().toString().replace("-", "").lowercase()
+    private val mobileGaid = UUID.randomUUID().toString()
+
+    @Volatile
+    private var preferredMobileHost: String? = null
+
+    @Volatile
+    private var mobileAuthToken: String? = null
+
+    private val mobileRequestTimeoutSeconds = 6L
 
     private val searchHostTimeoutSeconds = 4L
     private val detailHostTimeoutSeconds = 5L
@@ -164,44 +202,248 @@ class MovieboxProvider : MainAPI() {
         val detail: MediaDetail.Data
     )
 
-    private suspend fun raceSearchHosts(
-        query: String
-    ): SearchRaceResult? {
-        val hosts = orderedWebHosts()
-        if (hosts.isEmpty()) return null
+    private fun md5Hex(bytes: ByteArray): String {
+        return MessageDigest.getInstance("MD5")
+            .digest(bytes)
+            .joinToString("") { byte ->
+                (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+            }
+    }
 
-        val requestJson = mapOf(
+    private fun mobileClientInfo(): String = linkedMapOf<String, Any>(
+        "package_name" to "com.community.oneroom",
+        "version_name" to "3.0.03.0529.03",
+        "version_code" to 50020044,
+        "os" to "android",
+        "os_version" to "13",
+        "install_ch" to "ps",
+        "device_id" to mobileDeviceId,
+        "install_store" to "ps",
+        "gaid" to mobileGaid,
+        "brand" to "Redmi",
+        "model" to "23078RKD5C",
+        "system_language" to "en",
+        "net" to "NETWORK_WIFI",
+        "region" to "US",
+        "timezone" to "America/New_York",
+        "sp_code" to "40401",
+        "X-Play-Mode" to "2"
+    ).toJson()
+
+    private fun canonicalMobileUrl(url: String): String {
+        val uri = URI(url)
+        val path = uri.rawPath?.takeIf { it.isNotBlank() } ?: "/"
+        val rawQuery = uri.rawQuery.orEmpty()
+        if (rawQuery.isBlank()) return path
+
+        val sorted = rawQuery
+            .split("&")
+            .filter { it.isNotEmpty() }
+            .map { pair ->
+                val keyRaw = pair.substringBefore("=")
+                val valueRaw = pair.substringAfter("=", "")
+                val key = URLDecoder.decode(keyRaw, "UTF-8")
+                val value = URLDecoder.decode(valueRaw, "UTF-8")
+                key to value
+            }
+            .sortedBy { it.first }
+
+        return "$path?" + sorted.joinToString("&") { (key, value) -> "$key=$value" }
+    }
+
+    private fun buildMobileHeaders(
+        method: String,
+        url: String,
+        body: String?,
+        authToken: String?
+    ): Map<String, String> {
+        val accept = "application/json"
+        val contentType = if (body != null) {
+            "application/json; charset=utf-8"
+        } else {
+            "application/json"
+        }
+        val timestamp = System.currentTimeMillis()
+        val timestampText = timestamp.toString()
+        val clientTokenHash = md5Hex(timestampText.reversed().toByteArray(Charsets.UTF_8))
+        val clientToken = "$timestampText,$clientTokenHash"
+
+        var bodyHash = ""
+        var bodyLength = ""
+        if (body != null) {
+            val bytes = body.toByteArray(Charsets.UTF_8)
+            bodyLength = bytes.size.toString()
+            bodyHash = md5Hex(bytes.copyOfRange(0, minOf(bytes.size, 102400)))
+        }
+
+        val canonical = listOf(
+            method.uppercase(),
+            accept,
+            contentType,
+            bodyLength,
+            timestampText,
+            bodyHash,
+            canonicalMobileUrl(url)
+        ).joinToString("\n")
+
+        val padding = (4 - mobileSigningSecretB64.length % 4) % 4
+        val secret = mobileSigningSecretB64 + "=".repeat(padding)
+        val secretBytes = Base64.decode(secret, Base64.DEFAULT)
+        val mac = Mac.getInstance("HmacMD5")
+        mac.init(SecretKeySpec(secretBytes, "HmacMD5"))
+        val signatureBase64 = Base64.encodeToString(
+            mac.doFinal(canonical.toByteArray(Charsets.UTF_8)),
+            Base64.NO_WRAP
+        )
+
+        return buildMap {
+            put("User-Agent", mobileUserAgent)
+            put("Accept", accept)
+            put("Content-Type", contentType)
+            put("Connection", "keep-alive")
+            put("X-Client-Token", clientToken)
+            put("x-tr-signature", "$timestampText|2|$signatureBase64")
+            put("X-Client-Info", mobileClientInfo())
+            put("X-Client-Status", "0")
+            put("X-Play-Mode", "2")
+            put("X-Forwarded-For", "197.210.65.1")
+            put("Cache-Control", "no-cache, no-store, must-revalidate")
+            put("Pragma", "no-cache")
+            put("Expires", "0")
+            authToken?.takeIf { it.isNotBlank() }?.let { token ->
+                put("Authorization", "Bearer $token")
+            }
+        }
+    }
+
+    private fun tokenFromXUser(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            parseJson<XUserHeader>(raw).token?.takeIf { it.isNotBlank() }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun orderedMobileHosts(): List<String> = buildList {
+        preferredMobileHost
+            ?.takeIf { it.isNotBlank() }
+            ?.let { add(it) }
+        mobileHosts.forEach { host ->
+            if (!contains(host)) add(host)
+        }
+    }
+
+    private suspend fun bootstrapMobileAuth(): String? {
+        mobileAuthToken?.takeIf { it.isNotBlank() }?.let { return it }
+
+        for (host in orderedMobileHosts()) {
+            val url = "$host$mobileBootstrapPath?page=1&tabId=0&version="
+            try {
+                val response = app.get(
+                    url,
+                    headers = buildMobileHeaders(
+                        method = "GET",
+                        url = url,
+                        body = null,
+                        authToken = null
+                    ),
+                    timeout = mobileRequestTimeoutSeconds
+                )
+
+                val token = tokenFromXUser(response.headers["x-user"])
+                Log.i(
+                    "MovieBox",
+                    "MOVIEBOX_AUTH_BOOTSTRAP host=$host http=${response.code} token=${!token.isNullOrBlank()}"
+                )
+
+                if (!token.isNullOrBlank()) {
+                    mobileAuthToken = token
+                    preferredMobileHost = host
+                    return token
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(
+                    "MovieBox",
+                    "MOVIEBOX_AUTH_BOOTSTRAP_FAIL host=$host type=${error::class.simpleName}"
+                )
+            }
+        }
+
+        Log.w("MovieBox", "MOVIEBOX_AUTH_BOOTSTRAP_EMPTY")
+        return null
+    }
+
+    private suspend fun raceSearchHosts(
+        query: String,
+        retryAuthOnce: Boolean = true
+    ): SearchRaceResult? {
+        val authToken = bootstrapMobileAuth() ?: return null
+        val requestJson = linkedMapOf<String, Any>(
             "keyword" to query.trim(),
             "page" to 1,
-            "perPage" to 24,
+            "perPage" to 20,
             "subjectType" to 0
         ).toJson()
 
-        for (host in hosts) {
+        var sawAuthFailure = false
+
+        for (host in orderedMobileHosts()) {
+            val url = "$host$mobileSearchPath"
             try {
                 val requestBody = requestJson.toRequestBody(
-                    RequestBodyTypes.JSON.toMediaTypeOrNull()
+                    "application/json; charset=utf-8".toMediaTypeOrNull()
+                )
+                val response = app.post(
+                    url,
+                    headers = buildMobileHeaders(
+                        method = "POST",
+                        url = url,
+                        body = requestJson,
+                        authToken = authToken
+                    ),
+                    requestBody = requestBody,
+                    timeout = mobileRequestTimeoutSeconds
                 )
 
-                val items = app.post(
-                    "$host/wefeed-h5-bff/web/subject/search",
-                    headers = commonHeaders,
-                    referer = "$host/",
-                    requestBody = requestBody,
-                    timeout = searchHostTimeoutSeconds
-                ).parsedSafe<Media>()
-                    ?.data
-                    ?.items
-                    .orEmpty()
+                tokenFromXUser(response.headers["x-user"])?.let { freshToken ->
+                    mobileAuthToken = freshToken
+                }
 
-                if (items.isNotEmpty()) {
+                if (response.code == 401 || response.code == 403 || response.code == 440 || response.code == 530) {
+                    sawAuthFailure = true
+                    Log.w("MovieBox", "MOVIEBOX_SEARCH_AUTH_REJECT host=$host http=${response.code}")
+                    continue
+                }
+
+                val parsed = response.parsedSafe<Media>()
+                val items = parsed?.data?.items.orEmpty()
+                Log.i(
+                    "MovieBox",
+                    "MOVIEBOX_SEARCH host=$host http=${response.code} api=${parsed?.code} items=${items.size} query=${query.trim()}"
+                )
+
+                if (parsed?.code == 0) {
+                    preferredMobileHost = host
                     return SearchRaceResult(host, items)
                 }
             } catch (error: CancellationException) {
                 throw error
-            } catch (_: Throwable) {
-                // Dead/blocked mirror: continue to the next host.
+            } catch (error: Throwable) {
+                Log.w(
+                    "MovieBox",
+                    "MOVIEBOX_SEARCH_FAIL host=$host type=${error::class.simpleName}"
+                )
             }
+        }
+
+        if (sawAuthFailure && retryAuthOnce) {
+            Log.w("MovieBox", "MOVIEBOX_SEARCH_REAUTH query=${query.trim()}")
+            mobileAuthToken = null
+            preferredMobileHost = null
+            return raceSearchHosts(query, retryAuthOnce = false)
         }
 
         return null
@@ -262,7 +504,7 @@ class MovieboxProvider : MainAPI() {
         if (query.isBlank()) return emptyList()
 
         val result = raceSearchHosts(query) ?: return emptyList()
-        preferredWebHost = result.host
+        preferredMobileHost = result.host
         return result.items.map { it.toSearchResponse(this) }
     }
 
@@ -655,7 +897,13 @@ class MovieboxProvider : MainAPI() {
         val apiHost: String? = null
     )
 
+    data class XUserHeader(
+        @JsonProperty("token") val token: String? = null,
+    )
+
     data class Media(
+        @JsonProperty("code") val code: Int? = null,
+        @JsonProperty("message") val message: String? = null,
         @JsonProperty("data") val data: Data? = null,
     ) {
         data class Data(

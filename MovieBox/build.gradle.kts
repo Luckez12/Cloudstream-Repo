@@ -1,7 +1,7 @@
-version = 5
+version = 6
 cloudstream {
     language = "en"
-    description = "MovieBox — Streaming Movie Subtitle Indonesia"
+    description = "MovieBox - Streaming Movie Subtitle Indonesia"
     authors = listOf("Luckez")
     status = 1
     tvTypes = listOf(
