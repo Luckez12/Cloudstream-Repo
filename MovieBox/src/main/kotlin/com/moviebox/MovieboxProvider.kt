@@ -4,6 +4,7 @@ import android.util.Base64
 import android.util.Log
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.databind.JsonNode
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
@@ -23,7 +24,7 @@ import javax.crypto.spec.SecretKeySpec
 class MovieboxProvider : MainAPI() {
 
     override var mainUrl = "https://movieboxhd.net"
-    override var name = "MovieBox 👾"
+    override var name = "MovieBox 👾 v9"
     override var lang = "en"
 
     override val instantLinkLoading = true
@@ -479,6 +480,60 @@ class MovieboxProvider : MainAPI() {
         return null
     }
 
+    private fun parseMobileSearchJson(raw: String): Pair<Int?, List<Items>>? {
+        val root = try {
+            AppUtils.tryParseJson<JsonNode>(raw)
+        } catch (_: Throwable) {
+            null
+        } ?: return null
+
+        val code = root.get("code")?.takeIf { !it.isNull }?.asInt()
+        val dataNode = root.get("data") ?: root
+        val itemsNode = dataNode.get("items")
+            ?: dataNode.get("list")
+            ?: root.get("items")
+            ?: root.get("list")
+
+        if (itemsNode == null || !itemsNode.isArray) {
+            val rootKeys = root.fieldNames().asSequence().take(12).joinToString(",")
+            val dataKeys = if (dataNode.isObject) {
+                dataNode.fieldNames().asSequence().take(12).joinToString(",")
+            } else ""
+            Log.w(
+                "MovieBox",
+                "MOVIEBOX_SEARCH_SHAPE code=$code rootKeys=$rootKeys dataKeys=$dataKeys"
+            )
+            return code to emptyList()
+        }
+
+        val items = itemsNode.mapNotNull { node ->
+            val idNode = node.get("subjectId") ?: node.get("subject_id") ?: return@mapNotNull null
+            val titleNode = node.get("title") ?: node.get("name") ?: return@mapNotNull null
+            val id = idNode.asText().takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val title = titleNode.asText().takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val typeNode = node.get("subjectType") ?: node.get("subject_type")
+            val subjectType = when {
+                typeNode == null || typeNode.isNull -> null
+                typeNode.isNumber -> typeNode.asInt()
+                else -> typeNode.asText().toIntOrNull()
+            }
+            val coverNode = node.get("cover")
+            val coverUrl = when {
+                coverNode == null || coverNode.isNull -> node.get("poster")?.asText()
+                coverNode.isTextual -> coverNode.asText()
+                else -> coverNode.get("url")?.asText()
+            }?.takeIf { it.isNotBlank() }
+
+            Items(
+                subjectId = id,
+                subjectType = subjectType,
+                title = title,
+                cover = coverUrl?.let { Items.Cover(url = it) }
+            )
+        }
+        return code to items
+    }
+
     private suspend fun raceSearchHosts(
         query: String,
         retryAuthOnce: Boolean = true
@@ -496,9 +551,6 @@ class MovieboxProvider : MainAPI() {
         for (host in orderedMobileHosts()) {
             val url = "$host$mobileSearchPath"
             try {
-                val requestBody = requestJson.toRequestBody(
-                    "application/json; charset=utf-8".toMediaTypeOrNull()
-                )
                 val response = app.post(
                     url,
                     headers = buildMobileHeaders(
@@ -507,7 +559,9 @@ class MovieboxProvider : MainAPI() {
                         body = requestJson,
                         authToken = authToken
                     ),
-                    requestBody = requestBody,
+                    requestBody = requestJson.toRequestBody(
+                        "application/json; charset=utf-8".toMediaTypeOrNull()
+                    ),
                     timeout = mobileRequestTimeoutSeconds
                 )
 
@@ -522,22 +576,21 @@ class MovieboxProvider : MainAPI() {
                 }
 
                 val raw = response.text
-                val envelope = parseJsonSafe<MobileSearchEnvelope>(raw)
-                val directData = if (envelope == null) parseJsonSafe<MobileSearchData>(raw) else null
-                val mobileItems = envelope?.data?.items ?: directData?.items
-                val items = mobileItems.orEmpty().mapNotNull { it.toItem() }
-                val apiCode = envelope?.code
+                val parsed = parseMobileSearchJson(raw)
+                val apiCode = parsed?.first
+                val items = parsed?.second.orEmpty()
+                val parsedOk = parsed != null
 
-                val parsedOk = envelope != null || directData != null
                 Log.i(
                     "MovieBox",
-                    "MOVIEBOX_SEARCH host=$host http=${response.code} api=$apiCode parsed=$parsedOk items=${items.size} query=${query.trim()}"
+                    "MOVIEBOX_V9_SEARCH host=$host http=${response.code} api=$apiCode parsed=$parsedOk items=${items.size} bytes=${raw.length} query=${query.trim()}"
                 )
+
                 if (!parsedOk) {
-                    val prefix = raw.take(180).replace(Regex("\\s+"), " ")
+                    val prefix = raw.take(220).replace(Regex("\s+"), " ")
                     Log.w(
                         "MovieBox",
-                        "MOVIEBOX_SEARCH_PARSE_FAIL host=$host http=${response.code} bytes=${raw.length} body=$prefix"
+                        "MOVIEBOX_V9_SEARCH_PARSE_FAIL host=$host http=${response.code} bytes=${raw.length} body=$prefix"
                     )
                 }
 
@@ -550,13 +603,13 @@ class MovieboxProvider : MainAPI() {
             } catch (error: Throwable) {
                 Log.w(
                     "MovieBox",
-                    "MOVIEBOX_SEARCH_FAIL host=$host type=${error::class.simpleName}"
+                    "MOVIEBOX_V9_SEARCH_FAIL host=$host type=${error::class.simpleName}"
                 )
             }
         }
 
         if (sawAuthFailure && retryAuthOnce) {
-            Log.w("MovieBox", "MOVIEBOX_SEARCH_REAUTH query=${query.trim()}")
+            Log.w("MovieBox", "MOVIEBOX_V9_SEARCH_REAUTH query=${query.trim()}")
             mobileAuthToken = null
             preferredMobileHost = null
             return raceSearchHosts(query, retryAuthOnce = false)
@@ -619,20 +672,18 @@ class MovieboxProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
 
-        // The current MovieBox architecture uses the signed Android API for
-        // search. H5 is retained only as a last-resort compatibility fallback.
-        raceSearchHosts(query)?.let { mobileResult ->
-            preferredMobileHost = mobileResult.host
-            return mobileResult.items
-                .filter { !it.subjectId.isNullOrBlank() && !it.title.isNullOrBlank() }
-                .map { it.toSearchResponse(this) }
+        // v9 deliberately uses only the signed Android search endpoint.
+        // The current upstream architecture documents H5 for homepage data,
+        // not search, so avoiding H5 here removes dead-host delay and noise.
+        val mobileResult = raceSearchHosts(query)
+        if (mobileResult == null) {
+            Log.w("MovieBox", "MOVIEBOX_V9_SEARCH_EMPTY query=${query.trim()}")
+            return emptyList()
         }
 
-        Log.w("MovieBox", "MOVIEBOX_SEARCH_MOBILE_EMPTY query=${query.trim()} fallback=h5")
-        return raceH5SearchHosts(query)
-            ?.also { preferredWebHost = it.host }
-            ?.items
-            .orEmpty()
+        preferredMobileHost = mobileResult.host
+        return mobileResult.items
+            .filter { !it.subjectId.isNullOrBlank() && !it.title.isNullOrBlank() }
             .map { it.toSearchResponse(this) }
     }
 
