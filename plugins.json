@@ -85,10 +85,10 @@
     },
     {
         "iconUrl": "https://movieboxph.app/wp-content/uploads/2025/11/Movie-Box-icon.webp",
-        "fileHash": "sha256-37e6b17c0cbcd2f9d1fe3b2bb214c06a74d30379d51b0a7dc247627786850ca3",
+        "fileHash": "sha256-546143f696958bb183593111e67e5542285969b138fa54d6722e5655eb597595",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 61024,
+        "fileSize": 60389,
         "status": 1,
         "language": "en",
         "authors": [
@@ -100,7 +100,7 @@
             "Anime",
             "AsianDrama"
         ],
-        "version": 10,
+        "version": 11,
         "internalName": "MovieBox",
         "description": "MovieBox - Streaming Movie Subtitle Indonesia",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/MovieBox.cs3",
