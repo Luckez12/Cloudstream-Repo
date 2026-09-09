@@ -8,7 +8,7 @@ import com.lagradost.cloudstream3.extractors.Dailymotion
 @CloudstreamPlugin
 class AnimexinPlugin: BasePlugin() {
     override fun load() {
-        Log.w("Animexin", "ANIMEXIN_V7_LOADED version=7 playerFlow=hardsub-id-en minQuality=720")
+        Log.w("Animexin", "ANIMEXIN_V8_LOADED version=8 playerFlow=hardsub-id-en minQuality=720 compilefix=no-softsubs")
         registerMainAPI(Animexin())
         registerExtractorAPI(Vtbe())
         registerExtractorAPI(waaw())

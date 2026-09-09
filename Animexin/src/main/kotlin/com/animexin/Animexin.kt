@@ -838,7 +838,7 @@ class Animexin : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.w("Animexin", "ANIMEXIN_V7_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en")
+        Log.w("Animexin", "ANIMEXIN_V8_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en")
 
         val document = try {
             withTimeoutOrNull(12_000L) {
@@ -849,7 +849,7 @@ class Animexin : MainAPI() {
         } catch (_: Exception) {
             null
         } ?: run {
-            Log.w("Animexin", "ANIMEXIN_V7_LOADLINKS pageFetch=false")
+            Log.w("Animexin", "ANIMEXIN_V8_LOADLINKS pageFetch=false")
             return false
         }
 
@@ -860,13 +860,13 @@ class Animexin : MainAPI() {
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V7_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
+            "ANIMEXIN_V8_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
                 "indo=$indoCount english=$englishCount rejected=${discovery.rejectedCount} " +
                 "samples=${discovery.rejectedSamples.joinToString(" || ")}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Animexin", "ANIMEXIN_V7_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
+            Log.w("Animexin", "ANIMEXIN_V8_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
             return false
         }
 
@@ -898,7 +898,7 @@ class Animexin : MainAPI() {
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V7_DONE players=${players.size} accepted=${acceptedCount.get()} " +
+            "ANIMEXIN_V8_DONE players=${players.size} accepted=${acceptedCount.get()} " +
                 "dropBelow720=${droppedBelow720.get()} dropUnknown=${droppedUnknown.get()} success=$success"
         )
 
