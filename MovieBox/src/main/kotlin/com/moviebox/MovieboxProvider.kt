@@ -207,12 +207,6 @@ class MovieboxProvider : MainAPI() {
         val detail: MediaDetail.Data
     )
 
-    private inline fun <reified T : Any> parseJsonSafe(raw: String): T? = try {
-        parseJson<T>(raw)
-    } catch (_: Throwable) {
-        null
-    }
-
     /*
      * Mobile search currently returns some metadata fields with inconsistent
      * scalar types between titles, for example duration may be a formatted
@@ -583,14 +577,14 @@ class MovieboxProvider : MainAPI() {
 
                 Log.i(
                     "MovieBox",
-                    "MOVIEBOX_V10_SEARCH host=$host http=${response.code} api=$apiCode parsed=$parsedOk items=${items.size} bytes=${raw.length} query=${query.trim()}"
+                    "MOVIEBOX_V11_SEARCH host=$host http=${response.code} api=$apiCode parsed=$parsedOk items=${items.size} bytes=${raw.length} query=${query.trim()}"
                 )
 
                 if (!parsedOk) {
-                    val prefix = raw.take(220).replace(Regex("\\s+"), " ")
+                    val prefix = raw.take(220).replace(Regex("""\s+"""), " ")
                     Log.w(
                         "MovieBox",
-                        "MOVIEBOX_V10_SEARCH_PARSE_FAIL host=$host http=${response.code} bytes=${raw.length} body=$prefix"
+                        "MOVIEBOX_V11_SEARCH_PARSE_FAIL host=$host http=${response.code} bytes=${raw.length} body=$prefix"
                     )
                 }
 
@@ -603,13 +597,13 @@ class MovieboxProvider : MainAPI() {
             } catch (error: Throwable) {
                 Log.w(
                     "MovieBox",
-                    "MOVIEBOX_V10_SEARCH_FAIL host=$host type=${error::class.simpleName}"
+                    "MOVIEBOX_V11_SEARCH_FAIL host=$host type=${error::class.simpleName}"
                 )
             }
         }
 
         if (sawAuthFailure && retryAuthOnce) {
-            Log.w("MovieBox", "MOVIEBOX_V10_SEARCH_REAUTH query=${query.trim()}")
+            Log.w("MovieBox", "MOVIEBOX_V11_SEARCH_REAUTH query=${query.trim()}")
             mobileAuthToken = null
             preferredMobileHost = null
             return raceSearchHosts(query, retryAuthOnce = false)
@@ -677,7 +671,7 @@ class MovieboxProvider : MainAPI() {
         // not search, so avoiding H5 here removes dead-host delay and noise.
         val mobileResult = raceSearchHosts(query)
         if (mobileResult == null) {
-            Log.w("MovieBox", "MOVIEBOX_V10_SEARCH_EMPTY query=${query.trim()}")
+            Log.w("MovieBox", "MOVIEBOX_V11_SEARCH_EMPTY query=${query.trim()}")
             return emptyList()
         }
 
@@ -908,7 +902,7 @@ class MovieboxProvider : MainAPI() {
                 value.trim()
                     .lowercase()
                     .replace('_', '-')
-                    .replace(Regex("\\s+"), " ")
+                    .replace(Regex("""\s+"""), " ")
             }
             .filter { it.isNotBlank() }
 
