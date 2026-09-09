@@ -68,19 +68,16 @@ subprojects {
     }
 
     dependencies {
-        val cloudstream by configurations
         val implementation by configurations
 
-        // Compile against the Cloudstream pre-release stubs. This is the current
-        // TestPlugins template flow and avoids resolving the app library via the
-        // fragile JitPack -SNAPSHOT coordinate.
-        cloudstream("com.lagradost:cloudstream3:pre-release")
+        // Current Cloudstream extension API, matching the official extensions repo.
+        implementation("com.github.recloudstream.cloudstream:library:-SNAPSHOT")
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.11")
         implementation("org.jsoup:jsoup:1.18.3")
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
         implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
-        implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
   }
 }
 
