@@ -1,5 +1,6 @@
 package com.moviebox
 
+import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
@@ -13,7 +14,7 @@ import java.util.concurrent.CancellationException
 
 class MovieboxProvider : MainAPI() {
 
-    override var mainUrl = "https://moviebox.ph"
+    override var mainUrl = "https://movieboxhd.net"
     override var name = "MovieBox 👾"
     override var lang = "en"
 
@@ -36,10 +37,12 @@ class MovieboxProvider : MainAPI() {
     private val h5ApiUrl = "https://h5-api.aoneroom.com"
 
     /*
-     * H5 web mirrors. Latency-sensitive endpoints race these mirrors in
-     * parallel so a slow/dead domain does not hold up the provider.
+     * H5 web mirrors. moviebox.ph currently redirects its public website to
+     * movieboxhd.net, so prefer the current public host first and keep the
+     * older mirrors only as fallbacks for the H5 API surface.
      */
     private val webHosts = listOf(
+        "https://movieboxhd.net",
         "https://moviebox.ph",
         "https://moviebox.pk",
         "https://moviebox.ng",
@@ -47,10 +50,10 @@ class MovieboxProvider : MainAPI() {
     )
 
     /*
-     * Fast mirror strategy:
-     * search, detail and playback query compatible H5 mirrors in parallel.
-     * The first valid response wins and the winning host is remembered as a
-     * preferred seed for later requests.
+     * Mirror strategy:
+     * search and detail try the preferred/current host first, then fall back
+     * to the remaining mirrors. The first valid response wins and the host is
+     * remembered for later requests.
      */
     @Volatile
     private var preferredWebHost: String? = null
@@ -399,13 +402,15 @@ class MovieboxProvider : MainAPI() {
     ): String {
         val detailPath = media.detailPath.orEmpty()
 
-        // MovieBox itself currently uses this /movies/... referer shape for
-        // both movie and episodic subjects, so keep it instead of guessing
-        // a separate TV path.
-        return if (detailPath.isNotBlank()) {
-            "$host/spa/videoPlayPage/movies/$detailPath?id=$subjectId&type=/movie/detail&lang=en"
+        if (detailPath.isBlank()) return "$host/"
+
+        // The current public MovieBox site uses /moviedetail/... while some
+        // older H5 mirrors still use /spa/videoPlayPage/movies/.... Keep the
+        // referer aligned with the host that supplied the API response.
+        return if (host.contains("movieboxhd.net") || host.contains("moviebox.ph")) {
+            "$host/moviedetail/$detailPath?id=$subjectId&type=/movie/detail"
         } else {
-            "$host/"
+            "$host/spa/videoPlayPage/movies/$detailPath?id=$subjectId&type=/movie/detail&lang=en"
         }
     }
 
@@ -415,8 +420,12 @@ class MovieboxProvider : MainAPI() {
         season: Int,
         episode: Int
     ): List<ResolvedStream> {
-        val resolved = mutableListOf<ResolvedStream>()
-
+        /*
+         * These domains are mirrors of the same H5 backend. Once one host
+         * returns a non-empty stream list, use that complete list immediately.
+         * Checking every mirror after success only duplicates links and adds
+         * several seconds to source loading.
+         */
         for (host in orderedWebHosts(media.apiHost)) {
             try {
                 val referer = buildPlayReferer(
@@ -436,26 +445,26 @@ class MovieboxProvider : MainAPI() {
                     .orEmpty()
                     .filter { !it.url.isNullOrBlank() }
 
-                streams.forEach { stream ->
-                    resolved += ResolvedStream(
-                        host = host,
-                        referer = referer,
-                        stream = stream
-                    )
-                }
-
                 if (streams.isNotEmpty()) {
                     preferredWebHost = host
+                    Log.i("MovieBox", "MOVIEBOX_PLAY host=$host streams=${streams.size} se=$season ep=$episode")
+                    return streams.map { stream ->
+                        ResolvedStream(
+                            host = host,
+                            referer = referer,
+                            stream = stream
+                        )
+                    }.distinctBy { it.stream.url }
                 }
             } catch (error: CancellationException) {
                 throw error
-            } catch (_: Throwable) {
-                // Keep checking every mirror. A dead host must not remove
-                // links available from another host.
+            } catch (error: Throwable) {
+                Log.w("MovieBox", "MOVIEBOX_PLAY_FAIL host=$host type=${error::class.simpleName}")
             }
         }
 
-        return resolved.distinctBy { it.stream.url }
+        Log.w("MovieBox", "MOVIEBOX_PLAY_EMPTY subject=$subjectId se=$season ep=$episode")
+        return emptyList()
     }
 
     private fun allowedSubtitleLanguage(caption: Media.Data.Captions): String? {
@@ -512,17 +521,16 @@ class MovieboxProvider : MainAPI() {
         val captions = mutableListOf<Media.Data.Captions>()
 
         /*
-         * One stream seed per origin host is enough for MovieBox caption
-         * metadata in practice, while still checking every API mirror.
-         * This keeps EN/MS/ID subtitles from a secondary host instead of
-         * stopping at the first successful response.
+         * Caption metadata is keyed by stream id + format. Try the stream's
+         * origin host first, then fall back only when that host returns no
+         * usable EN/MS/ID captions. Do not query every mirror after success.
          */
         val captionSeeds = seeds
             .filter {
                 !it.stream.id.isNullOrBlank() &&
                     !it.stream.format.isNullOrBlank()
             }
-            .distinctBy { it.host }
+            .distinctBy { "${it.stream.id}|${it.stream.format}" }
 
         for (seed in captionSeeds) {
             val streamId = seed.stream.id ?: continue
@@ -544,11 +552,15 @@ class MovieboxProvider : MainAPI() {
                                 allowedSubtitleLanguage(caption) != null
                         }
 
-                    captions += hostCaptions
+                    if (hostCaptions.isNotEmpty()) {
+                        captions += hostCaptions
+                        Log.i("MovieBox", "MOVIEBOX_CAPTION host=$host count=${hostCaptions.size}")
+                        break
+                    }
                 } catch (error: CancellationException) {
                     throw error
-                } catch (_: Throwable) {
-                    // Continue: subtitle mirrors are independent.
+                } catch (error: Throwable) {
+                    Log.w("MovieBox", "MOVIEBOX_CAPTION_FAIL host=$host type=${error::class.simpleName}")
                 }
             }
         }
@@ -610,6 +622,11 @@ class MovieboxProvider : MainAPI() {
                     ) {
                         this.referer = resolved.referer
                         this.quality = getQualityFromName(source.resolutions)
+                        this.headers = mapOf(
+                            "Accept" to "*/*",
+                            "User-Agent" to commonHeaders["User-Agent"].orEmpty(),
+                            "Origin" to resolved.host
+                        )
                     }
                 )
             }
