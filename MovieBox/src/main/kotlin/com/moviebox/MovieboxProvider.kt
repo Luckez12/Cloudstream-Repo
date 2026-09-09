@@ -44,16 +44,17 @@ class MovieboxProvider : MainAPI() {
     private val h5ApiUrl = "https://h5-api.aoneroom.com"
 
     /*
-     * H5 web mirrors. moviebox.ph currently redirects its public website to
-     * movieboxhd.net, so prefer the current public host first and keep the
-     * older mirrors only as fallbacks for the H5 API surface.
+     * Current H5 API mirrors. These are API-capable hosts, not just public
+     * landing-page domains. Search/detail/play must use this pool.
      */
     private val webHosts = listOf(
-        "https://movieboxhd.net",
-        "https://moviebox.ph",
+        "https://h5.aoneroom.com",
+        "https://movieboxapp.in",
         "https://moviebox.pk",
-        "https://moviebox.ng",
-        "https://filmboom.top"
+        "https://moviebox.ph",
+        "https://moviebox.id",
+        "https://v.moviebox.ph",
+        "https://netnaija.video"
     )
 
     /*
@@ -66,8 +67,9 @@ class MovieboxProvider : MainAPI() {
     private var preferredWebHost: String? = null
 
     /*
-     * Current MovieBox search no longer lives on the H5 web API.
-     * Search is served by the signed Android mobile API host pool.
+     * Signed Android mobile API is retained as a fallback. The current H5
+     * client still exposes /wefeed-h5-bff/web/subject/search and is simpler
+     * and more reliable for Cloudstream search.
      */
     private val mobileHosts = listOf(
         "https://api6.aoneroom.com",
@@ -112,9 +114,10 @@ class MovieboxProvider : MainAPI() {
 
     private val commonHeaders = mapOf(
         "Accept" to "application/json",
-        "Accept-Language" to "en-US,en;q=0.9",
-        "X-Client-Info" to "{\"timezone\":\"Asia/Kuala_Lumpur\"}",
-        "User-Agent" to "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36"
+        "Accept-Language" to "en-US,en;q=0.5",
+        "X-Client-Info" to "{\"timezone\":\"Africa/Nairobi\"}",
+        "User-Agent" to "moviebox-js-sdk/preview",
+        "Content-Type" to "application/json"
     )
 
     override val mainPage: List<MainPageData> = mainPageOf(
@@ -376,6 +379,52 @@ class MovieboxProvider : MainAPI() {
         return null
     }
 
+    private suspend fun raceH5SearchHosts(query: String): SearchRaceResult? {
+        val requestJson = linkedMapOf<String, Any>(
+            "keyword" to query.trim(),
+            "page" to 1,
+            "perPage" to 24,
+            "subjectType" to 0
+        ).toJson()
+
+        for (host in orderedWebHosts()) {
+            try {
+                val response = app.post(
+                    "$host/wefeed-h5-bff/web/subject/search",
+                    headers = commonHeaders,
+                    requestBody = requestJson.toRequestBody(
+                        "application/json".toMediaTypeOrNull()
+                    ),
+                    timeout = searchHostTimeoutSeconds
+                )
+
+                val parsed = response.parsedSafe<Media>()
+                val items = parsed?.data?.items
+                    .orEmpty()
+                    .filter { !it.subjectId.isNullOrBlank() && !it.title.isNullOrBlank() }
+
+                Log.i(
+                    "MovieBox",
+                    "MOVIEBOX_H5_SEARCH host=$host http=${response.code} api=${parsed?.code} items=${items.size}"
+                )
+
+                if (response.code in 200..299 && parsed?.code == 0 && items.isNotEmpty()) {
+                    preferredWebHost = host
+                    return SearchRaceResult(host, items)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(
+                    "MovieBox",
+                    "MOVIEBOX_H5_SEARCH_FAIL host=$host type=${error::class.simpleName}"
+                )
+            }
+        }
+
+        return null
+    }
+
     private suspend fun raceSearchHosts(
         query: String,
         retryAuthOnce: Boolean = true
@@ -503,9 +552,18 @@ class MovieboxProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
 
-        val result = raceSearchHosts(query) ?: return emptyList()
-        preferredMobileHost = result.host
-        return result.items.map { it.toSearchResponse(this) }
+        // Current H5 SDK uses the web subject search endpoint on the H5 API
+        // mirror pool. Keep signed mobile search only as a fallback.
+        raceH5SearchHosts(query)?.let { result ->
+            preferredWebHost = result.host
+            return result.items.map { it.toSearchResponse(this) }
+        }
+
+        val mobileResult = raceSearchHosts(query) ?: return emptyList()
+        preferredMobileHost = mobileResult.host
+        return mobileResult.items
+            .filter { !it.subjectId.isNullOrBlank() && !it.title.isNullOrBlank() }
+            .map { it.toSearchResponse(this) }
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -642,17 +700,29 @@ class MovieboxProvider : MainAPI() {
         media: LoadData,
         subjectId: String
     ): String {
-        val detailPath = media.detailPath.orEmpty()
+        val detailPath = media.detailPath.orEmpty().trim().trim('/')
+        val slug = detailPath.split('/').lastOrNull().orEmpty()
 
-        if (detailPath.isBlank()) return "$host/"
+        // Current H5 client sends the play request with /movies/{slug} as
+        // Referer. subjectId belongs in the API query, not in the Referer.
+        return if (slug.isNotBlank()) "$host/movies/$slug" else "$host/"
+    }
 
-        // The current public MovieBox site uses /moviedetail/... while some
-        // older H5 mirrors still use /spa/videoPlayPage/movies/.... Keep the
-        // referer aligned with the host that supplied the API response.
-        return if (host.contains("movieboxhd.net") || host.contains("moviebox.ph")) {
-            "$host/moviedetail/$detailPath?id=$subjectId&type=/movie/detail"
-        } else {
-            "$host/spa/videoPlayPage/movies/$detailPath?id=$subjectId&type=/movie/detail&lang=en"
+    private suspend fun warmH5Session(host: String) {
+        try {
+            val response = app.get(
+                "$host/wefeed-h5-bff/app/get-latest-app-pkgs?app_name=moviebox",
+                headers = commonHeaders,
+                referer = "$host/",
+                timeout = 3L
+            )
+            Log.i("MovieBox", "MOVIEBOX_H5_SESSION host=$host http=${response.code}")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            // Cookie bootstrap is best effort. Some mirrors set the session
+            // cookie directly on the play request.
+            Log.w("MovieBox", "MOVIEBOX_H5_SESSION_FAIL host=$host type=${error::class.simpleName}")
         }
     }
 
@@ -670,6 +740,8 @@ class MovieboxProvider : MainAPI() {
          */
         for (host in orderedWebHosts(media.apiHost)) {
             try {
+                warmH5Session(host)
+
                 val referer = buildPlayReferer(
                     host = host,
                     media = media,
@@ -866,8 +938,7 @@ class MovieboxProvider : MainAPI() {
                         this.quality = getQualityFromName(source.resolutions)
                         this.headers = mapOf(
                             "Accept" to "*/*",
-                            "User-Agent" to commonHeaders["User-Agent"].orEmpty(),
-                            "Origin" to resolved.host
+                            "User-Agent" to commonHeaders["User-Agent"].orEmpty()
                         )
                     }
                 )
