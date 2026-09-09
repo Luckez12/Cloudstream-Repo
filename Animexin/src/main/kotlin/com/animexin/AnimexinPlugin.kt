@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 @CloudstreamPlugin
 class AnimexinPlugin : BasePlugin() {
     override fun load() {
-        Log.i("Animexin", "ANIMEXIN_PLUGIN_LOADED version=3 flow=current-site-poster-player-sync")
+        Log.i("Animexin", "ANIMEXIN_PLUGIN_LOADED version=4 flow=current-site-poster-player-buildfix")
         registerMainAPI(Animexin())
 
         // Current player compatibility and common mirror hosts.

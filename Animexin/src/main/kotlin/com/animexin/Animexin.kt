@@ -248,8 +248,8 @@ class Animexin : MainAPI() {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
         if (encoded.isBlank()) return emptyList<SearchResponse>().toNewSearchResponseList()
 
-        val document = app.get("$mainUrl/page/$page/?s=$encoded", referer = "$mainUrl/").document
-        val cards = document
+        val searchDoc = app.get("$mainUrl/page/$page/?s=$encoded").document
+        val cards = searchDoc
             .select("div.listupd > article, .listupd article, article.bs")
             .mapNotNull { it.toCardData() }
             .distinctBy { it.href }
@@ -603,7 +603,7 @@ class Animexin : MainAPI() {
         return lower.contains(".m3u8") || lower.contains(".mp4") || lower.contains(".mpd")
     }
 
-    private fun emitDirectMedia(
+    private suspend fun emitDirectMedia(
         url: String,
         referer: String,
         emittedUrls: MutableSet<String>,
