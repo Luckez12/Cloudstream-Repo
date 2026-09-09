@@ -654,18 +654,19 @@ class Animexin : MainAPI() {
         val emitKey = "${player.language.name}\u0000${link.url}"
         if (!emitted.add(emitKey)) return false
 
-        callback(
-            newExtractorLink(
-                source = link.name,
-                name = "${player.language.displayName} • ${link.name}",
-                url = link.url,
-                type = link.type
-            ) {
-                this.referer = link.referer
-                this.headers = link.headers
-                this.quality = quality
-            }
+        @Suppress("DEPRECATION")
+        val relabeledLink = ExtractorLink(
+            source = link.source,
+            name = "${player.language.displayName} • ${link.name}",
+            url = link.url,
+            referer = link.referer,
+            quality = quality,
+            headers = link.headers,
+            extractorData = link.extractorData,
+            type = link.type,
+            audioTracks = link.audioTracks
         )
+        callback(relabeledLink)
         acceptedCount.incrementAndGet()
         return true
     }
@@ -849,7 +850,7 @@ class Animexin : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.w("Animexin", "ANIMEXIN_V9_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en")
+        Log.w("Animexin", "ANIMEXIN_V10_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en")
 
         val document = try {
             withTimeoutOrNull(12_000L) {
@@ -860,7 +861,7 @@ class Animexin : MainAPI() {
         } catch (_: Exception) {
             null
         } ?: run {
-            Log.w("Animexin", "ANIMEXIN_V9_LOADLINKS pageFetch=false")
+            Log.w("Animexin", "ANIMEXIN_V10_LOADLINKS pageFetch=false")
             return false
         }
 
@@ -871,13 +872,13 @@ class Animexin : MainAPI() {
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V9_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
+            "ANIMEXIN_V10_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
                 "indo=$indoCount english=$englishCount rejected=${discovery.rejectedCount} " +
                 "samples=${discovery.rejectedSamples.joinToString(" || ")}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Animexin", "ANIMEXIN_V9_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
+            Log.w("Animexin", "ANIMEXIN_V10_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
             return false
         }
 
@@ -909,7 +910,7 @@ class Animexin : MainAPI() {
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V9_DONE players=${players.size} accepted=${acceptedCount.get()} " +
+            "ANIMEXIN_V10_DONE players=${players.size} accepted=${acceptedCount.get()} " +
                 "dropBelow720=${droppedBelow720.get()} dropUnknown=${droppedUnknown.get()} success=$success"
         )
 
