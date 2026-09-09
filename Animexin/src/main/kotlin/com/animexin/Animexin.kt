@@ -14,6 +14,7 @@ import org.jsoup.nodes.Document
 import java.util.concurrent.ConcurrentHashMap
 import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
@@ -263,9 +264,22 @@ class Animexin : MainAPI() {
         }
     }
 
+    private enum class HardSubLanguage(val displayName: String) {
+        INDONESIA("Hardsub Indonesia"),
+        ENGLISH("Hardsub English")
+    }
+
     private data class PlayerCandidate(
         val label: String,
-        val url: String
+        val url: String,
+        val language: HardSubLanguage
+    )
+
+    private data class PlayerDiscovery(
+        val players: List<PlayerCandidate>,
+        val rawCount: Int,
+        val rejectedCount: Int,
+        val rejectedSamples: List<String>
     )
 
     private fun absolutePlayerUrl(baseUrl: String, raw: String): String? {
@@ -353,64 +367,195 @@ class Animexin : MainAPI() {
             .distinct()
     }
 
-    private fun Document.collectPlayerCandidates(pageUrl: String): List<PlayerCandidate> {
-        val players = mutableListOf<PlayerCandidate>()
+    private fun classifyHardSub(text: String): HardSubLanguage? {
+        val normalized = text
+            .lowercase()
+            .replace('_', ' ')
+            .replace('-', ' ')
+            .replace(Regex("""\s+"""), " ")
+            .trim()
 
-        // AnimeXin exposes one active iframe plus server choices. The older
-        // provider ignored the active iframe completely and only inspected
-        // `.mobius option`, which loses players when the theme changes.
-        select(
-            "#embed_holder iframe[src], #embed_holder iframe[data-src], " +
-                ".player-embed iframe[src], .player-embed iframe[data-src], " +
-                ".embed_holder iframe[src], .embed_holder iframe[data-src], " +
-                ".video-content iframe[src], .video-content iframe[data-src], " +
-                "iframe.metaframe[src], iframe[src]"
-        ).forEachIndexed { index, iframe ->
-            val raw = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-            absolutePlayerUrl(pageUrl, raw)?.let { url ->
-                players.add(PlayerCandidate("Active Player ${index + 1}", url))
-            }
+        if (normalized.isBlank()) return null
+
+        if (
+            normalized.contains("all sub") ||
+            normalized.contains("allsub") ||
+            normalized.contains("softsub") ||
+            normalized.contains("soft sub") ||
+            normalized.contains("multi sub") ||
+            normalized.contains("multisub")
+        ) {
+            return null
         }
 
-        // Newer AnimeXin pages group choices as Hardsub Indonesia, Hardsub
-        // English and All Subs. Keep the optgroup label so diagnostics show
-        // which group is being discovered, and accept all common value attrs.
-        select(
-            ".mobius option, select.mirror option, .mirror option, " +
-                ".server option, option[data-video], option[data-src], " +
-                "option[data-embed], select option[value]"
-        ).forEach { option ->
-            val groupLabel = option.parent()
-                ?.takeIf { it.tagName().equals("optgroup", ignoreCase = true) }
-                ?.attr("label")
-                ?.trim()
-                .orEmpty()
+        val hasHardSub = normalized.contains("hardsub") ||
+            normalized.contains("hard sub") ||
+            Regex("""\bhard\s*sub\b""").containsMatchIn(normalized)
 
-            val optionLabel = option.text().trim()
-                .ifBlank { option.attr("data-index").trim() }
+        if (!hasHardSub) return null
+
+        val isIndonesia = normalized.contains("indonesia") ||
+            Regex("""\bindo\b""").containsMatchIn(normalized)
+        val isEnglish = normalized.contains("english") ||
+            Regex("""\beng\b""").containsMatchIn(normalized)
+
+        return when {
+            isIndonesia && !isEnglish -> HardSubLanguage.INDONESIA
+            isEnglish && !isIndonesia -> HardSubLanguage.ENGLISH
+            else -> null
+        }
+    }
+
+    private fun Element.nearbyHeadingText(): String {
+        val select = when {
+            tagName().equals("option", ignoreCase = true) -> {
+                val parentElement = parent()
+                if (parentElement?.tagName()?.equals("optgroup", ignoreCase = true) == true) {
+                    parentElement.parent()
+                } else {
+                    parentElement
+                }
+            }
+            tagName().equals("select", ignoreCase = true) -> this
+            else -> parent()
+        }
+
+        val parts = mutableListOf<String>()
+        var sibling = select?.previousElementSibling()
+        repeat(4) {
+            val current = sibling ?: return@repeat
+            val tag = current.tagName().lowercase()
+            if (
+                tag in setOf("h1", "h2", "h3", "h4", "h5", "h6", "strong", "b", "p") ||
+                current.classNames().any { cls ->
+                    cls.contains("title", true) ||
+                        cls.contains("label", true) ||
+                        cls.contains("server", true) ||
+                        cls.contains("sub", true)
+                }
+            ) {
+                parts += current.text()
+            }
+            sibling = current.previousElementSibling()
+        }
+
+        var ancestor = select?.parent()
+        repeat(3) {
+            val current = ancestor ?: return@repeat
+            val own = current.ownText().trim()
+            if (own.isNotBlank() && own.length <= 120) parts += own
+
+            current.children()
+                .firstOrNull { child ->
+                    val tag = child.tagName().lowercase()
+                    tag in setOf("h1", "h2", "h3", "h4", "h5", "h6", "strong", "b")
+                }
+                ?.text()
+                ?.takeIf { it.isNotBlank() }
+                ?.let(parts::add)
+
+            ancestor = current.parent()
+        }
+
+        return parts.distinct().joinToString(" ")
+    }
+
+    private fun Element.detectHardSubLanguage(): HardSubLanguage? {
+        val optionGroup = parent()
+            ?.takeIf { it.tagName().equals("optgroup", ignoreCase = true) }
+
+        val select = when {
+            tagName().equals("option", ignoreCase = true) -> optionGroup?.parent() ?: parent()
+            tagName().equals("select", ignoreCase = true) -> this
+            else -> parent()
+        }
+
+        val specificContexts = listOf(
+            optionGroup?.attr("label").orEmpty(),
+            attr("label"),
+            attr("title"),
+            attr("data-label"),
+            attr("data-name"),
+            text(),
+            select?.attr("aria-label").orEmpty(),
+            select?.attr("title").orEmpty(),
+            select?.attr("data-label").orEmpty(),
+            select?.attr("data-name").orEmpty(),
+            select?.id().orEmpty(),
+            select?.className().orEmpty(),
+            nearbyHeadingText()
+        )
+
+        specificContexts.forEach { context ->
+            classifyHardSub(context)?.let { return it }
+        }
+
+        return null
+    }
+
+    private fun Document.collectHardSubCandidates(pageUrl: String): PlayerDiscovery {
+        val players = mutableListOf<PlayerCandidate>()
+        val rejectedSamples = mutableListOf<String>()
+        var rawCount = 0
+        var rejectedCount = 0
+
+        val entries = select(
+            ".mobius option, .mirror option, .server option, .player option, " +
+                "option[data-video], option[data-src], option[data-embed], select option[value], " +
+                ".mobius [data-video], .mobius [data-embed], " +
+                ".mirror [data-video], .mirror [data-embed], " +
+                ".server [data-video], .server [data-embed], " +
+                ".player [data-video], .player [data-embed]"
+        ).distinct()
+
+        entries.forEach { element ->
+            rawCount++
+            val language = element.detectHardSubLanguage()
+            if (language == null) {
+                rejectedCount++
+                if (rejectedSamples.size < 6) {
+                    val sample = listOf(
+                        element.parent()?.attr("label").orEmpty(),
+                        element.text(),
+                        element.attr("label"),
+                        element.attr("data-name"),
+                        element.nearbyHeadingText()
+                    ).filter { it.isNotBlank() }
+                        .joinToString(" / ")
+                        .replace(Regex("""\s+"""), " ")
+                        .take(140)
+                    if (sample.isNotBlank()) rejectedSamples += sample
+                }
+                return@forEach
+            }
+
+            val serverLabel = element.text().trim()
+                .ifBlank { element.attr("label").trim() }
+                .ifBlank { element.attr("data-name").trim() }
                 .ifBlank { "Server" }
 
-            val label = listOf(groupLabel, optionLabel)
-                .filter { it.isNotBlank() }
-                .distinct()
-                .joinToString(" • ")
-                .ifBlank { "Server" }
+            val label = "${language.displayName} • $serverLabel"
 
             listOf(
-                option.attr("value"),
-                option.attr("data-video"),
-                option.attr("data-src"),
-                option.attr("data-embed")
+                element.attr("value"),
+                element.attr("data-video"),
+                element.attr("data-src"),
+                element.attr("data-embed")
             ).forEach { raw ->
                 extractPlayerUrls(raw, pageUrl).forEach { url ->
-                    players.add(PlayerCandidate(label, url))
+                    players += PlayerCandidate(label, url, language)
                 }
             }
         }
 
-        return players
-            .filter { it.url.startsWith("http://") || it.url.startsWith("https://") }
-            .distinctBy { it.url }
+        return PlayerDiscovery(
+            players = players
+                .filter { it.url.startsWith("http://") || it.url.startsWith("https://") }
+                .distinctBy { "${it.language.name}\u0000${it.url}" },
+            rawCount = rawCount,
+            rejectedCount = rejectedCount,
+            rejectedSamples = rejectedSamples.distinct()
+        )
     }
 
     private fun Document.collectNestedPlayerUrls(pageUrl: String): List<String> {
@@ -452,39 +597,6 @@ class Animexin : MainAPI() {
         return urls.distinct()
     }
 
-    private fun Document.emitEmbeddedSubtitles(
-        pageUrl: String,
-        emittedSubtitleUrls: MutableSet<String>,
-        subtitleCallback: (SubtitleFile) -> Unit
-    ) {
-        select("track[src], track[data-src]").forEach { track ->
-            val raw = track.attr("src").ifBlank { track.attr("data-src") }
-            val url = absolutePlayerUrl(pageUrl, raw) ?: return@forEach
-            if (!emittedSubtitleUrls.add(url)) return@forEach
-
-            val language = track.attr("label").trim()
-                .ifBlank { track.attr("srclang").trim() }
-                .ifBlank { "AnimeXin Subs" }
-
-            subtitleCallback(newSubtitleFile(language, url))
-        }
-
-        select("script").forEach { script ->
-            val text = script.data().ifBlank { script.html() }
-                .replace("\\/", "/")
-
-            Regex(
-                """https?://[^\s\"'<>]+\.(?:vtt|srt|ass|ssa)(?:\?[^\s\"'<>]*)?""",
-                RegexOption.IGNORE_CASE
-            ).findAll(text).forEach { match ->
-                val url = match.value
-                if (emittedSubtitleUrls.add(url)) {
-                    subtitleCallback(newSubtitleFile("AnimeXin All Subs", url))
-                }
-            }
-        }
-    }
-
     private fun isDirectMedia(url: String): Boolean {
         val clean = url.substringBefore('#').substringBefore('?').lowercase()
         return clean.endsWith(".m3u8") ||
@@ -493,97 +605,178 @@ class Animexin : MainAPI() {
             clean.endsWith(".webm")
     }
 
+    private fun normalizedQuality(link: ExtractorLink): Int {
+        if (link.quality > 0) return link.quality
+
+        return Regex(
+            """(?<!\d)(2160|1440|1080|900|720|576|540|480|432|360|270|240|144)p?(?!\d)""",
+            RegexOption.IGNORE_CASE
+        ).find("${link.name} ${link.url}")
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?: 0
+    }
+
+    private fun normalizedQualityFromUrl(url: String): Int {
+        return Regex(
+            """(?<!\d)(2160|1440|1080|900|720|576|540|480|432|360|270|240|144)p?(?!\d)""",
+            RegexOption.IGNORE_CASE
+        ).find(url)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?: 0
+    }
+
+    private fun emitFilteredLink(
+        player: PlayerCandidate,
+        link: ExtractorLink,
+        emitted: MutableSet<String>,
+        acceptedCount: AtomicInteger,
+        droppedBelow720: AtomicInteger,
+        droppedUnknown: AtomicInteger,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val quality = normalizedQuality(link)
+
+        if (quality in 1 until MIN_QUALITY) {
+            droppedBelow720.incrementAndGet()
+            return false
+        }
+
+        if (quality <= 0) {
+            droppedUnknown.incrementAndGet()
+            return false
+        }
+
+        val emitKey = "${player.language.name}\u0000${link.url}"
+        if (!emitted.add(emitKey)) return false
+
+        callback(
+            newExtractorLink(
+                source = link.name,
+                name = "${player.language.displayName} • ${link.name}",
+                url = link.url,
+                type = link.type
+            ) {
+                this.referer = link.referer
+                this.headers = link.headers
+                this.quality = quality
+            }
+        )
+        acceptedCount.incrementAndGet()
+        return true
+    }
+
     private suspend fun tryPlayerCandidate(
         player: PlayerCandidate,
         episodeUrl: String,
         attempted: MutableSet<String>,
         emitted: MutableSet<String>,
-        emittedSubtitleUrls: MutableSet<String>,
-        subtitleCallback: (SubtitleFile) -> Unit,
+        acceptedCount: AtomicInteger,
+        droppedBelow720: AtomicInteger,
+        droppedUnknown: AtomicInteger,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val attemptKey = "${player.url}\u0000$episodeUrl"
+        val attemptKey = "${player.language.name}\u0000${player.url}\u0000$episodeUrl"
         if (!attempted.add(attemptKey)) return false
 
         val produced = AtomicBoolean(false)
+        val noSubtitles: (SubtitleFile) -> Unit = { }
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
-            if (emitted.add(link.url)) {
+            if (
+                emitFilteredLink(
+                    player,
+                    link,
+                    emitted,
+                    acceptedCount,
+                    droppedBelow720,
+                    droppedUnknown,
+                    callback
+                )
+            ) {
                 produced.set(true)
-                callback(link)
             }
         }
 
         if (isDirectMedia(player.url)) {
-            if (emitted.add(player.url)) {
+            val quality = normalizedQualityFromUrl(player.url)
+            if (quality >= MIN_QUALITY) {
                 val type = when {
                     player.url.substringBefore('?').contains(".m3u8", true) -> ExtractorLinkType.M3U8
                     player.url.substringBefore('?').contains(".mpd", true) -> ExtractorLinkType.DASH
                     else -> ExtractorLinkType.VIDEO
                 }
-                callback(
-                    newExtractorLink(
-                        "Animexin",
-                        "${player.label} • Direct",
-                        player.url,
-                        type
-                    ) {
-                        this.referer = episodeUrl
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                produced.set(true)
+
+                val directLink = newExtractorLink(
+                    source = "Animexin",
+                    name = "${player.language.displayName} • Direct",
+                    url = player.url,
+                    type = type
+                ) {
+                    this.referer = episodeUrl
+                    this.quality = quality
+                }
+
+                if (
+                    emitFilteredLink(
+                        player,
+                        directLink,
+                        emitted,
+                        acceptedCount,
+                        droppedBelow720,
+                        droppedUnknown,
+                        callback
+                    )
+                ) {
+                    produced.set(true)
+                }
+            } else if (quality > 0) {
+                droppedBelow720.incrementAndGet()
+            } else {
+                droppedUnknown.incrementAndGet()
             }
             return produced.get()
         }
 
         try {
-            withTimeoutOrNull(15_000L) {
+            withTimeoutOrNull(12_000L) {
                 loadExtractor(
                     player.url,
                     episodeUrl,
-                    subtitleCallback,
+                    noSubtitles,
                     wrappedCallback
                 )
             }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
-            // Continue into the wrapper parser below.
+            // Continue into wrapper parsing.
         }
 
-        if (produced.get()) {
-            Log.i("Animexin", "ANIMEXIN_PLAYER_OK label=${player.label} mode=extractor")
-            return true
-        }
+        if (produced.get()) return true
 
         val wrapperDocument = try {
-            withTimeoutOrNull(12_000L) {
+            withTimeoutOrNull(8_000L) {
                 app.get(player.url, referer = episodeUrl).document
             }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
             null
-        } ?: run {
-            Log.w("Animexin", "ANIMEXIN_PLAYER_EMPTY label=${player.label} stage=wrapper")
-            return false
-        }
-
-        wrapperDocument.emitEmbeddedSubtitles(
-            player.url,
-            emittedSubtitleUrls,
-            subtitleCallback
-        )
+        } ?: return false
 
         val nested = wrapperDocument.collectNestedPlayerUrls(player.url)
-        Log.i(
-            "Animexin",
-            "ANIMEXIN_PLAYER_NESTED label=${player.label} urls=${nested.size}"
-        )
 
         for (nestedUrl in nested) {
             if (isDirectMedia(nestedUrl)) {
-                if (!emitted.add(nestedUrl)) continue
+                val quality = normalizedQualityFromUrl(nestedUrl)
+                if (quality < MIN_QUALITY) {
+                    if (quality > 0) droppedBelow720.incrementAndGet()
+                    else droppedUnknown.incrementAndGet()
+                    continue
+                }
 
                 val type = when {
                     nestedUrl.substringBefore('?').contains(".m3u8", true) -> ExtractorLinkType.M3U8
@@ -591,44 +784,49 @@ class Animexin : MainAPI() {
                     else -> ExtractorLinkType.VIDEO
                 }
 
-                callback(
-                    newExtractorLink(
-                        "Animexin",
-                        "${player.label} • Direct",
-                        nestedUrl,
-                        type
-                    ) {
-                        this.referer = player.url
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                produced.set(true)
+                val directLink = newExtractorLink(
+                    source = "Animexin",
+                    name = "${player.language.displayName} • Direct",
+                    url = nestedUrl,
+                    type = type
+                ) {
+                    this.referer = player.url
+                    this.quality = quality
+                }
+
+                if (
+                    emitFilteredLink(
+                        player,
+                        directLink,
+                        emitted,
+                        acceptedCount,
+                        droppedBelow720,
+                        droppedUnknown,
+                        callback
+                    )
+                ) {
+                    produced.set(true)
+                }
                 continue
             }
 
-            val nestedKey = "$nestedUrl\u0000${player.url}"
+            val nestedKey = "${player.language.name}\u0000$nestedUrl\u0000${player.url}"
             if (!attempted.add(nestedKey)) continue
 
             try {
-                withTimeoutOrNull(12_000L) {
+                withTimeoutOrNull(9_000L) {
                     loadExtractor(
                         nestedUrl,
                         player.url,
-                        subtitleCallback,
+                        noSubtitles,
                         wrappedCallback
                     )
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                // Keep trying the remaining mirrors.
+                // Keep trying remaining hardsub mirrors.
             }
-        }
-
-        if (produced.get()) {
-            Log.i("Animexin", "ANIMEXIN_PLAYER_OK label=${player.label} mode=nested")
-        } else {
-            Log.w("Animexin", "ANIMEXIN_PLAYER_EMPTY label=${player.label} stage=extract")
         }
 
         return produced.get()
@@ -640,33 +838,44 @@ class Animexin : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        Log.w("Animexin", "ANIMEXIN_V7_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en")
+
         val document = try {
-            withTimeoutOrNull(15_000L) {
+            withTimeoutOrNull(12_000L) {
                 app.get(data).document
             }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
             null
-        } ?: return false
+        } ?: run {
+            Log.w("Animexin", "ANIMEXIN_V7_LOADLINKS pageFetch=false")
+            return false
+        }
 
-        val emittedSubtitleUrls: MutableSet<String> = ConcurrentHashMap.newKeySet()
-        document.emitEmbeddedSubtitles(data, emittedSubtitleUrls, subtitleCallback)
+        val discovery = document.collectHardSubCandidates(data)
+        val players = discovery.players
+        val indoCount = players.count { it.language == HardSubLanguage.INDONESIA }
+        val englishCount = players.count { it.language == HardSubLanguage.ENGLISH }
 
-        val players = document.collectPlayerCandidates(data)
-        Log.i(
+        Log.w(
             "Animexin",
-            "ANIMEXIN_PLAYERS count=${players.size} labels=${players.map { it.label }.distinct().joinToString(" | ")}"
+            "ANIMEXIN_V7_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
+                "indo=$indoCount english=$englishCount rejected=${discovery.rejectedCount} " +
+                "samples=${discovery.rejectedSamples.joinToString(" || ")}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Animexin", "ANIMEXIN_PLAYERS_EMPTY url=$data")
+            Log.w("Animexin", "ANIMEXIN_V7_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
             return false
         }
 
         val attempted: MutableSet<String> = ConcurrentHashMap.newKeySet()
         val emitted: MutableSet<String> = ConcurrentHashMap.newKeySet()
-        val semaphore = Semaphore(4)
+        val acceptedCount = AtomicInteger(0)
+        val droppedBelow720 = AtomicInteger(0)
+        val droppedUnknown = AtomicInteger(0)
+        val semaphore = Semaphore(3)
 
         val success = coroutineScope {
             players.map { player ->
@@ -677,8 +886,9 @@ class Animexin : MainAPI() {
                             data,
                             attempted,
                             emitted,
-                            emittedSubtitleUrls,
-                            subtitleCallback,
+                            acceptedCount,
+                            droppedBelow720,
+                            droppedUnknown,
                             callback
                         )
                     }
@@ -686,10 +896,16 @@ class Animexin : MainAPI() {
             }.awaitAll().any { it }
         }
 
-        Log.i(
+        Log.w(
             "Animexin",
-            "ANIMEXIN_LINKS_DONE players=${players.size} links=${emitted.size} subtitles=${emittedSubtitleUrls.size} success=$success"
+            "ANIMEXIN_V7_DONE players=${players.size} accepted=${acceptedCount.get()} " +
+                "dropBelow720=${droppedBelow720.get()} dropUnknown=${droppedUnknown.get()} success=$success"
         )
+
         return success
+    }
+
+    companion object {
+        private const val MIN_QUALITY = 720
     }
 }
