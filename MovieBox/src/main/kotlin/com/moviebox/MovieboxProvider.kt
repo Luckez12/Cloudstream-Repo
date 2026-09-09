@@ -24,7 +24,7 @@ import javax.crypto.spec.SecretKeySpec
 class MovieboxProvider : MainAPI() {
 
     override var mainUrl = "https://movieboxhd.net"
-    override var name = "MovieBox 👾 v9"
+    override var name = "MovieBox 👾 v10"
     override var lang = "en"
 
     override val instantLinkLoading = true
@@ -207,7 +207,7 @@ class MovieboxProvider : MainAPI() {
         val detail: MediaDetail.Data
     )
 
-    private inline fun <reified T> parseJsonSafe(raw: String): T? = try {
+    private inline fun <reified T : Any> parseJsonSafe(raw: String): T? = try {
         parseJson<T>(raw)
     } catch (_: Throwable) {
         null
@@ -583,14 +583,14 @@ class MovieboxProvider : MainAPI() {
 
                 Log.i(
                     "MovieBox",
-                    "MOVIEBOX_V9_SEARCH host=$host http=${response.code} api=$apiCode parsed=$parsedOk items=${items.size} bytes=${raw.length} query=${query.trim()}"
+                    "MOVIEBOX_V10_SEARCH host=$host http=${response.code} api=$apiCode parsed=$parsedOk items=${items.size} bytes=${raw.length} query=${query.trim()}"
                 )
 
                 if (!parsedOk) {
-                    val prefix = raw.take(220).replace(Regex("\s+"), " ")
+                    val prefix = raw.take(220).replace(Regex("\\s+"), " ")
                     Log.w(
                         "MovieBox",
-                        "MOVIEBOX_V9_SEARCH_PARSE_FAIL host=$host http=${response.code} bytes=${raw.length} body=$prefix"
+                        "MOVIEBOX_V10_SEARCH_PARSE_FAIL host=$host http=${response.code} bytes=${raw.length} body=$prefix"
                     )
                 }
 
@@ -603,13 +603,13 @@ class MovieboxProvider : MainAPI() {
             } catch (error: Throwable) {
                 Log.w(
                     "MovieBox",
-                    "MOVIEBOX_V9_SEARCH_FAIL host=$host type=${error::class.simpleName}"
+                    "MOVIEBOX_V10_SEARCH_FAIL host=$host type=${error::class.simpleName}"
                 )
             }
         }
 
         if (sawAuthFailure && retryAuthOnce) {
-            Log.w("MovieBox", "MOVIEBOX_V9_SEARCH_REAUTH query=${query.trim()}")
+            Log.w("MovieBox", "MOVIEBOX_V10_SEARCH_REAUTH query=${query.trim()}")
             mobileAuthToken = null
             preferredMobileHost = null
             return raceSearchHosts(query, retryAuthOnce = false)
@@ -677,7 +677,7 @@ class MovieboxProvider : MainAPI() {
         // not search, so avoiding H5 here removes dead-host delay and noise.
         val mobileResult = raceSearchHosts(query)
         if (mobileResult == null) {
-            Log.w("MovieBox", "MOVIEBOX_V9_SEARCH_EMPTY query=${query.trim()}")
+            Log.w("MovieBox", "MOVIEBOX_V10_SEARCH_EMPTY query=${query.trim()}")
             return emptyList()
         }
 
