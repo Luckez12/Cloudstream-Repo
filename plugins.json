@@ -43,10 +43,10 @@
     },
     {
         "iconUrl": "https://animexin.dev/wp-content/uploads/2020/06/animexinv1.png",
-        "fileHash": "sha256-db44eb9162ecd30a5caeeff328deb13f2cf5ce684c4d4c08a087b4b103c3117c",
+        "fileHash": "sha256-6a30baef5b13e817346349ac63dbd6ae95a1d9070a9ff914bd7d454e4001842b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 39205,
+        "fileSize": 40034,
         "status": 1,
         "language": "id",
         "authors": [
@@ -57,7 +57,7 @@
             "Anime",
             "Cartoon"
         ],
-        "version": 3,
+        "version": 4,
         "internalName": "Animexin",
         "description": "Animexin \u2014 Streaming Donghua Subtitle Indonesia",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/Animexin.cs3",
