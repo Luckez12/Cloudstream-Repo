@@ -21,13 +21,29 @@ class Animexin : MainAPI() {
         "anime/?sub=raw" to "Anime (RAW)",
     )
 
-    // AnimeXin uses lazy-loaded WordPress images. The real poster can live in
-    // data-* attributes while src contains a placeholder.
+    // AnimeXin uses lazy-loaded WordPress images and protects wp-content
+    // images against direct hotlinking. Keep the real lazy-load URL and
+    // send the same site context Cloudstream would have in a browser.
+    private val imageHeaders: Map<String, String>
+        get() = mapOf(
+            "Referer" to "$mainUrl/",
+            "User-Agent" to USER_AGENT,
+            "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        )
+
     private fun Element.getImageUrl(): String? {
+        fun fromSrcset(value: String): String? = value
+            .split(',')
+            .map { it.trim().substringBefore(' ').trim() }
+            .filter { it.isNotBlank() && !it.startsWith("data:", ignoreCase = true) }
+            .lastOrNull()
+
         return listOf(
             attr("data-src"),
             attr("data-lazy-src"),
             attr("data-original"),
+            fromSrcset(attr("data-srcset")).orEmpty(),
+            fromSrcset(attr("srcset")).orEmpty(),
             attr("src")
         ).firstOrNull { imageUrl ->
             imageUrl.isNotBlank() &&
@@ -57,6 +73,7 @@ val document = app.get("$mainUrl/${request.data}&page=$page").document
             ?.let { fixUrlNull(it) }
         return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = posterUrl
+            this.posterHeaders = imageHeaders
         }
     }
 
@@ -104,11 +121,13 @@ val document = app.get("$mainUrl/${request.data}&page=$page").document
 
             newTvSeriesLoadResponse(title, url, TvType.Anime, episodes.reversed()) {
                 this.posterUrl = poster
+                this.posterHeaders = imageHeaders
                 this.plot = description
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, href) {
                 this.posterUrl = poster
+                this.posterHeaders = imageHeaders
                 this.plot = description
             }
         }
