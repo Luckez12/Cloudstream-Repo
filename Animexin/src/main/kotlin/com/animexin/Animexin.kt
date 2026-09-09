@@ -630,6 +630,94 @@ class Animexin : MainAPI() {
             ?: 0
     }
 
+    private fun resolveManifestUrl(baseUrl: String, rawUrl: String): String? {
+        val clean = rawUrl.trim()
+        if (clean.isBlank()) return null
+
+        return try {
+            when {
+                clean.startsWith("http://", true) || clean.startsWith("https://", true) -> clean
+                clean.startsWith("//") -> "https:$clean"
+                else -> URI(baseUrl).resolve(clean).toString()
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun expandHls720Plus(
+        player: PlayerCandidate,
+        link: ExtractorLink
+    ): List<ExtractorLink> {
+        val looksHls = link.type == ExtractorLinkType.M3U8 ||
+            link.url.substringBefore('?').substringBefore('#').endsWith(".m3u8", true)
+
+        if (!looksHls) return emptyList()
+
+        val manifest = try {
+            withTimeoutOrNull(8_000L) {
+                app.get(
+                    link.url,
+                    headers = link.headers,
+                    referer = link.referer
+                ).text
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        } ?: return emptyList()
+
+        val lines = manifest
+            .replace("\r", "")
+            .lines()
+            .map { it.trim() }
+
+        val variants = mutableListOf<Pair<Int, String>>()
+
+        for (index in lines.indices) {
+            val line = lines[index]
+            if (!line.startsWith("#EXT-X-STREAM-INF", ignoreCase = true)) continue
+
+            val height = Regex(
+                """RESOLUTION\s*=\s*\d+\s*x\s*(\d+)""",
+                RegexOption.IGNORE_CASE
+            ).find(line)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+                ?: continue
+
+            if (height < MIN_QUALITY) continue
+
+            val rawVariant = lines
+                .drop(index + 1)
+                .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
+                ?: continue
+
+            val variantUrl = resolveManifestUrl(link.url, rawVariant) ?: continue
+            variants += height to variantUrl
+        }
+
+        return variants
+            .distinctBy { it.second }
+            .sortedByDescending { it.first }
+            .map { (height, variantUrl) ->
+                @Suppress("DEPRECATION")
+                ExtractorLink(
+                    source = link.source,
+                    name = "${player.language.displayName} • ${link.name} ${height}p",
+                    url = variantUrl,
+                    referer = link.referer,
+                    quality = height,
+                    headers = link.headers,
+                    extractorData = link.extractorData,
+                    type = ExtractorLinkType.M3U8,
+                    audioTracks = link.audioTracks
+                )
+            }
+    }
+
     private suspend fun emitFilteredLink(
         player: PlayerCandidate,
         link: ExtractorLink,
@@ -637,6 +725,7 @@ class Animexin : MainAPI() {
         acceptedCount: AtomicInteger,
         droppedBelow720: AtomicInteger,
         droppedUnknown: AtomicInteger,
+        expandedAdaptive: AtomicInteger,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val quality = normalizedQuality(link)
@@ -647,6 +736,21 @@ class Animexin : MainAPI() {
         }
 
         if (quality <= 0) {
+            val expanded = expandHls720Plus(player, link)
+            if (expanded.isNotEmpty()) {
+                var emittedAny = false
+                expanded.forEach { variant ->
+                    val emitKey = "${player.language.name}\u0000${variant.url}"
+                    if (emitted.add(emitKey)) {
+                        callback(variant)
+                        acceptedCount.incrementAndGet()
+                        expandedAdaptive.incrementAndGet()
+                        emittedAny = true
+                    }
+                }
+                if (emittedAny) return true
+            }
+
             droppedUnknown.incrementAndGet()
             return false
         }
@@ -679,6 +783,7 @@ class Animexin : MainAPI() {
         acceptedCount: AtomicInteger,
         droppedBelow720: AtomicInteger,
         droppedUnknown: AtomicInteger,
+        expandedAdaptive: AtomicInteger,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val attemptKey = "${player.language.name}\u0000${player.url}\u0000$episodeUrl"
@@ -702,6 +807,7 @@ class Animexin : MainAPI() {
                         acceptedCount,
                         droppedBelow720,
                         droppedUnknown,
+                        expandedAdaptive,
                         callback
                     )
                 ) {
@@ -737,6 +843,7 @@ class Animexin : MainAPI() {
                         acceptedCount,
                         droppedBelow720,
                         droppedUnknown,
+                        expandedAdaptive,
                         callback
                     )
                 ) {
@@ -813,6 +920,7 @@ class Animexin : MainAPI() {
                         acceptedCount,
                         droppedBelow720,
                         droppedUnknown,
+                        expandedAdaptive,
                         callback
                     )
                 ) {
@@ -850,7 +958,7 @@ class Animexin : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.w("Animexin", "ANIMEXIN_V10_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en")
+        Log.w("Animexin", "ANIMEXIN_V11_LOADLINKS start minQuality=${MIN_QUALITY}p mode=hardsub-id-en")
 
         val document = try {
             withTimeoutOrNull(12_000L) {
@@ -861,7 +969,7 @@ class Animexin : MainAPI() {
         } catch (_: Exception) {
             null
         } ?: run {
-            Log.w("Animexin", "ANIMEXIN_V10_LOADLINKS pageFetch=false")
+            Log.w("Animexin", "ANIMEXIN_V11_LOADLINKS pageFetch=false")
             return false
         }
 
@@ -872,13 +980,13 @@ class Animexin : MainAPI() {
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V10_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
+            "ANIMEXIN_V11_DISCOVERY raw=${discovery.rawCount} selected=${players.size} " +
                 "indo=$indoCount english=$englishCount rejected=${discovery.rejectedCount} " +
                 "samples=${discovery.rejectedSamples.joinToString(" || ")}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Animexin", "ANIMEXIN_V10_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
+            Log.w("Animexin", "ANIMEXIN_V11_DISCOVERY selected=0 reason=no-labelled-hardsub-options")
             return false
         }
 
@@ -887,6 +995,7 @@ class Animexin : MainAPI() {
         val acceptedCount = AtomicInteger(0)
         val droppedBelow720 = AtomicInteger(0)
         val droppedUnknown = AtomicInteger(0)
+        val expandedAdaptive = AtomicInteger(0)
         val semaphore = Semaphore(3)
 
         val success = coroutineScope {
@@ -901,6 +1010,7 @@ class Animexin : MainAPI() {
                             acceptedCount,
                             droppedBelow720,
                             droppedUnknown,
+                            expandedAdaptive,
                             callback
                         )
                     }
@@ -910,8 +1020,9 @@ class Animexin : MainAPI() {
 
         Log.w(
             "Animexin",
-            "ANIMEXIN_V10_DONE players=${players.size} accepted=${acceptedCount.get()} " +
-                "dropBelow720=${droppedBelow720.get()} dropUnknown=${droppedUnknown.get()} success=$success"
+            "ANIMEXIN_V11_DONE players=${players.size} accepted=${acceptedCount.get()} " +
+                "dropBelow720=${droppedBelow720.get()} dropUnknown=${droppedUnknown.get()} " +
+                    "expandedHls720=${expandedAdaptive.get()} success=$success"
         )
 
         return success
