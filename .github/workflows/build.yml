@@ -8,11 +8,23 @@ on:
         required: false
         default: false
         type: boolean
+
+  # Apply ZIP Patch already sends this event after it has committed and pushed
+  # the extracted patch. GITHUB_TOKEN pushes do not trigger another push
+  # workflow, so the build must explicitly listen for repository_dispatch.
+  repository_dispatch:
+    types:
+      - vueo_build
+
   push:
     branches:
       - main
     paths-ignore:
       - "**/*.md"
+      # Uploading a ZIP should run Apply ZIP Patch first, not build the repo
+      # before the ZIP has been extracted. The patched commit is built through
+      # the vueo_build repository_dispatch above.
+      - "**/*.zip"
 
 permissions:
   contents: write
