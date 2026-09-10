@@ -42,11 +42,11 @@
         "name": "Anichin"
     },
     {
-        "iconUrl": "https://animexin.dev/wp-content/uploads/2020/06/animexinv1.png",
-        "fileHash": "sha256-2fa5b1f92fc891b7221e6d4719743f35483e01f2748b5bb2e9cc89d9aba2d8b1",
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://animexin.dev&size=%size%",
+        "fileHash": "sha256-fdb246c25ddfc75d7e8d541159788fa9d2d7b650dcf77b3b0eb1af3a03e97c3b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 60866,
+        "fileSize": 60867,
         "status": 1,
         "language": "id",
         "authors": [
@@ -57,15 +57,15 @@
             "Anime",
             "Cartoon"
         ],
-        "version": 14,
+        "version": 15,
         "internalName": "Animexin",
         "description": "Animexin \u2014 Streaming Donghua Subtitle Indonesia",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/Animexin.cs3",
         "name": "Animexin"
     },
     {
-        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://kisskh.id/&size=256",
-        "fileHash": "sha256-3c181a5a5276ea5e0df748a86599a020ce75270e5dd9903554db29686ad3e0e9",
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://kisskh.club&size=%size%",
+        "fileHash": "sha256-02b10d2432d5bc11b6518e3495b710d63ffa7f6b5a8f26631abbf8c3f3aa520c",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
         "fileSize": 37518,
@@ -77,15 +77,15 @@
         "tvTypes": [
             "AsianDrama"
         ],
-        "version": 3,
+        "version": 4,
         "internalName": "KissKH",
         "description": "Watch drama online in high quality. Free download high quality drama. Various formats from 240p to 720p HD (or even 1080p). Feel Free To Watch!",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/KissKH.cs3",
         "name": "KissKH"
     },
     {
-        "iconUrl": "https://movieboxph.app/wp-content/uploads/2025/11/Movie-Box-icon.webp",
-        "fileHash": "sha256-c78efa40f67570c7536cacdeaf3b5693686c1ba616e7e4dff41e785e2f345d90",
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://movieboxhd.net&size=%size%",
+        "fileHash": "sha256-772553fc49d915b2f2c2596c79248976fe9902c34fc7df4edffd4cf6a5327958",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
         "fileSize": 61009,
@@ -100,15 +100,15 @@
             "Anime",
             "AsianDrama"
         ],
-        "version": 14,
+        "version": 15,
         "internalName": "MovieBox",
         "description": "MovieBox - Streaming Movie Subtitle Indonesia",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/MovieBox.cs3",
         "name": "MovieBox"
     },
     {
-        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ww03.pencurimovie.bond&size=%size%",
-        "fileHash": "sha256-ab28279e038d448f4b1506942fe4e7834f4715cd96e883b8448a1e06127ea827",
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://pencurimoviesubmalay26.site&size=%size%",
+        "fileHash": "sha256-70adf39896e5f66b6d4b552e471424dcf073e68b253ee4147b4c419906129c8a",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
         "fileSize": 78775,
@@ -121,15 +121,15 @@
             "Movie",
             "TvSeries"
         ],
-        "version": 10,
+        "version": 11,
         "internalName": "MSM21",
         "description": "MSM21 \u2014 Streaming Movie and TV Series",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/MSM21.cs3",
         "name": "MSM21"
     },
     {
-        "iconUrl": "https://cdn.animaapp.com/projects/6215178219a2fd7886bf5a52/releases/621519ce72dadb5503e24f9f/img/app-icon%401x.png",
-        "fileHash": "sha256-718276ab603c58c32ce924585d18197e6a03c252589f805e19e886a3d37277b3",
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://onetouchtv.co&size=%size%",
+        "fileHash": "sha256-e78346b63abf749f62ba1e50e503a16bbaa8cb3b62cbfebd0156083916021c5c",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
         "fileSize": 41613,
@@ -144,15 +144,15 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 3,
+        "version": 4,
         "internalName": "OneTouchTV",
         "description": "OneTouchTV - Asian Drama and Anime",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/OneTouchTV.cs3",
         "name": "OneTouchTV"
     },
     {
-        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://45.11.57.243&size=%size%",
-        "fileHash": "sha256-039eb5f05a6713c5579885f31d121ba40d77d85ed21ba38e2e9f3d61f86e7b73",
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://oppa.biz&size=%size%",
+        "fileHash": "sha256-eb85be1061584271c1e18aff3292f7e77b8b695f2c1488e581473ef46d60b30b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
         "fileSize": 50342,
@@ -166,15 +166,15 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 4,
+        "version": 5,
         "internalName": "OppaDrama",
         "description": "OppaDrama \u2014 Streaming Drama Korean, Movie and TV Series",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/OppaDrama.cs3",
         "name": "OppaDrama"
     },
     {
-        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ww03.pencurimovie.bond&size=%size%",
-        "fileHash": "sha256-7279c10491c00ec2ca788957a3658a38a60b2a911443ffce8e1123a0ee086429",
+        "iconUrl": "https://www.google.com/s2/favicons?domain=pencurimovie.baby&sz=256",
+        "fileHash": "sha256-4225b199e5cd602a59e58306d9cefa81d4159d343de554c4093a7f16d6a70ae7",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
         "fileSize": 29552,
@@ -187,7 +187,7 @@
             "Movie",
             "TvSeries"
         ],
-        "version": 3,
+        "version": 4,
         "internalName": "PencuriMovie",
         "description": "PencuriMovie \u2014 Streaming Movie and TV Series",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/PencuriMovie.cs3",
