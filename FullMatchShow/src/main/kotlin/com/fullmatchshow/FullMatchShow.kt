@@ -1,5 +1,3 @@
-// ! Bu araç @ByAyzen tarafından | @cs-karma için yazılmıştır.
-
 package com.fullmatchshow
 
 import android.util.Log
@@ -10,8 +8,8 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 
 class Footreplays : MainAPI() {
-    override var mainUrl = "https://www.footreplays.com"
-    override var name = "FootReplays"
+    override var mainUrl = "https://fullmatchshows.com/"
+    override var name = "Full Match Show"
     override val hasMainPage = true
     override var lang = "en"
     override val hasQuickSearch = false
