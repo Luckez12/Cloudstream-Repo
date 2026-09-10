@@ -65,10 +65,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://fullmatchshows.com&size=%size%",
-        "fileHash": "sha256-358efc8e67fb0875ca4433dbd54af4a84642d3039197803b7e256b41c754026b",
+        "fileHash": "sha256-29b257c1ed293ea5de74064d921ff1970c52939c110e5da45286cf77070f3daf",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 30924,
+        "fileSize": 41543,
         "status": 1,
         "language": "en",
         "authors": [
@@ -78,7 +78,7 @@
             "TvSeries",
             "Others"
         ],
-        "version": 4,
+        "version": 6,
         "internalName": "FullMatchShow",
         "description": "Football full match replays and highlights from FullMatchShows",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/FullMatchShow.cs3",
