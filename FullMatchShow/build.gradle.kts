@@ -1,4 +1,4 @@
-version = 4
+version = 5
 cloudstream {
     language = "en"
     description = "Football full match replays and highlights from FullMatchShows"

@@ -68,7 +68,7 @@ class FullMatchShow : MainAPI() {
 
         Log.w(
             "FullMatchShow",
-            "FULLMATCH_V4_PAGE section=${request.name} page=$page items=${items.size} hasNext=$hasNext ms=${System.currentTimeMillis() - started}"
+            "FULLMATCH_V5_PAGE section=${request.name} page=$page items=${items.size} hasNext=$hasNext ms=${System.currentTimeMillis() - started}"
         )
 
         return newHomePageResponse(
@@ -103,7 +103,7 @@ class FullMatchShow : MainAPI() {
 
         Log.w(
             "FullMatchShow",
-            "FULLMATCH_V4_SEARCH query=${query.trim()} page=$page items=${items.size} hasNext=$hasNext ms=${System.currentTimeMillis() - started}"
+            "FULLMATCH_V5_SEARCH query=${query.trim()} page=$page items=${items.size} hasNext=$hasNext ms=${System.currentTimeMillis() - started}"
         )
 
         return newSearchResponseList(items, hasNext = hasNext)
@@ -280,7 +280,7 @@ class FullMatchShow : MainAPI() {
 
         Log.w(
             "FullMatchShow",
-            "FULLMATCH_V4_LOAD title=${title.take(60)} groups=${groups.size} urls=${groups.sumOf { it.urls.size }} ms=${System.currentTimeMillis() - started} labels=${groups.take(8).joinToString(" | ") { it.label }}"
+            "FULLMATCH_V5_LOAD title=${title.take(60)} groups=${groups.size} urls=${groups.sumOf { it.urls.size }} ms=${System.currentTimeMillis() - started} labels=${groups.take(8).joinToString(" | ") { it.label }}"
         )
 
         if (episodes.isEmpty()) return null
@@ -463,41 +463,57 @@ class FullMatchShow : MainAPI() {
 
         if (payload.urls.isEmpty()) return false
 
-        val emittedUrls: MutableSet<String> = ConcurrentHashMap.newKeySet()
-        val visitedPlayers: MutableSet<String> = ConcurrentHashMap.newKeySet()
+        val emittedKeys: MutableSet<String> = ConcurrentHashMap.newKeySet()
         val emittedCount = AtomicInteger(0)
         val firstLinkMs = AtomicInteger(-1)
         val semaphore = Semaphore(PLAYER_CONCURRENCY)
 
-        val wrappedCallback: (ExtractorLink) -> Unit = { link ->
-            if (emittedUrls.add(link.url)) {
-                val elapsed = (System.currentTimeMillis() - started)
-                    .coerceAtMost(Int.MAX_VALUE.toLong())
-                    .toInt()
-
-                if (firstLinkMs.compareAndSet(-1, elapsed)) {
-                    Log.w(
-                        "FullMatchShow",
-                        "FULLMATCH_V4_FIRST_LINK label=${payload.label} ms=$elapsed source=${link.name}"
-                    )
-                }
-
-                emittedCount.incrementAndGet()
-                callback(link)
-            }
-        }
+        val mirrors = payload.urls
+            .distinct()
+            .sortedBy { mirrorPriority(it) }
 
         coroutineScope {
-            payload.urls.map { playerUrl ->
+            mirrors.map { playerUrl ->
                 async {
                     semaphore.withPermit {
+                        val mirrorHost = hostName(playerUrl).lowercase()
+                        val visitedPlayers: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+                        val perMirrorCallback: (ExtractorLink) -> Unit = { rawLink ->
+                            val safeLink = makeTvSafeLink(
+                                rawLink,
+                                payload.label,
+                                mirrorHost,
+                                payload.pageUrl
+                            )
+
+                            // Keep mirrors independent. Two mirror pages can resolve to the
+                            // same media URL but require different referer/header behavior.
+                            val key = "$mirrorHost\u0000${safeLink.url}\u0000${safeLink.referer}"
+                            if (emittedKeys.add(key)) {
+                                val elapsed = (System.currentTimeMillis() - started)
+                                    .coerceAtMost(Int.MAX_VALUE.toLong())
+                                    .toInt()
+
+                                if (firstLinkMs.compareAndSet(-1, elapsed)) {
+                                    Log.w(
+                                        "FullMatchShow",
+                                        "FULLMATCH_V5_FIRST_LINK label=${payload.label} mirror=$mirrorHost ms=$elapsed source=${safeLink.name}"
+                                    )
+                                }
+
+                                emittedCount.incrementAndGet()
+                                callback(safeLink)
+                            }
+                        }
+
                         resolvePlayer(
                             playerUrl,
                             payload.pageUrl,
                             depth = 0,
                             visitedPlayers = visitedPlayers,
                             subtitleCallback = subtitleCallback,
-                            callback = wrappedCallback
+                            callback = perMirrorCallback
                         )
                     }
                 }
@@ -507,10 +523,65 @@ class FullMatchShow : MainAPI() {
         val success = emittedCount.get() > 0
         Log.w(
             "FullMatchShow",
-            "FULLMATCH_V4_DONE label=${payload.label} players=${payload.urls.size} links=${emittedCount.get()} firstMs=${firstLinkMs.get()} totalMs=${System.currentTimeMillis() - started} success=$success"
+            "FULLMATCH_V5_DONE label=${payload.label} mirrors=${mirrors.size} links=${emittedCount.get()} firstMs=${firstLinkMs.get()} totalMs=${System.currentTimeMillis() - started} success=$success hosts=${mirrors.joinToString(",") { hostName(it) }}"
         )
 
         return success
+    }
+
+    private fun mirrorPriority(url: String): Int {
+        return when (hostName(url).lowercase()) {
+            "playmate.to" -> 0
+            "playmogo.com" -> 1
+            "mixdrop.top", "miixdrop.top" -> 2
+            "fullmatchshows.embedseek.com" -> 3
+            else -> 4
+        }
+    }
+
+    private fun prettyMirrorName(host: String): String {
+        return when {
+            host.contains("playmate") -> "Playmate"
+            host.contains("playmogo") -> "PlayMogo"
+            host.contains("mixdrop") || host.contains("miixdrop") -> "MixDrop"
+            host.contains("embedseek") -> "EmbedSeek"
+            host.isNotBlank() -> host.removePrefix("www.")
+            else -> "Mirror"
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun makeTvSafeLink(
+        link: ExtractorLink,
+        label: String,
+        mirrorHost: String,
+        pageUrl: String
+    ): ExtractorLink {
+        val headers = LinkedHashMap<String, String>()
+        headers.putAll(link.headers)
+        if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+            headers["User-Agent"] = BROWSER_UA
+        }
+
+        val fallbackReferer = when {
+            mirrorHost.isNotBlank() -> "https://$mirrorHost/"
+            else -> pageUrl
+        }
+        val referer = link.referer.ifBlank { fallbackReferer }
+        val mirrorName = prettyMirrorName(mirrorHost)
+        val cleanLabel = label.replace(Regex("""\s+"""), " ").trim().ifBlank { "Video" }
+
+        return ExtractorLink(
+            source = "FullMatchShow",
+            name = "$cleanLabel • $mirrorName",
+            url = link.url,
+            referer = referer,
+            quality = link.quality,
+            headers = headers,
+            extractorData = link.extractorData,
+            type = link.type,
+            audioTracks = link.audioTracks
+        )
     }
 
     private fun parseLegacyEpisodeData(data: String): EpisodeData? {
@@ -684,10 +755,12 @@ class FullMatchShow : MainAPI() {
             "vidoza"
         )
 
+        private const val BROWSER_UA = "Mozilla/5.0 (Linux; Android 10; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+
         private const val PLAYER_CONCURRENCY = 4
         private const val MAX_WRAPPER_DEPTH = 2
         private const val MAX_NESTED_PLAYERS = 8
-        private const val EXTRACTOR_TIMEOUT_MS = 9_000L
+        private const val EXTRACTOR_TIMEOUT_MS = 11_000L
         private const val WRAPPER_TIMEOUT_MS = 6_000L
     }
 }
