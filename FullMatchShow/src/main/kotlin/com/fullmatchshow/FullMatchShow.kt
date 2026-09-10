@@ -3,6 +3,7 @@ package com.fullmatchshow
 import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -67,7 +68,7 @@ class FullMatchShow : MainAPI() {
 
         Log.w(
             "FullMatchShow",
-            "FULLMATCH_V3_PAGE section=${request.name} page=$page items=${items.size} hasNext=$hasNext ms=${System.currentTimeMillis() - started}"
+            "FULLMATCH_V4_PAGE section=${request.name} page=$page items=${items.size} hasNext=$hasNext ms=${System.currentTimeMillis() - started}"
         )
 
         return newHomePageResponse(
@@ -102,14 +103,20 @@ class FullMatchShow : MainAPI() {
 
         Log.w(
             "FullMatchShow",
-            "FULLMATCH_V3_SEARCH query=${query.trim()} page=$page items=${items.size} hasNext=$hasNext ms=${System.currentTimeMillis() - started}"
+            "FULLMATCH_V4_SEARCH query=${query.trim()} page=$page items=${items.size} hasNext=$hasNext ms=${System.currentTimeMillis() - started}"
         )
 
         return newSearchResponseList(items, hasNext = hasNext)
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? {
-        return search(query, 1)
+        val encoded = URLEncoder.encode(query.trim(), "UTF-8")
+        if (encoded.isBlank()) return emptyList()
+
+        return app.get("$mainUrl/?s=$encoded")
+            .document
+            .collectMatchCards()
+            .take(12)
     }
 
     private fun Document.hasNextPage(): Boolean {
@@ -273,7 +280,7 @@ class FullMatchShow : MainAPI() {
 
         Log.w(
             "FullMatchShow",
-            "FULLMATCH_V3_LOAD title=${title.take(60)} groups=${groups.size} urls=${groups.sumOf { it.urls.size }} ms=${System.currentTimeMillis() - started} labels=${groups.take(8).joinToString(" | ") { it.label }}"
+            "FULLMATCH_V4_LOAD title=${title.take(60)} groups=${groups.size} urls=${groups.sumOf { it.urls.size }} ms=${System.currentTimeMillis() - started} labels=${groups.take(8).joinToString(" | ") { it.label }}"
         )
 
         if (episodes.isEmpty()) return null
@@ -471,7 +478,7 @@ class FullMatchShow : MainAPI() {
                 if (firstLinkMs.compareAndSet(-1, elapsed)) {
                     Log.w(
                         "FullMatchShow",
-                        "FULLMATCH_V3_FIRST_LINK label=${payload.label} ms=$elapsed source=${link.name}"
+                        "FULLMATCH_V4_FIRST_LINK label=${payload.label} ms=$elapsed source=${link.name}"
                     )
                 }
 
@@ -500,7 +507,7 @@ class FullMatchShow : MainAPI() {
         val success = emittedCount.get() > 0
         Log.w(
             "FullMatchShow",
-            "FULLMATCH_V3_DONE label=${payload.label} players=${payload.urls.size} links=${emittedCount.get()} firstMs=${firstLinkMs.get()} totalMs=${System.currentTimeMillis() - started} success=$success"
+            "FULLMATCH_V4_DONE label=${payload.label} players=${payload.urls.size} links=${emittedCount.get()} firstMs=${firstLinkMs.get()} totalMs=${System.currentTimeMillis() - started} success=$success"
         )
 
         return success
