@@ -64,6 +64,27 @@
         "name": "Animexin"
     },
     {
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://fullmatchshows.com&size=%size%",
+        "fileHash": "sha256-e17e19d3aa5be0dd45f7430486c8422ae5e39c20c76a6013bed8b8610a9483c6",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
+        "fileSize": 16528,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "Luckez"
+        ],
+        "tvTypes": [
+            "TvSeries",
+            "Others"
+        ],
+        "version": 2,
+        "internalName": "FullMatchShow",
+        "description": "Football full match replays and highlights from FullMatchShows",
+        "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/FullMatchShow.cs3",
+        "name": "FullMatchShow"
+    },
+    {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://kisskh.club&size=%size%",
         "fileHash": "sha256-02b10d2432d5bc11b6518e3495b710d63ffa7f6b5a8f26631abbf8c3f3aa520c",
         "apiVersion": 1,
