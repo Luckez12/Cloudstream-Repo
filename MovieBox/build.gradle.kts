@@ -10,5 +10,5 @@ cloudstream {
         "Anime",
         "AsianDrama",
     )
-    iconUrl = "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://movieboxhd.net&size=%size%"
+    iconUrl = "https://www.google.com/s2/favicons?domain=movieboxhd.net&sz=256"
 }
