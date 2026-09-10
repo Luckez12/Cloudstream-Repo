@@ -65,10 +65,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://fullmatchshows.com&size=%size%",
-        "fileHash": "sha256-e17e19d3aa5be0dd45f7430486c8422ae5e39c20c76a6013bed8b8610a9483c6",
+        "fileHash": "sha256-7bbeb48d20a2c71913d87c9ceb1d7489ae87503c200b8b60968f777706480c20",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 16528,
+        "fileSize": 16515,
         "status": 1,
         "language": "en",
         "authors": [
