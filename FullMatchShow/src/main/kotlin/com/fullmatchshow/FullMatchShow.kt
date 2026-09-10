@@ -7,7 +7,7 @@ import java.net.URLEncoder
 
 class FullMatchShow : MainAPI() {
     override var mainUrl = "https://fullmatchshows.com"
-    override var name = "Full Match Show"
+    override var name = "FullMatchShow"
     override val hasMainPage = true
     override var lang = "en"
     override val hasQuickSearch = true
