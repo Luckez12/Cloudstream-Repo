@@ -1,6 +1,6 @@
 package com.fullmatchshow
 
-import com.lagradost.cloudstream3.Qualities
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
