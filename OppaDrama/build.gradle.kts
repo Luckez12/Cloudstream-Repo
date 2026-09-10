@@ -1,4 +1,4 @@
-version = 4
+version = 5
 cloudstream {
     description = "OppaDrama — Streaming Drama Korean, Movie and TV Series"
     language = "id"
@@ -17,6 +17,5 @@ cloudstream {
         "TvSeries",
         "Movie",
     )
-
-    iconUrl = "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://45.11.57.243&size=%size%"
+    iconUrl = "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://oppa.biz&size=%size%"
 }

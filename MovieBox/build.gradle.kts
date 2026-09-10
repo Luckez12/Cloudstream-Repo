@@ -1,4 +1,4 @@
-version = 14
+version = 15
 cloudstream {
     language = "en"
     description = "MovieBox - Streaming Movie Subtitle Indonesia"
@@ -10,6 +10,5 @@ cloudstream {
         "Anime",
         "AsianDrama",
     )
-    
-    iconUrl = "https://movieboxph.app/wp-content/uploads/2025/11/Movie-Box-icon.webp"
+    iconUrl = "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://movieboxhd.net&size=%size%"
 }
