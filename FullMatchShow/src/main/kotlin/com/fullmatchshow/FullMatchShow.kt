@@ -68,7 +68,9 @@ class FullMatchShow : MainAPI() {
         val recommendations = document.select("div.p-wrap.p-grid, div.p-wrap, article.p-wrap")
             .mapNotNull { it.toSearchResult() }.distinctBy { it.url }
         val episodes = document.select("table.video-table, .video-table, table[class*=video]")
-            .flatMap { it.toEpisodes() }.distinctBy { it.data }
+            .flatMap { it.toEpisodes() }
+            .ifEmpty { document.toLinkEpisodes() }
+            .distinctBy { it.data }
 
         if (episodes.isEmpty()) return null
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
@@ -114,6 +116,24 @@ class FullMatchShow : MainAPI() {
         }
     }
 
+    private fun org.jsoup.nodes.Document.toLinkEpisodes(): List<Episode> {
+        val linkPattern = Regex("highlights?|extended|full\\s*match|[12]st?\\s*half", RegexOption.IGNORE_CASE)
+        return select(".entry-content a[href], .post-content a[href], main a[href]")
+            .filter { anchor ->
+                val href = anchor.attr("href")
+                val text = anchor.text().trim()
+                href.startsWith("http", true) && text.isNotBlank() && linkPattern.containsMatchIn(text)
+            }
+            .distinctBy { it.attr("href") }
+            .mapIndexed { index, anchor ->
+                val label = anchor.text().trim()
+                newEpisode(data = "${fixUrl(anchor.attr("href"))}\t$label") {
+                    name = label
+                    episode = index + 1
+                }
+            }
+    }
+
     private fun extractVideoUrl(href: String, onclick: String, anchor: Element?): String {
         val fromOnclick = Regex("""(?:loadVideo|playVideo)\s*\(\s*['\"]([^'\"]+)['\"]""")
             .find(onclick)?.groupValues?.getOrNull(1).orEmpty()
@@ -136,7 +156,16 @@ class FullMatchShow : MainAPI() {
         if (videoUrl.isBlank()) return false
 
         loadExtractor(videoUrl, mainUrl, subtitleCallback) { link ->
-            callback(newExtractorLink(source = label, name = label, url = link.url, type = link.type))
+            callback(
+                kotlinx.coroutines.runBlocking {
+                    newExtractorLink(
+                        source = label,
+                        name = label,
+                        url = link.url,
+                        type = link.type
+                    )
+                }
+            )
         }
         return true
     }
