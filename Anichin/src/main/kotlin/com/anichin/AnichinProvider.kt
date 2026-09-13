@@ -1,6 +1,7 @@
 package com.anichin
 
 import android.util.Base64
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
@@ -612,6 +613,116 @@ class AnichinProvider : MainAPI() {
             ?.let { absoluteUrl(baseUrl, it) }
     }
 
+    private fun isDirectMediaUrl(url: String): Boolean {
+        val clean = url.substringBefore('#').lowercase()
+        return clean.contains(".m3u8") ||
+            clean.contains(".mpd") ||
+            clean.contains(".mp4")
+    }
+
+    private fun isLikelyPlayerUrl(url: String): Boolean {
+        val value = url.lowercase()
+        if (isDirectMediaUrl(value)) return true
+
+        return PLAYER_HOST_HINTS.any { value.contains(it) }
+    }
+
+    private fun playerRequestHeaders(): Map<String, String> = mapOf(
+        "User-Agent" to USER_AGENT,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.9,id;q=0.8",
+        "Sec-Fetch-Dest" to "iframe",
+        "Sec-Fetch-Mode" to "navigate"
+    )
+
+    private fun decodeBase64Text(value: String): String? {
+        val token = value.trim()
+        if (token.length < 20) return null
+
+        return runCatching {
+            String(Base64.decode(token, Base64.DEFAULT))
+        }.getOrElse {
+            runCatching {
+                String(Base64.decode(token, Base64.URL_SAFE))
+            }.getOrNull()
+        }
+    }
+
+    private fun extractPlayerUrlsFromText(
+        rawText: String,
+        baseUrl: String
+    ): List<String> {
+        val text = rawText
+            .replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("\\u003d", "=")
+            .replace("&amp;", "&")
+            .replace("&quot;", "\"")
+
+        val urls = mutableListOf<String>()
+
+        Regex(
+            """<iframe[^>]+(?:src|data-src|data-video|data-embed)\s*=\s*[\"']([^\"']+)[\"']""",
+            RegexOption.IGNORE_CASE
+        ).findAll(text).forEach { match ->
+            match.groupValues.getOrNull(1)
+                ?.let { absoluteUrl(baseUrl, it) }
+                ?.let(urls::add)
+        }
+
+        Regex(
+            """(?:file|source|src|url|embed|player|video)\s*[:=]\s*[\"'](https?://[^\"']+)[\"']""",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE)
+        ).findAll(text).forEach { match ->
+            match.groupValues.getOrNull(1)
+                ?.let { absoluteUrl(baseUrl, it) }
+                ?.let(urls::add)
+        }
+
+        Regex(
+            """https?://[^\s\"'<>\\]+""",
+            RegexOption.IGNORE_CASE
+        ).findAll(text).forEach { match ->
+            val url = match.value
+                .replace("\\/", "/")
+                .trimEnd(')', ']', '}', ',', ';')
+
+            if (isLikelyPlayerUrl(url)) {
+                absoluteUrl(baseUrl, url)?.let(urls::add)
+            }
+        }
+
+        Regex(
+            """[\"']([A-Za-z0-9+/_=-]{24,})[\"']"""
+        ).findAll(text).forEach { match ->
+            val encoded = match.groupValues.getOrNull(1) ?: return@forEach
+            val decoded = decodeBase64Text(encoded) ?: return@forEach
+
+            Regex(
+                """<iframe[^>]+(?:src|data-src)\s*=\s*[\"']([^\"']+)[\"']""",
+                RegexOption.IGNORE_CASE
+            ).findAll(decoded).forEach { iframe ->
+                iframe.groupValues.getOrNull(1)
+                    ?.let { absoluteUrl(baseUrl, it) }
+                    ?.let(urls::add)
+            }
+
+            Regex(
+                """https?://[^\s\"'<>]+""",
+                RegexOption.IGNORE_CASE
+            ).findAll(decoded).forEach { urlMatch ->
+                val url = urlMatch.value.replace("\\/", "/")
+                if (isLikelyPlayerUrl(url)) {
+                    absoluteUrl(baseUrl, url)?.let(urls::add)
+                }
+            }
+        }
+
+        return urls
+            .filter { it.startsWith("http") }
+            .distinct()
+    }
+
     private fun Document.collectTopLevelPlayers(
         pageUrl: String
     ): List<PlayerOption> {
@@ -624,13 +735,16 @@ class AnichinProvider : MainAPI() {
                 ".player-embed iframe[data-src], " +
                 ".embed_holder iframe[src], " +
                 ".embed_holder iframe[data-src], " +
-                "iframe.metaframe[src]"
+                "iframe.metaframe[src], " +
+                "iframe[src], iframe[data-src]"
         ).forEachIndexed { index, iframe ->
             val src = iframe.attr("src")
                 .ifBlank { iframe.attr("data-src") }
 
             val url = absoluteUrl(pageUrl, src)
                 ?: return@forEachIndexed
+
+            if (!isLikelyPlayerUrl(url)) return@forEachIndexed
 
             players.add(
                 PlayerOption(
@@ -647,7 +761,12 @@ class AnichinProvider : MainAPI() {
                 ".server option, " +
                 "option[data-index], " +
                 "option[data-video], " +
-                "option[data-src]"
+                "option[data-src], " +
+                "option[data-embed], " +
+                "option[data-url], " +
+                "option[data-link], " +
+                "option[data-player], " +
+                "option[value]"
         ).forEach { option ->
             val label = option.text()
                 .trim()
@@ -658,7 +777,11 @@ class AnichinProvider : MainAPI() {
                 option.attr("value"),
                 option.attr("data-video"),
                 option.attr("data-src"),
-                option.attr("data-embed")
+                option.attr("data-embed"),
+                option.attr("data-url"),
+                option.attr("data-link"),
+                option.attr("data-player"),
+                option.attr("data-iframe")
             )
 
             candidates.forEach { raw ->
@@ -672,6 +795,39 @@ class AnichinProvider : MainAPI() {
                     )
                 )
             }
+        }
+
+        select(
+            "[data-video], [data-embed], [data-player], [data-url], [data-link], [data-iframe]"
+        ).forEach { element ->
+            listOf(
+                element.attr("data-video"),
+                element.attr("data-embed"),
+                element.attr("data-player"),
+                element.attr("data-url"),
+                element.attr("data-link"),
+                element.attr("data-iframe")
+            ).forEach { raw ->
+                decodePlayerValue(raw, pageUrl)?.let { url ->
+                    if (isLikelyPlayerUrl(url)) {
+                        players.add(
+                            PlayerOption(
+                                label = element.text().trim().ifBlank { "Server" },
+                                url = url
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        extractPlayerUrlsFromText(html(), pageUrl).forEachIndexed { index, url ->
+            players.add(
+                PlayerOption(
+                    label = "Embedded ${index + 1}",
+                    url = url
+                )
+            )
         }
 
         return players
@@ -689,33 +845,44 @@ class AnichinProvider : MainAPI() {
             "iframe[src], " +
                 "iframe[data-src], " +
                 "video source[src], " +
-                "source[src]"
+                "source[src], " +
+                "video[src], " +
+                "[data-video], [data-embed], [data-player], [data-url], [data-link], [data-iframe]"
         ).forEach { element ->
-            val raw = element.attr("src")
-                .ifBlank { element.attr("data-src") }
+            listOf(
+                element.attr("src"),
+                element.attr("data-src"),
+                element.attr("data-video"),
+                element.attr("data-embed"),
+                element.attr("data-player"),
+                element.attr("data-url"),
+                element.attr("data-link"),
+                element.attr("data-iframe")
+            ).forEach { raw ->
+                if (raw.isBlank()) return@forEach
 
-            absoluteUrl(pageUrl, raw)?.let { urls.add(it) }
-        }
+                val decoded = decodePlayerValue(raw, pageUrl)
+                    ?: absoluteUrl(pageUrl, raw)
 
-        select("script").forEach { script ->
-            val text = script.data().ifBlank { script.html() }
-
-            Regex(
-                """(?:file|source|src)\s*[:=]\s*["'](https?://[^"']+)["']""",
-                setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE)
-            ).findAll(text).forEach { match ->
-                match.groupValues.getOrNull(1)
-                    ?.let { absoluteUrl(pageUrl, it) }
-                    ?.let { urls.add(it) }
-            }
-
-            Regex(
-                """https?://[^\s"'<>]+\.m3u8(?:\?[^\s"'<>]*)?""",
-                RegexOption.IGNORE_CASE
-            ).findAll(text).forEach { match ->
-                urls.add(match.value.replace("\\/", "/"))
+                if (decoded != null && isLikelyPlayerUrl(decoded)) {
+                    urls.add(decoded)
+                }
             }
         }
+
+        select("script, textarea").forEach { element ->
+            val scriptText = element.data()
+                .ifBlank { element.html() }
+
+            urls.addAll(
+                extractPlayerUrlsFromText(
+                    scriptText,
+                    pageUrl
+                )
+            )
+        }
+
+        urls.addAll(extractPlayerUrlsFromText(html(), pageUrl))
 
         return urls
             .filter { it.startsWith("http") }
@@ -726,15 +893,36 @@ class AnichinProvider : MainAPI() {
         url: String,
         referer: String
     ): Document? {
-        return try {
-            withTimeoutOrNull(PLAYER_REQUEST_TIMEOUT_MS) {
-                app.get(url, referer = referer).document
+        val referers = listOf(
+            referer,
+            "$mainUrl/",
+            "https://anichin.care/"
+        ).filter { it.isNotBlank() }.distinct()
+
+        for (candidateReferer in referers) {
+            val document = try {
+                withTimeoutOrNull(PLAYER_REQUEST_TIMEOUT_MS) {
+                    app.get(
+                        url,
+                        referer = candidateReferer,
+                        headers = playerRequestHeaders()
+                    ).document
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            null
+
+            if (document != null) {
+                val hasPlayer = document.collectNestedPlayerUrls(url).isNotEmpty()
+                if (hasPlayer || !url.contains("anichin-player.web.id", true)) {
+                    return document
+                }
+            }
         }
+
+        return null
     }
 
     private suspend fun tryLoadExtractor(
@@ -749,6 +937,30 @@ class AnichinProvider : MainAPI() {
 
         if (!attemptedUrls.add(attemptKey)) {
             return false
+        }
+
+        if (isDirectMediaUrl(url)) {
+            if (!emittedUrls.add(url)) return false
+
+            val type = when {
+                url.contains(".m3u8", true) -> ExtractorLinkType.M3U8
+                url.contains(".mpd", true) -> ExtractorLinkType.DASH
+                else -> ExtractorLinkType.VIDEO
+            }
+
+            callback(
+                newExtractorLink(
+                    source = "Anichin Direct",
+                    name = "Anichin Direct",
+                    url = url,
+                    type = type
+                ) {
+                    this.referer = referer
+                    this.headers = mapOf("User-Agent" to USER_AGENT)
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+            return true
         }
 
         val emitted = AtomicBoolean(false)
@@ -940,24 +1152,36 @@ class AnichinProvider : MainAPI() {
         val emittedUrls: MutableSet<String> =
             ConcurrentHashMap.newKeySet()
 
-        val players = document.collectTopLevelPlayers(data)
+        val topLevelPlayers = document.collectTopLevelPlayers(data)
+        val nestedPlayers = document.collectNestedPlayerUrls(data)
 
-        if (players.isEmpty()) {
-            val staticPlayers = document.collectNestedPlayerUrls(data)
-
-            return collectTwoLane(staticPlayers) { playerUrl ->
-                tryLoadExtractor(
-                    playerUrl,
-                    data,
-                    attemptedUrls,
-                    emittedUrls,
-                    effectiveSubtitleCallback,
-                    callback
+        val players = buildList {
+            addAll(topLevelPlayers)
+            nestedPlayers.forEachIndexed { index, url ->
+                add(
+                    PlayerOption(
+                        label = "Fallback ${index + 1}",
+                        url = url
+                    )
                 )
             }
         }
+            .distinctBy { it.url }
+            .sortedBy { it.priority() }
 
-        return collectTwoLane(players) { player ->
+        Log.w(
+            "Anichin",
+            "ANICHIN_V31_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+                "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
+                "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
+        )
+
+        if (players.isEmpty()) {
+            Log.w("Anichin", "ANICHIN_V31_DONE candidates=0 success=false")
+            return false
+        }
+
+        val success = collectTwoLane(players) { player ->
             resolvePlayerPipeline(
                 player.url,
                 data,
@@ -967,6 +1191,13 @@ class AnichinProvider : MainAPI() {
                 callback
             )
         }
+
+        Log.w(
+            "Anichin",
+            "ANICHIN_V31_DONE candidates=${players.size} emitted=${emittedUrls.size} success=$success"
+        )
+
+        return success
     }
 
     private fun PlayerOption.priority(): Int {
@@ -986,13 +1217,38 @@ class AnichinProvider : MainAPI() {
     }
 
     companion object {
-        private const val FAST_LANE_SIZE = 3
-        private const val FAST_LANE_CONCURRENCY = 3
-        private const val FULL_LANE_CONCURRENCY = 3
-        private const val MAX_NESTED_CONCURRENCY = 2
+        private val PLAYER_HOST_HINTS = listOf(
+            "ok.ru",
+            "odnoklassniki",
+            "dailymotion",
+            "rumble",
+            "anichin-player.web.id",
+            "anichin.stream",
+            "streamruby",
+            "rubyvid",
+            "emturbovid",
+            "turboviplay",
+            "morencius",
+            "vidhide",
+            "dood",
+            "streamwish",
+            "wish",
+            "odysee.com",
+            "odycdn.com",
+            "mega.nz",
+            "megacloud",
+            "filemoon",
+            "streamtape",
+            "mixdrop"
+        )
+
+        private const val FAST_LANE_SIZE = 4
+        private const val FAST_LANE_CONCURRENCY = 4
+        private const val FULL_LANE_CONCURRENCY = 4
+        private const val MAX_NESTED_CONCURRENCY = 3
 
         private const val EPISODE_REQUEST_TIMEOUT_MS = 10_000L
-        private const val PLAYER_REQUEST_TIMEOUT_MS = 7_000L
-        private const val EXTRACTOR_TIMEOUT_MS = 8_000L
+        private const val PLAYER_REQUEST_TIMEOUT_MS = 10_000L
+        private const val EXTRACTOR_TIMEOUT_MS = 12_000L
     }
 }
