@@ -24,7 +24,7 @@ import javax.crypto.spec.SecretKeySpec
 class MovieboxProvider : MainAPI() {
 
     override var mainUrl = "https://movieboxhd.net"
-    override var name = "MovieBox 👾 v18"
+    override var name = "MovieBox 👾 v19"
     override var lang = "en"
 
     override val instantLinkLoading = true
@@ -1090,26 +1090,49 @@ class MovieboxProvider : MainAPI() {
     private fun minimumPlaybackBytes(mediaType: Int): Long =
         if (mediaType == 1) 20L * 1024L * 1024L else 8L * 1024L * 1024L
 
-    private suspend fun isUsablePlaybackUrl(
+    private suspend fun shouldRejectH5PlaybackUrl(
+        url: String,
+        mediaType: Int
+    ): Boolean {
+        val probe = probePlaybackUrl(url)
+
+        /*
+         * H5 URLs are already signed playback URLs returned by MovieBox.
+         * A CDN may reject our validation request (403/429), ignore Range, or
+         * hide Content-Range while ExoPlayer can still play the same URL.
+         * Therefore a failed/ambiguous probe must NEVER suppress an H5 source.
+         * Reject only when the probe succeeds and conclusively proves that the
+         * direct media file is a tiny service/update clip.
+         */
+        if (probe.httpCode != 200 && probe.httpCode != 206) return false
+
+        val lowerUrl = url.lowercase()
+        if (lowerUrl.contains(".m3u8") || lowerUrl.contains(".mpd")) return false
+
+        val totalBytes = probe.totalBytes
+        if (totalBytes <= 0L) return false
+
+        return totalBytes < minimumPlaybackBytes(mediaType)
+    }
+
+    private suspend fun isVerifiedResourcePlaybackUrl(
         url: String,
         mediaType: Int,
         expectedBytes: Long = 0L
     ): Boolean {
         val probe = probePlaybackUrl(url)
-        val validStatus = probe.httpCode == 200 || probe.httpCode == 206
-        if (!validStatus) return false
+        if (probe.httpCode != 200 && probe.httpCode != 206) return false
 
-        // HLS/DASH manifests are intentionally small; a successful response is
-        // enough for them. The size guard is only for direct media files.
         val lowerUrl = url.lowercase()
         if (lowerUrl.contains(".m3u8") || lowerUrl.contains(".mpd")) return true
 
         val minBytes = minimumPlaybackBytes(mediaType)
         val totalBytes = probe.totalBytes
 
-        // Some CDNs do not expose a total for range requests. If upstream
-        // metadata already says this is a full-size file, keep it usable.
-        if (totalBytes == 0L) return expectedBytes >= minBytes || expectedBytes == 0L
+        // For /resource fallback we keep the JS-style stricter validation:
+        // actual CDN size wins; when unavailable, API metadata must still say
+        // that this is a full-size media file.
+        if (totalBytes <= 0L) return expectedBytes >= minBytes
         return totalBytes >= minBytes
     }
 
@@ -1265,7 +1288,7 @@ class MovieboxProvider : MainAPI() {
 
         for (candidate in candidates) {
             if (candidate.resourceLink in emittedUrls) continue
-            if (isUsablePlaybackUrl(candidate.resourceLink, mediaType, candidate.size)) {
+            if (isVerifiedResourcePlaybackUrl(candidate.resourceLink, mediaType, candidate.size)) {
                 return candidate
             }
         }
@@ -1332,10 +1355,10 @@ class MovieboxProvider : MainAPI() {
             val quality = getQualityFromName(source.resolutions)
             if (quality < 720) continue
 
-            if (isUsablePlaybackUrl(streamUrl, mediaType)) {
+            if (!shouldRejectH5PlaybackUrl(streamUrl, mediaType)) {
                 Log.i(
                     "MovieBox",
-                    "MOVIEBOX_V18_EMIT flow=h5 quality=$quality apiHost=${resolved.host} cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
+                    "MOVIEBOX_V19_EMIT flow=h5 quality=$quality apiHost=${resolved.host} cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
                 )
                 emitLink(
                     streamUrl,
@@ -1350,7 +1373,7 @@ class MovieboxProvider : MainAPI() {
             } else {
                 Log.w(
                     "MovieBox",
-                    "MOVIEBOX_V18_REJECT flow=h5 quality=$quality cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
+                    "MOVIEBOX_V19_REJECT_CONCLUSIVE flow=h5 quality=$quality cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
                 )
             }
         }
@@ -1373,7 +1396,7 @@ class MovieboxProvider : MainAPI() {
             val actualQuality = replacement.resolution.takeIf { it >= 720 } ?: quality
             Log.i(
                 "MovieBox",
-                "MOVIEBOX_V18_EMIT flow=resource-repair requested=$quality actual=$actualQuality resourceId=${replacement.resourceId} cdn=${runCatching { URI(replacement.resourceLink).host }.getOrNull()}"
+                "MOVIEBOX_V19_EMIT flow=resource-repair requested=$quality actual=$actualQuality resourceId=${replacement.resourceId} cdn=${runCatching { URI(replacement.resourceLink).host }.getOrNull()}"
             )
             emitLink(
                 replacement.resourceLink,
