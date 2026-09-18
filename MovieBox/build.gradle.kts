@@ -1,4 +1,4 @@
-version = 15
+version = 16
 cloudstream {
     language = "en"
     description = "MovieBox - Streaming Movie Subtitle Indonesia"

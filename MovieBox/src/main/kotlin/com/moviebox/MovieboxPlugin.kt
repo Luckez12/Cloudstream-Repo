@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 @CloudstreamPlugin
 class MovieboxPlugin : BasePlugin() {
     override fun load() {
-        Log.i("MovieBox", "MOVIEBOX_PLUGIN_LOADED version=14 searchFlow=android-jsonnode playback=h5-direct-cdn-no-referrer")
+        Log.i("MovieBox", "MOVIEBOX_PLUGIN_LOADED version=16 searchFlow=android-v4 playback=mobile-play-info-signcookie+h5-fallback")
         registerMainAPI(MovieboxProvider())
     }
 }
