@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: vueo-zip-patch
+  group: cloudstream-zip-patch
   cancel-in-progress: false
 
 jobs:
@@ -110,6 +110,14 @@ jobs:
                   if ".git" in path.parts:
                       raise SystemExit(f"ZIP cannot modify .git: {raw}")
 
+                  parts = list(path.parts)
+                  for i, part in enumerate(parts[:-1]):
+                      if part == ".github" and i + 1 < len(parts) and parts[i + 1] == "workflows":
+                          raise SystemExit(
+                              f"ZIP cannot modify .github/workflows: {raw}. "
+                              "Upload workflow YAML files separately."
+                          )
+
           print("ZIP validation passed.")
           PY
 
@@ -121,9 +129,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf "$RUNNER_TEMP/vueo_zip_patch"
-          mkdir -p "$RUNNER_TEMP/vueo_zip_patch"
-          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/vueo_zip_patch"
+          rm -rf "$RUNNER_TEMP/cloudstream_zip_patch"
+          mkdir -p "$RUNNER_TEMP/cloudstream_zip_patch"
+          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/cloudstream_zip_patch"
 
       - name: Resolve ZIP root
         if: steps.zip.outputs.found == 'true'
@@ -132,7 +140,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          EXTRACTED="$RUNNER_TEMP/vueo_zip_patch"
+          EXTRACTED="$RUNNER_TEMP/cloudstream_zip_patch"
           SOURCE_ROOT="$EXTRACTED"
 
           mapfile -t TOP_ENTRIES < <(
@@ -170,6 +178,7 @@ jobs:
 
           rsync -a \
             --exclude '.git/' \
+            --exclude '.github/workflows/' \
             "$SOURCE_ROOT/" \
             ./
 
@@ -215,7 +224,7 @@ jobs:
           git commit -m "chore: apply ZIP patch [zip-applied]"
           git push origin HEAD:main
 
-      - name: Trigger VUEO build
+      - name: Trigger CloudStream build
         if: steps.zip.outputs.found == 'true' && steps.changes.outputs.changed == 'true'
         shell: bash
         env:
@@ -226,15 +235,15 @@ jobs:
           gh api \
             --method POST \
             "repos/${GITHUB_REPOSITORY}/dispatches" \
-            -f event_type=vueo_build
+            -f event_type=cloudstream_build
 
       - name: Summary
         if: always()
         shell: bash
         run: |
           {
-            echo "## VUEO ZIP Patch"
+            echo "## CloudStream ZIP Patch"
             echo
             echo "Upload one ZIP containing repository-relative file paths."
-            echo "The workflow extracts the files to those paths, overwrites matching files, removes the ZIP, commits the result, and triggers the VUEO build."
+            echo "The workflow extracts the files to those paths, overwrites matching files, removes the ZIP, commits the result, and triggers the CloudStream build."
           } >> "$GITHUB_STEP_SUMMARY"
