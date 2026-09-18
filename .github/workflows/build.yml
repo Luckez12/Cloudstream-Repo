@@ -14,7 +14,7 @@ on:
   # workflow, so the build must explicitly listen for repository_dispatch.
   repository_dispatch:
     types:
-      - vueo_build
+      - cloudstream_build
 
   push:
     branches:
