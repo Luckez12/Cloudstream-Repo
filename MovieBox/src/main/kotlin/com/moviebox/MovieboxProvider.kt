@@ -24,7 +24,7 @@ import javax.crypto.spec.SecretKeySpec
 class MovieboxProvider : MainAPI() {
 
     override var mainUrl = "https://movieboxhd.net"
-    override var name = "MovieBox 👾 v19"
+    override var name = "MovieBox 👾 v20"
     override var lang = "en"
 
     override val instantLinkLoading = true
@@ -83,6 +83,23 @@ class MovieboxProvider : MainAPI() {
         "https://api.inmoviebox.com"
     )
 
+    /*
+     * Playback-only Android host order copied from the working moviebox.js.
+     * Search/detail keep using mobileHosts above unchanged.
+     */
+    private val playbackMobileHosts = listOf(
+        "https://api.inmoviebox.com",
+        "https://apii.inmoviebox.com",
+        "https://i-api.aoneroom.com",
+        "https://api.aoneroom.com",
+        "https://api6.aoneroom.com",
+        "https://api5.aoneroom.com",
+        "https://api4.aoneroom.com",
+        "https://api4sg.aoneroom.com",
+        "https://api3.aoneroom.com",
+        "https://api6sg.aoneroom.com"
+    )
+
     private val mobileSearchPath = "/wefeed-mobile-bff/subject-api/search"
     private val mobileResourcePath = "/wefeed-mobile-bff/subject-api/resource"
     private val mobileBootstrapPath = "/wefeed-mobile-bff/tab-operating"
@@ -98,6 +115,12 @@ class MovieboxProvider : MainAPI() {
 
     @Volatile
     private var mobileAuthToken: String? = null
+
+    @Volatile
+    private var playbackAuthToken: String? = null
+
+    @Volatile
+    private var preferredPlaybackMobileHost: String? = null
 
     private val mobileRequestTimeoutSeconds = 6L
 
@@ -373,6 +396,89 @@ class MovieboxProvider : MainAPI() {
                 put("Authorization", "Bearer $token")
             }
         }
+    }
+
+    private fun playbackClientInfo(): String = linkedMapOf<String, Any>(
+        "package_name" to "com.community.oneroom",
+        "version_name" to "3.0.03.0529.03",
+        "version_code" to 50020044,
+        "os" to "android",
+        "os_version" to "13",
+        "install_ch" to "ps",
+        "device_id" to mobileDeviceId,
+        "install_store" to "ps",
+        "gaid" to mobileGaid,
+        "brand" to "Redmi",
+        "model" to "23078RKD5C",
+        "system_language" to "en",
+        "net" to "NETWORK_WIFI",
+        "region" to "US",
+        "timezone" to "America/New_York",
+        "sp_code" to "90101",
+        "X-Play-Mode" to "2"
+    ).toJson()
+
+    private fun buildPlaybackMobileHeaders(
+        method: String,
+        url: String,
+        body: String?,
+        authToken: String?
+    ): Map<String, String> = buildMobileHeaders(
+        method = method,
+        url = url,
+        body = body,
+        authToken = authToken
+    ).toMutableMap().apply {
+        // moviebox.js uses sp_code=90101 for /resource and does not spoof IP.
+        this["X-Client-Info"] = playbackClientInfo()
+        remove("X-Forwarded-For")
+    }
+
+    private fun orderedPlaybackMobileHosts(): List<String> = buildList {
+        preferredPlaybackMobileHost
+            ?.takeIf { it.isNotBlank() }
+            ?.let { add(it) }
+        playbackMobileHosts.forEach { host ->
+            if (!contains(host)) add(host)
+        }
+    }
+
+    private suspend fun bootstrapPlaybackAuth(): String? {
+        playbackAuthToken?.takeIf { it.isNotBlank() }?.let { return it }
+
+        for (host in orderedPlaybackMobileHosts()) {
+            val url = "$host$mobileBootstrapPath?page=1&tabId=0&version="
+            try {
+                val response = app.get(
+                    url,
+                    headers = buildPlaybackMobileHeaders(
+                        method = "GET",
+                        url = url,
+                        body = null,
+                        authToken = null
+                    ),
+                    timeout = mobileRequestTimeoutSeconds
+                )
+                val token = tokenFromXUser(response.headers["x-user"])
+                Log.i(
+                    "MovieBox",
+                    "MOVIEBOX_V20_PLAYBACK_AUTH host=$host http=${response.code} token=${!token.isNullOrBlank()}"
+                )
+                if (!token.isNullOrBlank()) {
+                    playbackAuthToken = token
+                    preferredPlaybackMobileHost = host
+                    return token
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(
+                    "MovieBox",
+                    "MOVIEBOX_V20_PLAYBACK_AUTH_FAIL host=$host type=${error::class.simpleName}"
+                )
+            }
+        }
+        return null
     }
 
     private fun tokenFromXUser(raw: String?): String? {
@@ -1184,10 +1290,10 @@ class MovieboxProvider : MainAPI() {
         requestedResolution: Int,
         retryAuthOnce: Boolean = true
     ): List<PlaybackResourceCandidate> {
-        val token = bootstrapMobileAuth() ?: return emptyList()
+        val token = bootstrapPlaybackAuth() ?: return emptyList()
         var sawAuthFailure = false
 
-        for (host in orderedMobileHosts()) {
+        for (host in orderedPlaybackMobileHosts()) {
             try {
                 val all = mutableListOf<PlaybackResourceCandidate>()
                 var page = 1
@@ -1197,7 +1303,7 @@ class MovieboxProvider : MainAPI() {
                     val url = "$host$mobileResourcePath?ep=0&page=$page&perPage=10&resolution=$requestedResolution&se=0&subjectId=$subjectId"
                     val response = app.get(
                         url,
-                        headers = buildMobileHeaders(
+                        headers = buildPlaybackMobileHeaders(
                             method = "GET",
                             url = url,
                             body = null,
@@ -1206,7 +1312,7 @@ class MovieboxProvider : MainAPI() {
                         timeout = mobileRequestTimeoutSeconds
                     )
 
-                    tokenFromXUser(response.headers["x-user"])?.let { mobileAuthToken = it }
+                    tokenFromXUser(response.headers["x-user"])?.let { playbackAuthToken = it }
 
                     if (response.code == 401 || response.code == 403 ||
                         response.code == 440 || response.code == 530
@@ -1224,7 +1330,11 @@ class MovieboxProvider : MainAPI() {
                 }
 
                 if (validResponse) {
-                    preferredMobileHost = host
+                    preferredPlaybackMobileHost = host
+                    Log.i(
+                        "MovieBox",
+                        "MOVIEBOX_V20_RESOURCE host=$host requested=${requestedResolution}p items=${all.size} se=$season ep=$episode"
+                    )
                     return if (mediaType == 2) {
                         all.filter { it.season == season && it.episode == episode }
                     } else all
@@ -1237,8 +1347,8 @@ class MovieboxProvider : MainAPI() {
         }
 
         if (sawAuthFailure && retryAuthOnce) {
-            mobileAuthToken = null
-            preferredMobileHost = null
+            playbackAuthToken = null
+            preferredPlaybackMobileHost = null
             return loadPlaybackResourceCandidates(
                 subjectId,
                 mediaType,
@@ -1295,6 +1405,27 @@ class MovieboxProvider : MainAPI() {
         return null
     }
 
+    private fun explicitPlaybackQuality(label: String?): Int? {
+        val raw = label.orEmpty().trim()
+        if (raw.isBlank()) return null
+
+        Regex("(?<!\\d)(2160|1440|1080|720|480|360)(?:p)?(?!\\d)", RegexOption.IGNORE_CASE)
+            .find(raw)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?.let { return it }
+
+        return when (raw.uppercase()) {
+            "4K", "UHD" -> 2160
+            "2K", "QHD" -> 1440
+            "FHD", "FULL HD", "FULLHD" -> 1080
+            "HD" -> 720
+            "SD" -> 480
+            else -> null
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -1314,8 +1445,9 @@ class MovieboxProvider : MainAPI() {
         val mediaType = if (season > 0 || episode > 0) 2 else 1
 
         /*
-         * Keep the original Cloudstream H5 flow. It supplies the source list
-         * and, critically, stream id/format used by the caption endpoint.
+         * Original Cloudstream H5 discovery remains the source of stream
+         * metadata and caption ids. The JS implementation is consulted only
+         * for playback replacement/fallback.
          */
         val resolvedStreams = loadPlayHosts(
             media = media,
@@ -1324,12 +1456,20 @@ class MovieboxProvider : MainAPI() {
             episode = episode
         )
 
+        Log.i(
+            "MovieBox",
+            "MOVIEBOX_V20_LOADLINKS subject=$subjectId se=$season ep=$episode h5Streams=${resolvedStreams.size} rawQualities=${resolvedStreams.joinToString(",") { it.stream.resolutions.orEmpty().ifBlank { "?" } }}"
+        )
+
         val emittedUrls = linkedSetOf<String>()
         val emittedQualities = linkedSetOf<Int>()
+        val hasKnown720PlusH5 = resolvedStreams.any {
+            (explicitPlaybackQuality(it.stream.resolutions) ?: -1) >= 720
+        }
 
-        suspend fun emitLink(url: String, quality: Int, label: String) {
+        fun emitLink(url: String, quality: Int, label: String) {
             if (url.isBlank() || !emittedUrls.add(url)) return
-            emittedQualities += quality
+            if (quality >= 720) emittedQualities += quality
             callback.invoke(
                 newExtractorLink(
                     this.name,
@@ -1343,44 +1483,66 @@ class MovieboxProvider : MainAPI() {
         }
 
         /*
-         * 1) Preserve all original H5 sources at 720p and above.
-         * 2) Probe only to reject short service/update clips or dead signed URLs.
-         * 3) Never attach probe headers to the actual Cloudstream source.
+         * Keep the original H5 links unless they are conclusively a tiny
+         * service/update clip. A quality is filtered only when MovieBox
+         * explicitly tells us it is below 720p. Unknown labels are preserved
+         * instead of being converted to 0 and accidentally dropping every
+         * source (the v19 no-link regression).
          */
         for (resolved in resolvedStreams.sortedByDescending {
-            getQualityFromName(it.stream.resolutions)
+            explicitPlaybackQuality(it.stream.resolutions)
+                ?: getQualityFromName(it.stream.resolutions)
         }) {
             val source = resolved.stream
             val streamUrl = source.url ?: continue
-            val quality = getQualityFromName(source.resolutions)
-            if (quality < 720) continue
-
-            if (!shouldRejectH5PlaybackUrl(streamUrl, mediaType)) {
+            val explicitQuality = explicitPlaybackQuality(source.resolutions)
+            if (explicitQuality == null && hasKnown720PlusH5) {
                 Log.i(
                     "MovieBox",
-                    "MOVIEBOX_V19_EMIT flow=h5 quality=$quality apiHost=${resolved.host} cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
+                    "MOVIEBOX_V20_SKIP_UNKNOWN raw=${source.resolutions} reason=known-720plus-exists"
                 )
-                emitLink(
-                    streamUrl,
-                    quality,
-                    buildString {
-                        append(this@MovieboxProvider.name)
-                        source.resolutions
-                            ?.takeIf { it.isNotBlank() }
-                            ?.let { append(" ").append(it) }
-                    }
+                continue
+            }
+            if (explicitQuality != null && explicitQuality < 720) {
+                Log.i(
+                    "MovieBox",
+                    "MOVIEBOX_V20_SKIP_LOW raw=${source.resolutions} urlHost=${runCatching { URI(streamUrl).host }.getOrNull()}"
                 )
-            } else {
+                continue
+            }
+
+            val parsedQuality = explicitQuality ?: getQualityFromName(source.resolutions)
+            val quality = parsedQuality.takeIf { it > 0 } ?: Qualities.Unknown.value
+
+            if (shouldRejectH5PlaybackUrl(streamUrl, mediaType)) {
                 Log.w(
                     "MovieBox",
-                    "MOVIEBOX_V19_REJECT_CONCLUSIVE flow=h5 quality=$quality cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
+                    "MOVIEBOX_V20_REJECT_NOTICE flow=h5 raw=${source.resolutions} quality=$quality cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
                 )
+                continue
             }
+
+            Log.i(
+                "MovieBox",
+                "MOVIEBOX_V20_EMIT flow=h5 raw=${source.resolutions} quality=$quality apiHost=${resolved.host} cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
+            )
+            emitLink(
+                streamUrl,
+                quality,
+                buildString {
+                    append(this@MovieboxProvider.name)
+                    source.resolutions
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { append(" ").append(it) }
+                }
+            )
         }
 
         /*
-         * Only repair missing/bad playback qualities with the mobile resource
-         * logic proven by moviebox.js. This does not replace search/detail/H5.
+         * Playback-only JS fallback. Search/detail remain untouched. Resource
+         * calls use the working JS client region (sp_code 90101), no spoofed
+         * X-Forwarded-For, and their own token/host preference. Add only a
+         * missing 1080p/720p quality; do not replace working H5 metadata.
          */
         for (quality in listOf(1080, 720)) {
             if (quality in emittedQualities) continue
@@ -1396,7 +1558,7 @@ class MovieboxProvider : MainAPI() {
             val actualQuality = replacement.resolution.takeIf { it >= 720 } ?: quality
             Log.i(
                 "MovieBox",
-                "MOVIEBOX_V19_EMIT flow=resource-repair requested=$quality actual=$actualQuality resourceId=${replacement.resourceId} cdn=${runCatching { URI(replacement.resourceLink).host }.getOrNull()}"
+                "MOVIEBOX_V20_EMIT flow=resource-fallback requested=$quality actual=$actualQuality resourceId=${replacement.resourceId} cdn=${runCatching { URI(replacement.resourceLink).host }.getOrNull()}"
             )
             emitLink(
                 replacement.resourceLink,
@@ -1405,10 +1567,7 @@ class MovieboxProvider : MainAPI() {
             )
         }
 
-        /*
-         * Captions stay on the original H5 path even when a video URL had to be
-         * repaired, because caption lookup depends on the H5 stream id/format.
-         */
+        /* Captions are still 100% the original H5 stream-id/format flow. */
         loadCaptionsAcrossHosts(
             subjectId = subjectId,
             seeds = resolvedStreams
@@ -1418,6 +1577,10 @@ class MovieboxProvider : MainAPI() {
             subtitleCallback.invoke(newSubtitleFile(language, subtitleUrl))
         }
 
+        Log.i(
+            "MovieBox",
+            "MOVIEBOX_V20_DONE links=${emittedUrls.size} qualities=${emittedQualities.sortedDescending().joinToString(",")}"
+        )
         return emittedUrls.isNotEmpty()
     }
 
