@@ -24,7 +24,7 @@ import javax.crypto.spec.SecretKeySpec
 class MovieboxProvider : MainAPI() {
 
     override var mainUrl = "https://movieboxhd.net"
-    override var name = "MovieBox 👾 v16"
+    override var name = "MovieBox 👾 v17"
     override var lang = "en"
 
     override val instantLinkLoading = true
@@ -74,6 +74,8 @@ class MovieboxProvider : MainAPI() {
      * and more reliable for Cloudstream search.
      */
     private val mobileHosts = listOf(
+        "https://api.inmoviebox.com",
+        "https://apii.inmoviebox.com",
         "https://i-api.aoneroom.com",
         "https://api.aoneroom.com",
         "https://api6.aoneroom.com",
@@ -81,17 +83,17 @@ class MovieboxProvider : MainAPI() {
         "https://api4.aoneroom.com",
         "https://api4sg.aoneroom.com",
         "https://api3.aoneroom.com",
-        "https://api6sg.aoneroom.com",
-        "https://api.inmoviebox.com"
+        "https://api6sg.aoneroom.com"
     )
 
     private val mobileSearchPath = "/wefeed-mobile-bff/subject-api/search"
+    private val mobileResourcePath = "/wefeed-mobile-bff/subject-api/resource"
     private val mobileBootstrapPath = "/wefeed-mobile-bff/tab-operating"
     private val mobileSigningSecretB64 = "76iRl07s0xSN9jqmEWAt79EBJZulIQIsV64FZr2O"
-    private val mobileAppVersion = "4.0.02"
-    private val mobileVersionCode = 50020126
+    private val mobileVersionCode = 50020044
+    private val mobileVersionName = "3.0.03.0529.03"
     private val mobileUserAgent =
-        "MovieBoxPro/16.2.1 (Android 12; Pixel 6)"
+        "com.community.oneroom/$mobileVersionCode (Linux; U; Android 13; en_US; 23078RKD5C; Build/TQ2A.230405.003; Cronet/135.0.7012.3)"
 
     private val mobileDeviceId = UUID.randomUUID().toString().replace("-", "").lowercase()
     private val mobileGaid = UUID.randomUUID().toString()
@@ -274,7 +276,7 @@ class MovieboxProvider : MainAPI() {
 
     private fun mobileClientInfo(): String = linkedMapOf<String, Any>(
         "package_name" to "com.community.oneroom",
-        "version_name" to mobileAppVersion,
+        "version_name" to mobileVersionName,
         "version_code" to mobileVersionCode,
         "os" to "android",
         "os_version" to "13",
@@ -288,7 +290,7 @@ class MovieboxProvider : MainAPI() {
         "net" to "NETWORK_WIFI",
         "region" to "US",
         "timezone" to "America/New_York",
-        "sp_code" to "40401",
+        "sp_code" to "90101",
         "X-Play-Mode" to "2"
     ).toJson()
 
@@ -335,7 +337,7 @@ class MovieboxProvider : MainAPI() {
         if (body != null) {
             val bytes = body.toByteArray(Charsets.UTF_8)
             bodyLength = bytes.size.toString()
-            bodyHash = md5Hex(bytes.copyOfRange(0, minOf(bytes.size, 102400)))
+            bodyHash = md5Hex(bytes)
         }
 
         val canonical = listOf(
@@ -366,10 +368,8 @@ class MovieboxProvider : MainAPI() {
             put("X-Client-Token", clientToken)
             put("x-tr-signature", "$timestampText|2|$signatureBase64")
             put("X-Client-Info", mobileClientInfo())
-            put("X-M-Version", mobileAppVersion)
             put("X-Client-Status", "0")
             put("X-Play-Mode", "2")
-            // Do not spoof X-Forwarded-For: signed media cookies can be IP/region bound.
             put("Cache-Control", "no-cache, no-store, must-revalidate")
             put("Pragma", "no-cache")
             put("Expires", "0")
@@ -401,7 +401,7 @@ class MovieboxProvider : MainAPI() {
         mobileAuthToken?.takeIf { it.isNotBlank() }?.let { return it }
 
         for (host in orderedMobileHosts()) {
-            val url = "$host$mobileBootstrapPath?host=api.inmoviebox.com&page=1&pageSize=24&tabId=1"
+            val url = "$host$mobileBootstrapPath?page=1&tabId=0&version="
             try {
                 val response = app.get(
                     url,
@@ -546,9 +546,9 @@ class MovieboxProvider : MainAPI() {
         val authToken = bootstrapMobileAuth() ?: return null
         val requestJson = linkedMapOf<String, Any>(
             "keyword" to query.trim(),
-            "type" to 0,
             "page" to 1,
-            "pageSize" to 20
+            "perPage" to 20,
+            "subjectType" to 0
         ).toJson()
 
         var sawAuthFailure = false
@@ -821,242 +821,6 @@ class MovieboxProvider : MainAPI() {
         val stream: Media.Data.Streams
     )
 
-
-    private data class MobileResolvedStream(
-        val host: String,
-        val url: String,
-        val quality: String? = null,
-        val format: String? = null,
-        val signCookie: String? = null,
-    )
-
-    private data class MobileResolvedCaption(
-        val language: String,
-        val url: String,
-    )
-
-    private data class MobilePlaybackResult(
-        val streams: List<MobileResolvedStream>,
-        val captions: List<MobileResolvedCaption>,
-    )
-
-    private fun textValue(node: JsonNode?, vararg names: String): String? {
-        if (node == null || node.isNull) return null
-        for (name in names) {
-            val value = node.get(name) ?: continue
-            if (!value.isNull) {
-                val text = value.asText().trim()
-                if (text.isNotBlank() && text != "null") return text
-            }
-        }
-        return null
-    }
-
-    private fun decodeUrlPrefixFromSignCookie(signCookie: String?): String? {
-        if (signCookie.isNullOrBlank()) return null
-        val encoded = Regex(
-            pattern = "(?i)(?:urlprefix|url_prefix)=([A-Za-z0-9_+\\-/=]+)"
-        ).find(signCookie)?.groupValues?.getOrNull(1)?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: return null
-
-        val padded = encoded + "=".repeat((4 - encoded.length % 4) % 4)
-        val decoded = listOf(Base64.URL_SAFE, Base64.DEFAULT)
-            .asSequence()
-            .mapNotNull { flags ->
-                runCatching {
-                    String(Base64.decode(padded, flags), Charsets.UTF_8).trim()
-                }.getOrNull()
-            }
-            .firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
-
-        return decoded?.trim()?.trimEnd('/')
-    }
-
-    private fun manifestFromSignCookie(
-        signCookie: String?,
-        format: String?,
-        rawUrl: String?
-    ): String? {
-        val prefix = decodeUrlPrefixFromSignCookie(signCookie) ?: return null
-        if (prefix.endsWith(".m3u8", ignoreCase = true) ||
-            prefix.endsWith(".mpd", ignoreCase = true) ||
-            prefix.endsWith(".mp4", ignoreCase = true)
-        ) return prefix
-
-        val hint = listOfNotNull(format, rawUrl, prefix).joinToString(" ").lowercase()
-        val file = when {
-            "mpd" in hint || "/dash/" in hint || "dash" in hint -> "index.mpd"
-            "m3u8" in hint || "/hls/" in hint || "hls" in hint -> "index.m3u8"
-            else -> "index.m3u8"
-        }
-        return "$prefix/$file"
-    }
-
-    private fun normalizeMediaCookie(signCookie: String?): String? {
-        if (signCookie.isNullOrBlank()) return null
-        val raw = signCookie.trim().removePrefix("Cookie:").trim()
-        val known = Regex(
-            pattern = "(?i)(CloudFront-Policy|CloudFront-Signature|CloudFront-Key-Pair-Id|Cloud-CDN-Cookie|Edge-Cache-Cookie)=([^;,\\r\\n]+(?:[:][^;\\r\\n]+)*)"
-        ).findAll(raw)
-            .map { "${it.groupValues[1]}=${it.groupValues[2].trim()}" }
-            .distinct()
-            .toList()
-
-        if (known.isNotEmpty()) return known.joinToString("; ")
-
-        val policy = raw.substringAfter("URLPrefix=", missingDelimiterValue = "")
-        if (policy.isNotBlank()) {
-            return "Cloud-CDN-Cookie=URLPrefix=$policy"
-        }
-        return raw.takeIf { '=' in it }
-    }
-
-    private fun mobileMediaHeaders(stream: MobileResolvedStream): Map<String, String> {
-        val host = runCatching { URI(stream.url).host.orEmpty().lowercase() }.getOrDefault("")
-        return buildMap {
-            put("User-Agent", "ExoPlayerLib/2.19.1")
-            if (host.contains("hakunaymatata.com")) {
-                put("Referer", "https://www.movieboxpro.app/")
-            }
-            normalizeMediaCookie(stream.signCookie)?.let { put("Cookie", it) }
-        }
-    }
-
-    private fun parseMobilePlayback(raw: String, host: String): MobilePlaybackResult? {
-        val root = try {
-            AppUtils.tryParseJson<JsonNode>(raw)
-        } catch (_: Throwable) {
-            null
-        } ?: return null
-
-        val data = root.get("data") ?: root
-        val playInfo = data.get("playInfo") ?: data.get("play_info")
-        val streamList = data.get("streamList")
-            ?: data.get("streams")
-            ?: data.get("stream_list")
-            ?: playInfo?.get("streamList")
-            ?: playInfo?.get("streams")
-
-        val streams = if (streamList != null && streamList.isArray) {
-            streamList.mapNotNull { node ->
-                val rawUrl = textValue(node, "url", "playUrl", "play_url", "src")
-                val signCookie = textValue(node, "signCookie", "sign_cookie", "cookie")
-                val format = textValue(node, "format", "type", "container")
-                val quality = textValue(
-                    node,
-                    "resolution",
-                    "resolutions",
-                    "quality",
-                    "definition",
-                    "name"
-                )
-                val resolvedUrl = manifestFromSignCookie(signCookie, format, rawUrl) ?: rawUrl
-                resolvedUrl?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
-                    ?.let {
-                        MobileResolvedStream(
-                            host = host,
-                            url = it,
-                            quality = quality,
-                            format = format,
-                            signCookie = signCookie,
-                        )
-                    }
-            }.distinctBy { it.url }
-        } else emptyList()
-
-        val subtitleList = data.get("subTitleList")
-            ?: data.get("subtitleList")
-            ?: data.get("subtitles")
-            ?: data.get("captions")
-            ?: playInfo?.get("subTitleList")
-
-        val captions = if (subtitleList != null && subtitleList.isArray) {
-            subtitleList.mapNotNull { node ->
-                val url = textValue(node, "url", "file", "subtitleUrl", "subtitle_url")
-                    ?: return@mapNotNull null
-                val language = allowedSubtitleLanguage(
-                    Media.Data.Captions(
-                        lan = textValue(node, "lan", "language", "lang", "code"),
-                        lanName = textValue(node, "lanName", "languageName", "name", "label"),
-                        url = url
-                    )
-                ) ?: return@mapNotNull null
-                MobileResolvedCaption(language, url)
-            }.distinctBy { it.url }
-        } else emptyList()
-
-        return MobilePlaybackResult(streams = streams, captions = captions)
-    }
-
-    private suspend fun loadMobilePlayback(
-        subjectId: String,
-        season: Int,
-        episode: Int,
-        retryAuthOnce: Boolean = true
-    ): MobilePlaybackResult? {
-        val authToken = bootstrapMobileAuth() ?: return null
-        var sawAuthFailure = false
-
-        for (host in orderedMobileHosts()) {
-            val variants = listOf(
-                "$host/wefeed-mobile-bff/subject-api/play-info?ep=$episode&se=$season&subjectId=$subjectId",
-                "$host/wefeed-mobile-bff/subject-api/play-info?ep=$episode&quality=1080p&se=$season&subjectId=$subjectId"
-            )
-
-            for (url in variants) {
-                try {
-                    val response = app.get(
-                        url,
-                        headers = buildMobileHeaders(
-                            method = "GET",
-                            url = url,
-                            body = null,
-                            authToken = authToken
-                        ),
-                        referer = "$host/",
-                        timeout = mobileRequestTimeoutSeconds
-                    )
-
-                    tokenFromXUser(response.headers["x-user"])?.let { freshToken ->
-                        mobileAuthToken = freshToken
-                    }
-
-                    if (response.code == 401 || response.code == 403 || response.code == 440 || response.code == 530) {
-                        sawAuthFailure = true
-                        Log.w("MovieBox", "MOVIEBOX_PLAY_MOBILE_AUTH_REJECT host=$host http=${response.code}")
-                        continue
-                    }
-
-                    val parsed = parseMobilePlayback(response.text, host)
-                    val count = parsed?.streams?.size ?: 0
-                    Log.i(
-                        "MovieBox",
-                        "MOVIEBOX_PLAY_MOBILE host=$host http=${response.code} streams=$count se=$season ep=$episode"
-                    )
-                    if (response.code in 200..299 && count > 0) {
-                        preferredMobileHost = host
-                        return parsed
-                    }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    Log.w(
-                        "MovieBox",
-                        "MOVIEBOX_PLAY_MOBILE_FAIL host=$host type=${error::class.simpleName}"
-                    )
-                }
-            }
-        }
-
-        if (sawAuthFailure && retryAuthOnce) {
-            mobileAuthToken = null
-            preferredMobileHost = null
-            return loadMobilePlayback(subjectId, season, episode, retryAuthOnce = false)
-        }
-        return null
-    }
-
     private fun buildPlayReferer(
         host: String,
         media: LoadData,
@@ -1244,6 +1008,337 @@ class MovieboxProvider : MainAPI() {
         return captions.distinctBy { it.url }
     }
 
+    private data class MobileResourceCandidate(
+        val resourceId: String,
+        val resourceLink: String,
+        val resolution: Int,
+        val requireMemberType: Int,
+        val linkType: Int,
+        val duration: Long,
+        val size: Long,
+        val title: String,
+        val season: Int,
+        val episode: Int,
+        val apiHost: String,
+    )
+
+    private data class MobileProbeResult(
+        val candidate: MobileResourceCandidate,
+        val totalBytes: Long,
+        val httpCode: Int,
+        val index: Int,
+    )
+
+    private fun nodeText(node: JsonNode?, name: String): String? {
+        val value = node?.get(name) ?: return null
+        if (value.isNull) return null
+        return value.asText().trim().takeIf { it.isNotBlank() && it != "null" }
+    }
+
+    private fun nodeInt(node: JsonNode?, name: String): Int {
+        val value = node?.get(name) ?: return 0
+        return when {
+            value.isInt || value.isLong || value.isNumber -> value.asInt()
+            else -> value.asText().trim().removeSuffix("p").toIntOrNull() ?: 0
+        }
+    }
+
+    private fun nodeLong(node: JsonNode?, name: String): Long {
+        val value = node?.get(name) ?: return 0L
+        return when {
+            value.isNumber -> value.asLong()
+            else -> value.asText().trim().toLongOrNull() ?: 0L
+        }
+    }
+
+    private fun parseResourceCandidates(
+        raw: String,
+        host: String,
+        requestedResolution: Int
+    ): Pair<List<MobileResourceCandidate>, Boolean>? {
+        val root = try {
+            AppUtils.tryParseJson<JsonNode>(raw)
+        } catch (_: Throwable) {
+            null
+        } ?: return null
+
+        val code = root.get("code")?.takeIf { !it.isNull }?.asInt()
+        if (code != null && code != 0) return emptyList<MobileResourceCandidate>() to false
+
+        val data = root.get("data") ?: root
+        val list = data.get("list") ?: data.get("items")
+        val candidates = if (list != null && list.isArray) {
+            list.mapNotNull { node ->
+                val link = nodeText(node, "resourceLink")
+                    ?: nodeText(node, "url")
+                    ?: return@mapNotNull null
+                if (!link.startsWith("http://") && !link.startsWith("https://")) {
+                    return@mapNotNull null
+                }
+
+                MobileResourceCandidate(
+                    resourceId = nodeText(node, "resourceId").orEmpty(),
+                    resourceLink = link,
+                    resolution = nodeInt(node, "resolution"),
+                    requireMemberType = nodeInt(node, "requireMemberType"),
+                    linkType = nodeInt(node, "linkType"),
+                    duration = nodeLong(node, "duration"),
+                    size = nodeLong(node, "size"),
+                    title = nodeText(node, "title").orEmpty(),
+                    season = nodeInt(node, "se"),
+                    episode = nodeInt(node, "ep"),
+                    apiHost = host,
+                )
+            }
+        } else emptyList()
+
+        val pager = data.get("pager")
+        val hasMore = pager?.get("hasMore")?.asBoolean(false) == true
+        Log.i(
+            "MovieBox",
+            "MOVIEBOX_RESOURCE_PARSE request=${requestedResolution}p host=$host items=${candidates.size} more=$hasMore"
+        )
+        return candidates to hasMore
+    }
+
+    private suspend fun fetchMobileResolution(
+        subjectId: String,
+        mediaType: Int,
+        season: Int,
+        episode: Int,
+        resolution: Int,
+        retryAuthOnce: Boolean = true
+    ): List<MobileResourceCandidate> {
+        val authToken = bootstrapMobileAuth() ?: return emptyList()
+        var sawAuthFailure = false
+
+        for (host in orderedMobileHosts()) {
+            try {
+                val collected = mutableListOf<MobileResourceCandidate>()
+                var page = 1
+                var validHostResponse = false
+
+                while (page <= 20) {
+                    val url = "$host$mobileResourcePath?ep=0&page=$page&perPage=10&resolution=$resolution&se=0&subjectId=$subjectId"
+                    val response = app.get(
+                        url,
+                        headers = buildMobileHeaders(
+                            method = "GET",
+                            url = url,
+                            body = null,
+                            authToken = authToken
+                        ),
+                        timeout = mobileRequestTimeoutSeconds
+                    )
+
+                    tokenFromXUser(response.headers["x-user"])?.let { freshToken ->
+                        mobileAuthToken = freshToken
+                    }
+
+                    if (response.code == 401 || response.code == 403 ||
+                        response.code == 440 || response.code == 530
+                    ) {
+                        sawAuthFailure = true
+                        break
+                    }
+                    if (response.code !in 200..299) break
+
+                    val parsed = parseResourceCandidates(response.text, host, resolution)
+                        ?: break
+                    validHostResponse = true
+                    collected += parsed.first
+                    if (!parsed.second) break
+                    page++
+                }
+
+                if (validHostResponse) {
+                    preferredMobileHost = host
+                    val filtered = if (mediaType == 2) {
+                        collected.filter { it.season == season && it.episode == episode }
+                    } else {
+                        collected
+                    }
+                    Log.i(
+                        "MovieBox",
+                        "MOVIEBOX_RESOURCE ${resolution}p host=$host items=${filtered.size} region=US sp=90101"
+                    )
+                    return filtered
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(
+                    "MovieBox",
+                    "MOVIEBOX_RESOURCE_FAIL host=$host q=$resolution type=${error::class.simpleName}"
+                )
+            }
+        }
+
+        if (sawAuthFailure && retryAuthOnce) {
+            mobileAuthToken = null
+            preferredMobileHost = null
+            return fetchMobileResolution(
+                subjectId,
+                mediaType,
+                season,
+                episode,
+                resolution,
+                retryAuthOnce = false
+            )
+        }
+        return emptyList()
+    }
+
+    private fun isNoticeCandidate(item: MobileResourceCandidate): Boolean {
+        return Regex(
+            "install(?:ation)?|official\\s*notice|update\\s*(?:the\\s*)?app|download\\s*(?:the\\s*)?(?:latest\\s*)?(?:version|app)|uninstall",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(item.title)
+    }
+
+    private fun directCandidateScore(item: MobileResourceCandidate): Long {
+        var score = 0L
+        if (item.requireMemberType == 0) score += 1_000_000_000_000L
+        else score -= item.requireMemberType.toLong() * 100_000_000_000L
+        if (item.linkType == 1) score += 50_000_000_000L
+        score += item.resolution.toLong() * 100_000_000L
+        score += item.duration * 10_000L
+        score += item.size
+        if (isNoticeCandidate(item)) score -= 1_000_000_000_000L
+        return score
+    }
+
+    private fun candidateFingerprint(item: MobileResourceCandidate): String {
+        val host = runCatching { URI(item.resourceLink).host.orEmpty() }.getOrDefault("")
+        return listOf(
+            item.resolution,
+            item.size,
+            item.duration,
+            host,
+            if (item.size == 0L && item.duration == 0L) item.resourceId else ""
+        ).joinToString("|")
+    }
+
+    private fun totalBytesFromHeaders(headers: Map<String, String>): Long {
+        val contentRange = headers.entries
+            .firstOrNull { it.key.equals("content-range", ignoreCase = true) }
+            ?.value
+            .orEmpty()
+        Regex("/(\\d+)\\s*$").find(contentRange)?.groupValues?.getOrNull(1)
+            ?.toLongOrNull()?.let { return it }
+
+        return headers.entries
+            .firstOrNull { it.key.equals("content-length", ignoreCase = true) }
+            ?.value
+            ?.toLongOrNull()
+            ?: 0L
+    }
+
+    private suspend fun probeMobileCandidate(
+        item: MobileResourceCandidate,
+        index: Int
+    ): MobileProbeResult {
+        return try {
+            val response = app.get(
+                item.resourceLink,
+                headers = mapOf(
+                    "User-Agent" to mobileUserAgent,
+                    "Accept" to "*/*",
+                    "Range" to "bytes=0-0"
+                ),
+                timeout = mobileRequestTimeoutSeconds
+            )
+            val bytes = totalBytesFromHeaders(response.headers)
+            Log.i(
+                "MovieBox",
+                "MOVIEBOX_CDN_PROBE #$index http=${response.code} totalMB=${bytes / 1048576L} apiDuration=${item.duration} apiSize=${item.size} resolution=${item.resolution}"
+            )
+            MobileProbeResult(item, bytes, response.code, index)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Log.w(
+                "MovieBox",
+                "MOVIEBOX_CDN_PROBE_FAIL #$index type=${error::class.simpleName}"
+            )
+            MobileProbeResult(item, 0L, 0, index)
+        }
+    }
+
+    private suspend fun resolveFastMobileQuality(
+        subjectId: String,
+        mediaType: Int,
+        season: Int,
+        episode: Int,
+        requestedResolution: Int,
+        probeCache: MutableMap<String, MobileProbeResult>
+    ): MobileResourceCandidate? {
+        val candidates = fetchMobileResolution(
+            subjectId = subjectId,
+            mediaType = mediaType,
+            season = season,
+            episode = episode,
+            resolution = requestedResolution
+        )
+            .filter { it.resolution == 0 || it.resolution >= 720 }
+            .distinctBy { if (it.resourceId.isNotBlank()) "rid:${it.resourceId}" else "url:${it.resourceLink}" }
+            .sortedByDescending(::directCandidateScore)
+            .take(2)
+
+        val actual = candidates.map { if (it.resolution > 0) "${it.resolution}p" else "Auto" }.distinct()
+        Log.i(
+            "MovieBox",
+            "MOVIEBOX_REQUEST ${requestedResolution}p candidates=${candidates.size} actual=${actual.ifEmpty { listOf("none") }.joinToString(",")}"
+        )
+
+        val minBytes = if (mediaType == 1) 20L * 1024L * 1024L else 8L * 1024L * 1024L
+        for ((index, candidate) in candidates.withIndex()) {
+            val key = candidateFingerprint(candidate)
+            val probe = probeCache[key] ?: probeMobileCandidate(candidate, index + 1).also {
+                probeCache[key] = it
+            }
+            val actualBytes = probe.totalBytes
+            val apiBytes = candidate.size
+            val validStatus = probe.httpCode == 200 || probe.httpCode == 206
+            val tinyMismatch = apiBytes >= 50L * 1024L * 1024L &&
+                actualBytes > 0L && actualBytes < minBytes
+            val likelyFull = actualBytes >= minBytes ||
+                (actualBytes == 0L && apiBytes >= minBytes)
+            val ok = validStatus && likelyFull && !tinyMismatch && !isNoticeCandidate(candidate)
+
+            Log.i(
+                "MovieBox",
+                "MOVIEBOX_DIRECT_CHECK q=${candidate.resolution} apiMB=${apiBytes / 1048576L} actualMB=${actualBytes / 1048576L} notice=${isNoticeCandidate(candidate)} ok=$ok"
+            )
+            if (ok) return candidate
+        }
+        return null
+    }
+
+    private suspend fun resolveMobileDirect(
+        subjectId: String,
+        mediaType: Int,
+        season: Int,
+        episode: Int
+    ): MobileResourceCandidate? {
+        val probeCache = mutableMapOf<String, MobileProbeResult>()
+        return resolveFastMobileQuality(
+            subjectId,
+            mediaType,
+            season,
+            episode,
+            1080,
+            probeCache
+        ) ?: resolveFastMobileQuality(
+            subjectId,
+            mediaType,
+            season,
+            episode,
+            720,
+            probeCache
+        )
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -1260,53 +1355,45 @@ class MovieboxProvider : MainAPI() {
         val subjectId = media.id?.takeIf { it.isNotBlank() } ?: return false
         val season = media.season ?: 0
         val episode = media.episode ?: 0
+        val mediaType = if (season > 0 || episode > 0) 2 else 1
 
         /*
-         * v16 playback order:
-         * 1) signed mobile play-info (current resolver)
-         * 2) decode URLPrefix from signCookie when the visible URL is a dummy
-         * 3) attach stream-specific media cookie + ExoPlayer verifier headers
-         * 4) retain the older H5 resolver as a compatibility fallback
+         * v17 follows the working moviebox.js playback path:
+         * resource(se=0,ep=0) -> local episode filter -> rank -> Range probe
+         * -> emit verified direct resourceLink. The H5 play endpoint is only a
+         * compatibility fallback when the JS-style mobile resource flow fails.
          */
-        val mobilePlayback = loadMobilePlayback(
+        val direct = resolveMobileDirect(
             subjectId = subjectId,
+            mediaType = mediaType,
             season = season,
             episode = episode
         )
 
-        if (mobilePlayback != null && mobilePlayback.streams.isNotEmpty()) {
-            mobilePlayback.streams
-                .sortedByDescending { getQualityFromName(it.quality) }
-                .forEach { stream ->
-                    val headers = mobileMediaHeaders(stream)
-                    Log.i(
-                        "MovieBox",
-                        "MOVIEBOX_V16_EMIT flow=mobile quality=${stream.quality} cdn=${runCatching { URI(stream.url).host }.getOrNull()} cookie=${headers.containsKey("Cookie")}"
-                    )
-                    callback.invoke(
-                        newExtractorLink(
-                            this.name,
-                            buildString {
-                                append(this@MovieboxProvider.name)
-                                stream.quality
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?.let { append(" ").append(it) }
-                            },
-                            stream.url,
-                            INFER_TYPE
-                        ) {
-                            this.quality = getQualityFromName(stream.quality)
-                            this.headers = headers
-                            this.referer = headers["Referer"].orEmpty()
-                        }
+        if (direct != null) {
+            val qualityLabel = if (direct.resolution > 0) "${direct.resolution}p" else "Auto"
+            Log.i(
+                "MovieBox",
+                "MOVIEBOX_V17_READY flow=resource quality=$qualityLabel host=${runCatching { URI(direct.resourceLink).host }.getOrNull()} resourceId=${direct.resourceId}"
+            )
+            callback.invoke(
+                newExtractorLink(
+                    this.name,
+                    "${this@MovieboxProvider.name} $qualityLabel Direct",
+                    direct.resourceLink,
+                    INFER_TYPE
+                ) {
+                    this.quality = if (direct.resolution > 0) direct.resolution else Qualities.Unknown.value
+                    this.headers = mapOf(
+                        "User-Agent" to mobileUserAgent,
+                        "Accept" to "*/*"
                     )
                 }
-
-            mobilePlayback.captions.forEach { subtitle ->
-                subtitleCallback.invoke(newSubtitleFile(subtitle.language, subtitle.url))
-            }
+            )
             return true
         }
+
+        Log.w("MovieBox", "MOVIEBOX_V17_RESOURCE_EMPTY subject=$subjectId se=$season ep=$episode fallback=h5")
 
         val resolvedStreams = loadPlayHosts(
             media = media,
@@ -1318,18 +1405,14 @@ class MovieboxProvider : MainAPI() {
         if (resolvedStreams.isEmpty()) return false
 
         resolvedStreams
-            .sortedByDescending {
-                getQualityFromName(it.stream.resolutions)
-            }
+            .sortedByDescending { getQualityFromName(it.stream.resolutions) }
             .forEach { resolved ->
                 val source = resolved.stream
                 val streamUrl = source.url ?: return@forEach
-
                 Log.i(
                     "MovieBox",
-                    "MOVIEBOX_V16_EMIT flow=h5 apiHost=${resolved.host} quality=${source.resolutions} cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
+                    "MOVIEBOX_V17_READY flow=h5-fallback apiHost=${resolved.host} quality=${source.resolutions} cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
                 )
-
                 callback.invoke(
                     newExtractorLink(
                         this.name,
@@ -1338,6 +1421,7 @@ class MovieboxProvider : MainAPI() {
                             source.resolutions
                                 ?.takeIf { it.isNotBlank() }
                                 ?.let { append(" ").append(it) }
+                            append(" H5 fallback")
                         },
                         streamUrl,
                         INFER_TYPE
@@ -1352,12 +1436,8 @@ class MovieboxProvider : MainAPI() {
             seeds = resolvedStreams
         ).forEach { subtitle ->
             val subtitleUrl = subtitle.url ?: return@forEach
-            val language = allowedSubtitleLanguage(subtitle)
-                ?: return@forEach
-
-            subtitleCallback.invoke(
-                newSubtitleFile(language, subtitleUrl)
-            )
+            val language = allowedSubtitleLanguage(subtitle) ?: return@forEach
+            subtitleCallback.invoke(newSubtitleFile(language, subtitleUrl))
         }
 
         return true
