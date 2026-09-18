@@ -1219,19 +1219,12 @@ class MovieboxProvider : MainAPI() {
         ).joinToString("|")
     }
 
-    private fun totalBytesFromHeaders(headers: Map<String, String>): Long {
-        val contentRange = headers.entries
-            .firstOrNull { it.key.equals("content-range", ignoreCase = true) }
-            ?.value
-            .orEmpty()
+    private fun totalBytesFromHeaders(headers: okhttp3.Headers): Long {
+        val contentRange = headers["content-range"].orEmpty()
         Regex("/(\\d+)\\s*$").find(contentRange)?.groupValues?.getOrNull(1)
             ?.toLongOrNull()?.let { return it }
 
-        return headers.entries
-            .firstOrNull { it.key.equals("content-length", ignoreCase = true) }
-            ?.value
-            ?.toLongOrNull()
-            ?: 0L
+        return headers["content-length"]?.toLongOrNull() ?: 0L
     }
 
     private suspend fun probeMobileCandidate(
