@@ -24,7 +24,7 @@ import javax.crypto.spec.SecretKeySpec
 class MovieboxProvider : MainAPI() {
 
     override var mainUrl = "https://movieboxhd.net"
-    override var name = "MovieBox 👾 v20"
+    override var name = "MovieBox 👾 v21"
     override var lang = "en"
 
     override val instantLinkLoading = true
@@ -1458,7 +1458,7 @@ class MovieboxProvider : MainAPI() {
 
         Log.i(
             "MovieBox",
-            "MOVIEBOX_V20_LOADLINKS subject=$subjectId se=$season ep=$episode h5Streams=${resolvedStreams.size} rawQualities=${resolvedStreams.joinToString(",") { it.stream.resolutions.orEmpty().ifBlank { "?" } }}"
+            "MOVIEBOX_V21_LOADLINKS subject=$subjectId se=$season ep=$episode h5Streams=${resolvedStreams.size} rawQualities=${resolvedStreams.joinToString(",") { it.stream.resolutions.orEmpty().ifBlank { "?" } }}"
         )
 
         val emittedUrls = linkedSetOf<String>()
@@ -1483,66 +1483,9 @@ class MovieboxProvider : MainAPI() {
         }
 
         /*
-         * Keep the original H5 links unless they are conclusively a tiny
-         * service/update clip. A quality is filtered only when MovieBox
-         * explicitly tells us it is below 720p. Unknown labels are preserved
-         * instead of being converted to 0 and accidentally dropping every
-         * source (the v19 no-link regression).
-         */
-        for (resolved in resolvedStreams.sortedByDescending {
-            explicitPlaybackQuality(it.stream.resolutions)
-                ?: getQualityFromName(it.stream.resolutions)
-        }) {
-            val source = resolved.stream
-            val streamUrl = source.url ?: continue
-            val explicitQuality = explicitPlaybackQuality(source.resolutions)
-            if (explicitQuality == null && hasKnown720PlusH5) {
-                Log.i(
-                    "MovieBox",
-                    "MOVIEBOX_V20_SKIP_UNKNOWN raw=${source.resolutions} reason=known-720plus-exists"
-                )
-                continue
-            }
-            if (explicitQuality != null && explicitQuality < 720) {
-                Log.i(
-                    "MovieBox",
-                    "MOVIEBOX_V20_SKIP_LOW raw=${source.resolutions} urlHost=${runCatching { URI(streamUrl).host }.getOrNull()}"
-                )
-                continue
-            }
-
-            val parsedQuality = explicitQuality ?: getQualityFromName(source.resolutions)
-            val quality = parsedQuality.takeIf { it > 0 } ?: Qualities.Unknown.value
-
-            if (shouldRejectH5PlaybackUrl(streamUrl, mediaType)) {
-                Log.w(
-                    "MovieBox",
-                    "MOVIEBOX_V20_REJECT_NOTICE flow=h5 raw=${source.resolutions} quality=$quality cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
-                )
-                continue
-            }
-
-            Log.i(
-                "MovieBox",
-                "MOVIEBOX_V20_EMIT flow=h5 raw=${source.resolutions} quality=$quality apiHost=${resolved.host} cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
-            )
-            emitLink(
-                streamUrl,
-                quality,
-                buildString {
-                    append(this@MovieboxProvider.name)
-                    source.resolutions
-                        ?.takeIf { it.isNotBlank() }
-                        ?.let { append(" ").append(it) }
-                }
-            )
-        }
-
-        /*
-         * Playback-only JS fallback. Search/detail remain untouched. Resource
-         * calls use the working JS client region (sp_code 90101), no spoofed
-         * X-Forwarded-For, and their own token/host preference. Add only a
-         * missing 1080p/720p quality; do not replace working H5 metadata.
+         * Playback-only JS resource path. Search/detail and H5 caption discovery
+         * remain untouched. Ask for 1080p and 720p separately and emit only
+         * verified Direct links (not the known-unplayable H5 mirror beside them).
          */
         for (quality in listOf(1080, 720)) {
             if (quality in emittedQualities) continue
@@ -1556,15 +1499,81 @@ class MovieboxProvider : MainAPI() {
             ) ?: continue
 
             val actualQuality = replacement.resolution.takeIf { it >= 720 } ?: quality
+            // The API may return the same resolution for several requested
+            // qualities. Do not show duplicate Direct entries with new URLs.
+            if (actualQuality in emittedQualities) continue
             Log.i(
                 "MovieBox",
-                "MOVIEBOX_V20_EMIT flow=resource-fallback requested=$quality actual=$actualQuality resourceId=${replacement.resourceId} cdn=${runCatching { URI(replacement.resourceLink).host }.getOrNull()}"
+                "MOVIEBOX_V21_EMIT flow=resource-fallback requested=$quality actual=$actualQuality resourceId=${replacement.resourceId} cdn=${runCatching { URI(replacement.resourceLink).host }.getOrNull()}"
             )
             emitLink(
                 replacement.resourceLink,
                 actualQuality,
                 "${this@MovieboxProvider.name} ${actualQuality}p Direct"
             )
+        }
+
+        /*
+         * Retain the original H5 links as a last-resort fallback only.
+         * Direct links play for the user; mixing an unusable H5 mirror with
+         * a verified Direct link makes the sources list misleading.
+         * If Direct is unavailable, preserve the original H5 candidates
+         * unless they are conclusively a tiny
+         * service/update clip. A quality is filtered only when MovieBox
+         * explicitly tells us it is below 720p. Unknown labels are preserved
+         * instead of being converted to 0 and accidentally dropping every
+         * source (the v19 no-link regression).
+         */
+        if (emittedUrls.isEmpty()) {
+            Log.i("MovieBox", "MOVIEBOX_V21_H5_FALLBACK reason=no-verified-direct")
+            for (resolved in resolvedStreams.sortedByDescending {
+                explicitPlaybackQuality(it.stream.resolutions)
+                    ?: getQualityFromName(it.stream.resolutions)
+            }) {
+                val source = resolved.stream
+                val streamUrl = source.url ?: continue
+                val explicitQuality = explicitPlaybackQuality(source.resolutions)
+                if (explicitQuality == null && hasKnown720PlusH5) {
+                    Log.i(
+                        "MovieBox",
+                        "MOVIEBOX_V21_SKIP_UNKNOWN raw=${source.resolutions} reason=known-720plus-exists"
+                    )
+                    continue
+                }
+                if (explicitQuality != null && explicitQuality < 720) {
+                    Log.i(
+                        "MovieBox",
+                        "MOVIEBOX_V21_SKIP_LOW raw=${source.resolutions} urlHost=${runCatching { URI(streamUrl).host }.getOrNull()}"
+                    )
+                    continue
+                }
+
+                val parsedQuality = explicitQuality ?: getQualityFromName(source.resolutions)
+                val quality = parsedQuality.takeIf { it > 0 } ?: Qualities.Unknown.value
+
+                if (shouldRejectH5PlaybackUrl(streamUrl, mediaType)) {
+                    Log.w(
+                        "MovieBox",
+                        "MOVIEBOX_V21_REJECT_NOTICE flow=h5 raw=${source.resolutions} quality=$quality cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
+                    )
+                    continue
+                }
+
+                Log.i(
+                    "MovieBox",
+                    "MOVIEBOX_V21_EMIT flow=h5 raw=${source.resolutions} quality=$quality apiHost=${resolved.host} cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
+                )
+                emitLink(
+                    streamUrl,
+                    quality,
+                    buildString {
+                        append(this@MovieboxProvider.name)
+                        source.resolutions
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { append(" ").append(it) }
+                    }
+                )
+            }
         }
 
         /* Captions are still 100% the original H5 stream-id/format flow. */
@@ -1579,7 +1588,7 @@ class MovieboxProvider : MainAPI() {
 
         Log.i(
             "MovieBox",
-            "MOVIEBOX_V20_DONE links=${emittedUrls.size} qualities=${emittedQualities.sortedDescending().joinToString(",")}"
+            "MOVIEBOX_V21_DONE links=${emittedUrls.size} qualities=${emittedQualities.sortedDescending().joinToString(",")}"
         )
         return emittedUrls.isNotEmpty()
     }
