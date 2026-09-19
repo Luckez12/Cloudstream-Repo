@@ -22,6 +22,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -157,6 +158,11 @@ class AnichinProvider : MainAPI() {
     private data class PlayerOption(
         val label: String,
         val url: String
+    )
+
+    private data class ServerLinkCandidate(
+        val player: PlayerOption,
+        val link: ExtractorLink
     )
 
     private fun Element.getImageUrl(preferThumbnail: Boolean = false): String? {
@@ -935,6 +941,133 @@ class AnichinProvider : MainAPI() {
         return PLAYER_HOST_HINTS.any { value.contains(it) }
     }
 
+    private fun playerLabelScore(label: String): Int {
+        val value = label.trim().lowercase()
+        return when {
+            value.isBlank() || value == "server" -> 0
+            value.startsWith("direct ") ||
+                value.startsWith("embedded ") ||
+                value.startsWith("fallback ") -> 1
+            else -> 10
+        }
+    }
+
+    private fun dedupePlayers(players: List<PlayerOption>): List<PlayerOption> {
+        return players
+            .filter { it.url.startsWith("http") }
+            .groupBy { it.url }
+            .values
+            .mapNotNull { matches ->
+                matches.maxByOrNull { playerLabelScore(it.label) }
+            }
+            .sortedBy { it.priority() }
+    }
+
+    private fun serverDisplayName(label: String, url: String): String {
+        val cleanLabel = label
+            .replace(
+                Regex("""\s*\[(?:ads?|setting\s+dns)\]\s*""", RegexOption.IGNORE_CASE),
+                " "
+            )
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+
+        if (playerLabelScore(cleanLabel) >= 10) return cleanLabel
+
+        val host = runCatching { URI(url).host.orEmpty().lowercase() }
+            .getOrDefault("")
+
+        return when {
+            host.contains("dailymotion") || host.contains("dmcdn") -> "Dailymotion"
+            host == "ok.ru" || host.endsWith(".ok.ru") ||
+                host.contains("odnoklassniki") || host.contains("mycdn") -> "OK.ru"
+            host.contains("rumble") -> "Rumble"
+            host.contains("morencius") || host.contains("vidhide") -> "Vidhide"
+            host.contains("anichin-player") -> "New Player"
+            host.contains("anichin.stream") -> "Anichin Stream"
+            host.contains("drive.google") || host.contains("googleusercontent") -> "Google Drive"
+            host.contains("streamruby") || host.contains("rubyvid") -> "StreamRuby"
+            host.contains("streamwish") || host.contains("wish") -> "StreamWish"
+            host.contains("emturbovid") || host.contains("turboviplay") -> "Emturbovid"
+            host.contains("filemoon") -> "Filemoon"
+            host.contains("streamtape") -> "Streamtape"
+            host.contains("mixdrop") -> "Mixdrop"
+            host.isNotBlank() -> host.removePrefix("www.")
+            else -> "Anichin"
+        }
+    }
+
+    private fun extractorLinkScore(link: ExtractorLink): Int {
+        val url = link.url.lowercase()
+        val quality = link.quality.coerceAtLeast(0)
+
+        return when {
+            url.contains("master.m3u8") || url.contains("master_") -> 1_000_000 + quality
+            link.type == ExtractorLinkType.M3U8 &&
+                link.quality == Qualities.Unknown.value -> 900_000
+            link.type == ExtractorLinkType.M3U8 -> 800_000 + quality
+            link.type == ExtractorLinkType.DASH -> 700_000 + quality
+            else -> 100_000 + quality
+        }
+    }
+
+    private fun isAdaptiveMaster(link: ExtractorLink): Boolean {
+        if (link.type != ExtractorLinkType.M3U8) return false
+
+        val url = link.url.lowercase()
+        return link.quality == Qualities.Unknown.value ||
+            url.contains("master.m3u8") ||
+            url.contains("master_")
+    }
+
+    private fun isAllowedQuality(link: ExtractorLink): Boolean {
+        return link.url.isNotBlank() &&
+            (link.quality >= MIN_VIDEO_QUALITY || isAdaptiveMaster(link))
+    }
+
+    private fun qualityLabel(link: ExtractorLink): String {
+        return if (link.quality >= MIN_VIDEO_QUALITY) {
+            "${link.quality}p"
+        } else {
+            "Auto"
+        }
+    }
+
+    private fun qualityOrder(link: ExtractorLink): Int {
+        return if (qualityLabel(link) == "Auto") Int.MAX_VALUE else link.quality
+    }
+
+    private fun serverOrder(name: String): Int {
+        val value = name.lowercase()
+        return when {
+            value.contains("ok.ru") || value.contains("okru") -> 0
+            value.contains("rumble") -> 1
+            value.contains("dailymotion") -> 2
+            else -> 10
+        }
+    }
+
+    private suspend fun withWebsiteServerName(
+        link: ExtractorLink,
+        serverLabel: String
+    ): ExtractorLink {
+        val serverName = serverDisplayName(serverLabel, link.url)
+        val displayName = "$serverName • ${qualityLabel(link)}"
+
+        return newExtractorLink(
+            source = displayName,
+            name = displayName,
+            url = link.url,
+            type = link.type
+        ) {
+            this.referer = link.referer
+            this.headers = link.headers
+            this.quality = link.quality
+            this.extractorData = link.extractorData
+            this.audioTracks = link.audioTracks
+        }
+    }
+
     private fun playerRequestHeaders(): Map<String, String> = mapOf(
         "User-Agent" to USER_AGENT,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1138,10 +1271,7 @@ class AnichinProvider : MainAPI() {
             )
         }
 
-        return players
-            .filter { it.url.startsWith("http") }
-            .distinctBy { it.url }
-            .sortedBy { it.priority() }
+        return dedupePlayers(players)
     }
 
     private fun Document.collectNestedPlayerUrls(
@@ -1236,8 +1366,8 @@ class AnichinProvider : MainAPI() {
     private suspend fun tryLoadExtractor(
         url: String,
         referer: String,
+        serverLabel: String,
         attemptedUrls: MutableSet<String>,
-        emittedUrls: MutableSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
@@ -1248,7 +1378,7 @@ class AnichinProvider : MainAPI() {
         }
 
         if (isDirectMediaUrl(url)) {
-            if (!emittedUrls.add(url)) return false
+            val displayName = serverDisplayName(serverLabel, url)
 
             val type = when {
                 url.contains(".m3u8", true) -> ExtractorLinkType.M3U8
@@ -1258,8 +1388,8 @@ class AnichinProvider : MainAPI() {
 
             callback(
                 newExtractorLink(
-                    source = "Anichin Direct",
-                    name = "Anichin Direct",
+                    source = displayName,
+                    name = displayName,
                     url = url,
                     type = type
                 ) {
@@ -1272,9 +1402,11 @@ class AnichinProvider : MainAPI() {
         }
 
         val emitted = AtomicBoolean(false)
+        val discoveredUrls: MutableSet<String> =
+            ConcurrentHashMap.newKeySet()
 
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
-            if (emittedUrls.add(link.url)) {
+            if (discoveredUrls.add(link.url)) {
                 emitted.set(true)
                 callback(link)
             }
@@ -1360,16 +1492,16 @@ class AnichinProvider : MainAPI() {
     private suspend fun resolvePlayerPipeline(
         wrapperUrl: String,
         episodeUrl: String,
+        serverLabel: String,
         attemptedUrls: MutableSet<String>,
-        emittedUrls: MutableSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val directSuccess = tryLoadExtractor(
             wrapperUrl,
             episodeUrl,
+            serverLabel,
             attemptedUrls,
-            emittedUrls,
             subtitleCallback,
             callback
         )
@@ -1390,8 +1522,8 @@ class AnichinProvider : MainAPI() {
             val playerSuccess = tryLoadExtractor(
                 playerUrl,
                 wrapperUrl,
+                serverLabel,
                 attemptedUrls,
-                emittedUrls,
                 subtitleCallback,
                 callback
             )
@@ -1416,8 +1548,8 @@ class AnichinProvider : MainAPI() {
                         tryLoadExtractor(
                             nestedUrl,
                             playerUrl,
+                            serverLabel,
                             attemptedUrls,
-                            emittedUrls,
                             subtitleCallback,
                             callback
                         )
@@ -1454,12 +1586,6 @@ class AnichinProvider : MainAPI() {
             }
         }
 
-        val attemptedUrls: MutableSet<String> =
-            ConcurrentHashMap.newKeySet()
-
-        val emittedUrls: MutableSet<String> =
-            ConcurrentHashMap.newKeySet()
-
         val topLevelPlayers = document.collectTopLevelPlayers(data)
         val nestedPlayers = document.collectNestedPlayerUrls(data)
 
@@ -1474,35 +1600,90 @@ class AnichinProvider : MainAPI() {
                 )
             }
         }
-            .distinctBy { it.url }
-            .sortedBy { it.priority() }
+            .let(::dedupePlayers)
 
         Log.w(
             "Anichin",
-            "ANICHIN_V31_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V40_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V31_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V40_DONE candidates=0 success=false")
             return false
         }
 
-        val success = collectTwoLane(players) { player ->
+        val discoveredLinks: MutableList<ServerLinkCandidate> =
+            Collections.synchronizedList(mutableListOf())
+
+        collectTwoLane(players) { player ->
+            val serverAttempts: MutableSet<String> =
+                ConcurrentHashMap.newKeySet()
+
             resolvePlayerPipeline(
                 player.url,
                 data,
-                attemptedUrls,
-                emittedUrls,
+                player.label,
+                serverAttempts,
                 effectiveSubtitleCallback,
-                callback
+                { link ->
+                    discoveredLinks.add(
+                        ServerLinkCandidate(player, link)
+                    )
+                }
             )
         }
 
+        val displayLinks = discoveredLinks
+            .filter { candidate -> isAllowedQuality(candidate.link) }
+            .groupBy { candidate -> candidate.link.url }
+            .values
+            .mapNotNull { sameUrl ->
+                sameUrl.maxByOrNull { candidate ->
+                    playerLabelScore(candidate.player.label)
+                }
+            }
+            .groupBy { candidate ->
+                val serverName = serverDisplayName(
+                    candidate.player.label,
+                    candidate.link.url
+                ).lowercase()
+                serverName to qualityLabel(candidate.link)
+            }
+            .values
+            .mapNotNull { sameServerAndQuality ->
+                sameServerAndQuality.maxByOrNull { candidate ->
+                    extractorLinkScore(candidate.link)
+                }
+            }
+            .sortedWith(
+                compareBy<ServerLinkCandidate> { candidate ->
+                    serverOrder(
+                        serverDisplayName(
+                            candidate.player.label,
+                            candidate.link.url
+                        )
+                    )
+                }.thenBy { candidate -> candidate.player.priority() }
+                    .thenByDescending { candidate -> qualityOrder(candidate.link) }
+            )
+
+        displayLinks.forEach { candidate ->
+            callback(
+                withWebsiteServerName(
+                    candidate.link,
+                    candidate.player.label
+                )
+            )
+        }
+
+        val success = displayLinks.isNotEmpty()
+
         Log.w(
             "Anichin",
-            "ANICHIN_V31_DONE candidates=${players.size} emitted=${emittedUrls.size} success=$success"
+            "ANICHIN_V40_DONE candidates=${players.size} discovered=${discoveredLinks.size} " +
+                "emitted=${displayLinks.size} success=$success"
         )
 
         return success
@@ -1513,8 +1694,8 @@ class AnichinProvider : MainAPI() {
 
         return when {
             value.contains("ok.ru") || value.contains("okru") || value.contains("odnoklassniki") -> 0
-            value.contains("dailymotion") -> 1
-            value.contains("rumble") -> 2
+            value.contains("rumble") -> 1
+            value.contains("dailymotion") -> 2
             value.contains("anichin.stream") -> 3
             value.contains("anichin-player.web.id") -> 4
             value.contains("streamruby") || value.contains("ruby") -> 5
@@ -1569,5 +1750,6 @@ class AnichinProvider : MainAPI() {
         private const val MIN_POSTER_WIDTH = 300
         private const val MAX_POSTER_CACHE_ENTRIES = 48
         private const val MAX_POSTER_BYTES = 4_000_000
+        private const val MIN_VIDEO_QUALITY = 720
     }
 }
