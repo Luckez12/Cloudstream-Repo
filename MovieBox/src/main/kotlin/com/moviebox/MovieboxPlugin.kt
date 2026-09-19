@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 @CloudstreamPlugin
 class MovieboxPlugin : BasePlugin() {
     override fun load() {
-        Log.i("MovieBox", "MOVIEBOX_PLUGIN_LOADED version=21 search=original playback=verified-direct-first-h5-emergency-fallback captions=original-h5")
+        Log.i("MovieBox", "MOVIEBOX_PLUGIN_LOADED version=22 search=original playback=verified-direct-first-h5-emergency-fallback captions=direct-resourceId-with-h5-fallback")
         registerMainAPI(MovieboxProvider())
     }
 }

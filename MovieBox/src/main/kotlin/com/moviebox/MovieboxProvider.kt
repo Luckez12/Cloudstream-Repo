@@ -24,7 +24,7 @@ import javax.crypto.spec.SecretKeySpec
 class MovieboxProvider : MainAPI() {
 
     override var mainUrl = "https://movieboxhd.net"
-    override var name = "MovieBox 👾 v21"
+    override var name = "MovieBox"
     override var lang = "en"
 
     override val instantLinkLoading = true
@@ -102,6 +102,8 @@ class MovieboxProvider : MainAPI() {
 
     private val mobileSearchPath = "/wefeed-mobile-bff/subject-api/search"
     private val mobileResourcePath = "/wefeed-mobile-bff/subject-api/resource"
+    private val mobileExtCaptionsPath = "/wefeed-mobile-bff/subject-api/get-ext-captions"
+    private val mobilePlayInfoPath = "/wefeed-mobile-bff/subject-api/play-info"
     private val mobileBootstrapPath = "/wefeed-mobile-bff/tab-operating"
     private val mobileSigningSecretB64 = "76iRl07s0xSN9jqmEWAt79EBJZulIQIsV64FZr2O"
     private val mobileUserAgent =
@@ -462,7 +464,7 @@ class MovieboxProvider : MainAPI() {
                 val token = tokenFromXUser(response.headers["x-user"])
                 Log.i(
                     "MovieBox",
-                    "MOVIEBOX_V20_PLAYBACK_AUTH host=$host http=${response.code} token=${!token.isNullOrBlank()}"
+                    "MOVIEBOX_V22_PLAYBACK_AUTH host=$host http=${response.code} token=${!token.isNullOrBlank()}"
                 )
                 if (!token.isNullOrBlank()) {
                     playbackAuthToken = token
@@ -474,7 +476,7 @@ class MovieboxProvider : MainAPI() {
             } catch (error: Throwable) {
                 Log.w(
                     "MovieBox",
-                    "MOVIEBOX_V20_PLAYBACK_AUTH_FAIL host=$host type=${error::class.simpleName}"
+                    "MOVIEBOX_V22_PLAYBACK_AUTH_FAIL host=$host type=${error::class.simpleName}"
                 )
             }
         }
@@ -1091,7 +1093,8 @@ class MovieboxProvider : MainAPI() {
                         .orEmpty()
                         .filter { caption ->
                             !caption.url.isNullOrBlank() &&
-                                allowedSubtitleLanguage(caption) != null
+                                (allowedSubtitleLanguage(caption) != null ||
+                                    !caption.lanName.isNullOrBlank() || !caption.lan.isNullOrBlank())
                         }
 
                     if (hostCaptions.isNotEmpty()) {
@@ -1333,7 +1336,7 @@ class MovieboxProvider : MainAPI() {
                     preferredPlaybackMobileHost = host
                     Log.i(
                         "MovieBox",
-                        "MOVIEBOX_V20_RESOURCE host=$host requested=${requestedResolution}p items=${all.size} se=$season ep=$episode"
+                        "MOVIEBOX_V22_RESOURCE host=$host requested=${requestedResolution}p items=${all.size} se=$season ep=$episode"
                     )
                     return if (mediaType == 2) {
                         all.filter { it.season == season && it.episode == episode }
@@ -1405,6 +1408,126 @@ class MovieboxProvider : MainAPI() {
         return null
     }
 
+    /*
+     * The selected /resource link can have a different resourceId from H5.
+     * H5's caption endpoint requires its own stream id/format, which can be
+     * absent even when the Direct video is playable. Query captions for the
+     * ACTUAL Direct resource, without changing its video URL or headers.
+     */
+    private data class DirectCaption(val language: String, val url: String)
+
+    private fun directCaptionLanguage(node: JsonNode): String? {
+        val raw = listOf("lanName", "languageName", "language", "lan", "lang", "langCode", "name")
+            .firstNotNullOfOrNull { playbackNodeText(node, it) }
+            ?: return null
+        val clean = raw.trim()
+        if (clean.isBlank()) return null
+        val normalized = clean.lowercase().replace('_', '-')
+        return when {
+            normalized == "ms" || normalized == "msa" || normalized == "may" ||
+                normalized.startsWith("ms-") || normalized.contains("malay") ||
+                normalized.contains("melayu") -> "Malay"
+            normalized == "en" || normalized == "eng" || normalized.startsWith("en-") ||
+                normalized.contains("english") -> "English"
+            normalized == "id" || normalized == "ind" || normalized == "in" ||
+                normalized.startsWith("id-") || normalized.contains("indones") -> "Indonesian"
+            else -> clean.take(45)
+        }
+    }
+
+    private fun parseDirectCaptions(raw: String): List<DirectCaption> {
+        val root = runCatching { AppUtils.tryParseJson<JsonNode>(raw) }.getOrNull()
+            ?: return emptyList()
+        if (root.get("code")?.takeUnless { it.isNull }?.asInt()
+            ?.let { it != 0 } == true) return emptyList()
+
+        val result = linkedMapOf<String, DirectCaption>()
+        fun walk(node: JsonNode?, depth: Int, subtitleCollection: Boolean) {
+            if (node == null || node.isNull || depth > 9 || result.size >= 40) return
+            if (node.isArray) {
+                node.forEach { child -> walk(child, depth + 1, subtitleCollection) }
+                return
+            }
+            if (!node.isObject) return
+
+            val url = listOf("subtitleUrl", "captionUrl", "subUrl", "subtitleLink", "url", "file", "fileUrl", "downloadUrl", "link")
+                .firstNotNullOfOrNull { playbackNodeText(node, it) }
+            val language = directCaptionLanguage(node)
+            if (url != null && (url.startsWith("https://", ignoreCase = true) ||
+                url.startsWith("http://", ignoreCase = true))) {
+                val lower = url.lowercase().substringBefore('?')
+                val isVideo = listOf(".mp4", ".m3u8", ".mpd", ".m4v").any { lower.endsWith(it) }
+                val isCaption = lower.endsWith(".srt") || lower.endsWith(".vtt") ||
+                    lower.endsWith(".ass") || lower.endsWith(".ssa") ||
+                    lower.contains("/subtitle") || lower.contains("/caption") ||
+                    lower.contains("cacdn.")
+                if (!isVideo && (isCaption || (subtitleCollection && language != null))) {
+                    result[url] = DirectCaption(language ?: "Unknown", url)
+                }
+            }
+            val fields = node.fields()
+            while (fields.hasNext()) {
+                val entry = fields.next()
+                val key = entry.key.lowercase()
+                // The play-info response also contains dummy video stream URLs.
+                // Never mistake those for subtitle files.
+                if (key == "streamlist" || key == "streams" || key == "resourcelist" ||
+                    key == "signcookie" || key == "resource") continue
+                val captionBranch = subtitleCollection || key.contains("caption") ||
+                    key.contains("subtitle") || key == "list"
+                if (entry.value.isContainerNode) walk(entry.value, depth + 1, captionBranch)
+            }
+        }
+        walk(root, 0, false)
+        return result.values.toList()
+    }
+
+    private suspend fun loadDirectResourceCaptions(
+        subjectId: String,
+        season: Int,
+        episode: Int,
+        selectedResources: List<PlaybackResourceCandidate>
+    ): List<DirectCaption> {
+        if (selectedResources.isEmpty()) return emptyList()
+        val token = bootstrapPlaybackAuth() ?: return emptyList()
+        val chosen = selectedResources.filter { it.resourceId.isNotBlank() }
+            .distinctBy { it.resourceId }.take(2)
+
+        for (resource in chosen) {
+            // Prefer captions keyed directly to the Direct resourceId; play-info
+            // is only a subtitle fallback and is NEVER used as a video source.
+            val requests = listOf(
+                mobileExtCaptionsPath to
+                    "episode=$episode&resourceId=${resource.resourceId}&subjectId=$subjectId",
+                mobilePlayInfoPath to
+                    "ep=$episode&quality=${resource.resolution.takeIf { it >= 720 } ?: 1080}&resourceId=${resource.resourceId}&se=$season&subjectId=$subjectId"
+            )
+            for ((path, query) in requests) {
+                for (host in orderedPlaybackMobileHosts().take(2)) {
+                    val url = "$host$path?$query"
+                    try {
+                        val response = app.get(
+                            url,
+                            headers = buildPlaybackMobileHeaders("GET", url, null, token),
+                            timeout = mobileRequestTimeoutSeconds
+                        )
+                        tokenFromXUser(response.headers["x-user"])?.let { playbackAuthToken = it }
+                        val captions = if (response.code in 200..299)
+                            parseDirectCaptions(response.text) else emptyList()
+                        Log.i("MovieBox", "MOVIEBOX_V22_SUB_DIRECT endpoint=${path.substringAfterLast('/')} http=${response.code} count=${captions.size}")
+                        if (captions.isNotEmpty()) return captions
+                        if (response.code == 401 || response.code == 403) break
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        Log.w("MovieBox", "MOVIEBOX_V22_SUB_DIRECT_FAIL endpoint=${path.substringAfterLast('/')} type=${error::class.simpleName}")
+                    }
+                }
+            }
+        }
+        return emptyList()
+    }
+
     private fun explicitPlaybackQuality(label: String?): Int? {
         val raw = label.orEmpty().trim()
         if (raw.isBlank()) return null
@@ -1445,9 +1568,9 @@ class MovieboxProvider : MainAPI() {
         val mediaType = if (season > 0 || episode > 0) 2 else 1
 
         /*
-         * Original Cloudstream H5 discovery remains the source of stream
-         * metadata and caption ids. The JS implementation is consulted only
-         * for playback replacement/fallback.
+         * Keep original Cloudstream H5 discovery for the emergency backup and
+         * H5 caption ids. Direct playback and its resource-matched captions
+         * are resolved separately, without changing search or detail.
          */
         val resolvedStreams = loadPlayHosts(
             media = media,
@@ -1458,11 +1581,12 @@ class MovieboxProvider : MainAPI() {
 
         Log.i(
             "MovieBox",
-            "MOVIEBOX_V21_LOADLINKS subject=$subjectId se=$season ep=$episode h5Streams=${resolvedStreams.size} rawQualities=${resolvedStreams.joinToString(",") { it.stream.resolutions.orEmpty().ifBlank { "?" } }}"
+            "MOVIEBOX_V22_LOADLINKS subject=$subjectId se=$season ep=$episode h5Streams=${resolvedStreams.size} rawQualities=${resolvedStreams.joinToString(",") { it.stream.resolutions.orEmpty().ifBlank { "?" } }}"
         )
 
         val emittedUrls = linkedSetOf<String>()
         val emittedQualities = linkedSetOf<Int>()
+        val selectedDirectResources = mutableListOf<PlaybackResourceCandidate>()
         val hasKnown720PlusH5 = resolvedStreams.any {
             (explicitPlaybackQuality(it.stream.resolutions) ?: -1) >= 720
         }
@@ -1504,12 +1628,13 @@ class MovieboxProvider : MainAPI() {
             if (actualQuality in emittedQualities) continue
             Log.i(
                 "MovieBox",
-                "MOVIEBOX_V21_EMIT flow=resource-fallback requested=$quality actual=$actualQuality resourceId=${replacement.resourceId} cdn=${runCatching { URI(replacement.resourceLink).host }.getOrNull()}"
+                "MOVIEBOX_V22_EMIT flow=resource-fallback requested=$quality actual=$actualQuality resourceId=${replacement.resourceId} cdn=${runCatching { URI(replacement.resourceLink).host }.getOrNull()}"
             )
+            selectedDirectResources += replacement
             emitLink(
                 replacement.resourceLink,
                 actualQuality,
-                "${this@MovieboxProvider.name} ${actualQuality}p Direct"
+                "MovieBox • Direct"
             )
         }
 
@@ -1525,7 +1650,7 @@ class MovieboxProvider : MainAPI() {
          * source (the v19 no-link regression).
          */
         if (emittedUrls.isEmpty()) {
-            Log.i("MovieBox", "MOVIEBOX_V21_H5_FALLBACK reason=no-verified-direct")
+            Log.i("MovieBox", "MOVIEBOX_V22_H5_FALLBACK reason=no-verified-direct")
             for (resolved in resolvedStreams.sortedByDescending {
                 explicitPlaybackQuality(it.stream.resolutions)
                     ?: getQualityFromName(it.stream.resolutions)
@@ -1536,14 +1661,14 @@ class MovieboxProvider : MainAPI() {
                 if (explicitQuality == null && hasKnown720PlusH5) {
                     Log.i(
                         "MovieBox",
-                        "MOVIEBOX_V21_SKIP_UNKNOWN raw=${source.resolutions} reason=known-720plus-exists"
+                        "MOVIEBOX_V22_SKIP_UNKNOWN raw=${source.resolutions} reason=known-720plus-exists"
                     )
                     continue
                 }
                 if (explicitQuality != null && explicitQuality < 720) {
                     Log.i(
                         "MovieBox",
-                        "MOVIEBOX_V21_SKIP_LOW raw=${source.resolutions} urlHost=${runCatching { URI(streamUrl).host }.getOrNull()}"
+                        "MOVIEBOX_V22_SKIP_LOW raw=${source.resolutions} urlHost=${runCatching { URI(streamUrl).host }.getOrNull()}"
                     )
                     continue
                 }
@@ -1554,41 +1679,52 @@ class MovieboxProvider : MainAPI() {
                 if (shouldRejectH5PlaybackUrl(streamUrl, mediaType)) {
                     Log.w(
                         "MovieBox",
-                        "MOVIEBOX_V21_REJECT_NOTICE flow=h5 raw=${source.resolutions} quality=$quality cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
+                        "MOVIEBOX_V22_REJECT_NOTICE flow=h5 raw=${source.resolutions} quality=$quality cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
                     )
                     continue
                 }
 
                 Log.i(
                     "MovieBox",
-                    "MOVIEBOX_V21_EMIT flow=h5 raw=${source.resolutions} quality=$quality apiHost=${resolved.host} cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
+                    "MOVIEBOX_V22_EMIT flow=h5 raw=${source.resolutions} quality=$quality apiHost=${resolved.host} cdn=${runCatching { URI(streamUrl).host }.getOrNull()}"
                 )
                 emitLink(
                     streamUrl,
                     quality,
-                    buildString {
-                        append(this@MovieboxProvider.name)
-                        source.resolutions
-                            ?.takeIf { it.isNotBlank() }
-                            ?.let { append(" ").append(it) }
-                    }
+                    "MovieBox • Backup"
                 )
             }
         }
 
-        /* Captions are still 100% the original H5 stream-id/format flow. */
-        loadCaptionsAcrossHosts(
-            subjectId = subjectId,
-            seeds = resolvedStreams
-        ).forEach { subtitle ->
-            val subtitleUrl = subtitle.url ?: return@forEach
-            val language = allowedSubtitleLanguage(subtitle) ?: return@forEach
-            subtitleCallback.invoke(newSubtitleFile(language, subtitleUrl))
+        // Direct subtitles are looked up for the very same resourceId as the
+        // selected video. If none are available, retain the original H5 caption
+        // lookup. Do not create fake subtitle entries when an API returns none.
+        val emittedSubtitleUrls = linkedSetOf<String>()
+        val directCaptions = loadDirectResourceCaptions(
+            subjectId, season, episode, selectedDirectResources
+        )
+        directCaptions.forEach { subtitle ->
+            if (emittedSubtitleUrls.add(subtitle.url)) {
+                subtitleCallback.invoke(newSubtitleFile(subtitle.language, subtitle.url))
+            }
         }
+        if (emittedSubtitleUrls.isEmpty()) {
+            loadCaptionsAcrossHosts(subjectId, resolvedStreams).forEach { subtitle ->
+                val subtitleUrl = subtitle.url ?: return@forEach
+                val language = allowedSubtitleLanguage(subtitle)
+                    ?: subtitle.lanName?.takeIf { it.isNotBlank() }
+                    ?: subtitle.lan?.takeIf { it.isNotBlank() }
+                    ?: return@forEach
+                if (emittedSubtitleUrls.add(subtitleUrl)) {
+                    subtitleCallback.invoke(newSubtitleFile(language, subtitleUrl))
+                }
+            }
+        }
+        Log.i("MovieBox", "MOVIEBOX_V22_SUB_DONE direct=${directCaptions.size} emitted=${emittedSubtitleUrls.size} h5Seeds=${resolvedStreams.size}")
 
         Log.i(
             "MovieBox",
-            "MOVIEBOX_V21_DONE links=${emittedUrls.size} qualities=${emittedQualities.sortedDescending().joinToString(",")}"
+            "MOVIEBOX_V22_DONE links=${emittedUrls.size} qualities=${emittedQualities.sortedDescending().joinToString(",")}"
         )
         return emittedUrls.isNotEmpty()
     }
