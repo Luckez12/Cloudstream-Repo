@@ -150,24 +150,51 @@ class AnichinProvider : MainAPI() {
         val url: String
     )
 
-    private fun Element.getImageUrl(): String? {
-        fun srcset(value: String): String? = value
-            .split(',')
-            .map { it.trim().substringBefore(' ').trim() }
-            .filter { it.isNotBlank() && !it.startsWith("data:", true) }
-            .lastOrNull()
+    private data class ServerLinkCandidate(
+        val player: PlayerOption,
+        val link: ExtractorLink
+    )
+
+    private fun Element.getImageUrl(preferThumbnail: Boolean = false): String? {
+        fun srcset(value: String): String? {
+            val candidates = value
+                .split(',')
+                .mapNotNull { entry ->
+                    val parts = entry.trim().split(Regex("""\s+"""))
+                    val url = parts.firstOrNull()
+                        ?.takeIf {
+                            it.isNotBlank() && !it.startsWith("data:", true)
+                        }
+                        ?: return@mapNotNull null
+                    val width = parts.getOrNull(1)
+                        ?.removeSuffix("w")
+                        ?.toIntOrNull()
+                    url to width
+                }
+
+            if (!preferThumbnail) return candidates.lastOrNull()?.first
+
+            return candidates
+                .filter { (_, width) -> width != null && width >= MIN_POSTER_WIDTH }
+                .minByOrNull { (_, width) -> width ?: Int.MAX_VALUE }
+                ?.first
+                ?: candidates.lastOrNull()?.first
+        }
+
+        val responsivePoster = srcset(attr("data-lazy-srcset"))
+            ?: srcset(attr("data-srcset"))
+            ?: srcset(attr("srcset"))
 
         return listOf(
+            responsivePoster.takeIf { preferThumbnail },
             attr("data-src"),
             attr("data-lazy-src"),
             attr("data-original"),
             attr("data-cfsrc"),
-            srcset(attr("data-lazy-srcset")).orEmpty(),
-            srcset(attr("data-srcset")).orEmpty(),
-            srcset(attr("srcset")).orEmpty(),
+            responsivePoster,
             attr("src")
         ).firstOrNull { imageUrl ->
-            imageUrl.isNotBlank() &&
+            !imageUrl.isNullOrBlank() &&
                 !imageUrl.startsWith("data:", ignoreCase = true)
         }
     }
@@ -284,7 +311,7 @@ class AnichinProvider : MainAPI() {
             .select("div.listupd > article")
             .mapNotNull { it.toCardData(typeHint) }
 
-        val home = buildSearchResponses(cards)
+        val home = buildSearchResponses(cards, pageUrl)
 
         val hasNext = document.selectFirst(
             "a.next.page-numbers, .pagination .next a, .hpage a.r, a[rel=next]"
@@ -322,7 +349,8 @@ class AnichinProvider : MainAPI() {
 
         val href = fixUrl(anchor.attr("href"))
 
-        val posterUrl = selectFirst("div.bsx > a img, img")?.getImageUrl()
+        val posterUrl = selectFirst("div.bsx > a img, img")
+            ?.getImageUrl(preferThumbnail = true)
 
         val badge = selectFirst(".typez, .type, .status")
             ?.text()
@@ -339,22 +367,42 @@ class AnichinProvider : MainAPI() {
     }
 
     /**
-     * Keep home/search fast: return poster URLs immediately and let
-     * Cloudstream's image loader fetch them with the saved clearance headers.
-     * Inline Base64 fetching is reserved for the detail page only.
+     * AniChin posters are Cloudflare-protected, so raw URLs are unreliable in
+     * Cloudstream's image loader. Resolve small thumbnails in parallel, while
+     * capping the complete batch so a slow image host cannot block the page.
      */
-    private fun buildSearchResponses(
-        cards: List<CardData>
-    ): List<SearchResponse> = cards.map { card ->
-        val poster = card.poster?.let { fixUrlNull(it) }
+    private suspend fun buildSearchResponses(
+        cards: List<CardData>,
+        pageReferer: String
+    ): List<SearchResponse> = coroutineScope {
+        val resolvedPosters: MutableList<String?> =
+            Collections.synchronizedList(
+                MutableList<String?>(cards.size) { null }
+            )
 
-        newAnimeSearchResponse(
-            card.title,
-            card.href,
-            card.type
-        ) {
-            this.posterUrl = poster
-            this.posterHeaders = imageHeadersFor(poster)
+        withTimeoutOrNull(POSTER_BATCH_TIMEOUT_MS) {
+            cards.mapIndexed { index, card ->
+                async {
+                    resolvedPosters[index] = inlinePoster(
+                        card.poster,
+                        pageReferer
+                    )
+                }
+            }.awaitAll()
+        }
+
+        cards.mapIndexed { index, card ->
+            val poster = resolvedPosters[index]
+                ?: card.poster?.let { fixUrlNull(it) }
+
+            newAnimeSearchResponse(
+                card.title,
+                card.href,
+                card.type
+            ) {
+                this.posterUrl = poster
+                this.posterHeaders = imageHeadersFor(poster)
+            }
         }
     }
 
@@ -382,7 +430,7 @@ class AnichinProvider : MainAPI() {
                 .select("div.listupd > article")
                 .mapNotNull { it.toCardData() }
 
-            val results = buildSearchResponses(cards)
+            val results = buildSearchResponses(cards, pageUrl)
 
             if (results.isEmpty()) break
 
@@ -929,18 +977,54 @@ class AnichinProvider : MainAPI() {
         }
     }
 
-    private fun selectBestServerLink(links: List<ExtractorLink>): ExtractorLink? {
-        return links
-            .filter { it.url.isNotBlank() }
-            .distinctBy { it.url }
-            .maxByOrNull(::extractorLinkScore)
+    private fun isAdaptiveMaster(link: ExtractorLink): Boolean {
+        if (link.type != ExtractorLinkType.M3U8) return false
+
+        val url = link.url.lowercase()
+        return link.quality == Qualities.Unknown.value ||
+            url.contains("master.m3u8") ||
+            url.contains("master_")
+    }
+
+    private fun isAllowedQuality(link: ExtractorLink): Boolean {
+        return link.url.isNotBlank() &&
+            (link.quality >= MIN_VIDEO_QUALITY || isAdaptiveMaster(link))
+    }
+
+    private fun qualityLabel(link: ExtractorLink): String {
+        return if (
+            link.quality >= MIN_VIDEO_QUALITY
+        ) {
+            "${link.quality}p"
+        } else {
+            "Auto"
+        }
+    }
+
+    private fun qualityOrder(link: ExtractorLink): Int {
+        return if (qualityLabel(link) == "Auto") {
+            Int.MAX_VALUE
+        } else {
+            link.quality
+        }
+    }
+
+    private fun serverOrder(name: String): Int {
+        val value = name.lowercase()
+        return when {
+            value.contains("ok.ru") || value.contains("okru") -> 0
+            value.contains("rumble") -> 1
+            value.contains("dailymotion") -> 2
+            else -> 10
+        }
     }
 
     private suspend fun withWebsiteServerName(
         link: ExtractorLink,
         serverLabel: String
     ): ExtractorLink {
-        val displayName = serverDisplayName(serverLabel, link.url)
+        val serverName = serverDisplayName(serverLabel, link.url)
+        val displayName = "$serverName • ${qualityLabel(link)}"
 
         return newExtractorLink(
             source = displayName,
@@ -1474,15 +1558,6 @@ class AnichinProvider : MainAPI() {
             }
         }
 
-        val attemptedUrls: MutableSet<String> =
-            ConcurrentHashMap.newKeySet()
-
-        val emittedUrls: MutableSet<String> =
-            ConcurrentHashMap.newKeySet()
-
-        val emittedServerNames: MutableSet<String> =
-            ConcurrentHashMap.newKeySet()
-
         val topLevelPlayers = document.collectTopLevelPlayers(data)
         val nestedPlayers = document.collectNestedPlayerUrls(data)
 
@@ -1501,51 +1576,89 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V36_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V37_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V36_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V37_DONE candidates=0 success=false")
             return false
         }
 
-        val success = collectTwoLane(players) { player ->
-            val serverLinks: MutableList<ExtractorLink> =
-                Collections.synchronizedList(mutableListOf())
+        val discoveredLinks: MutableList<ServerLinkCandidate> =
+            Collections.synchronizedList(mutableListOf())
+
+        collectTwoLane(players) { player ->
+            // Each website server owns its own attempt set. A fallback player
+            // must never suppress a preferred server that resolves to the same
+            // nested URL while both pipelines are running concurrently.
+            val serverAttempts: MutableSet<String> =
+                ConcurrentHashMap.newKeySet()
 
             resolvePlayerPipeline(
                 player.url,
                 data,
                 player.label,
-                attemptedUrls,
+                serverAttempts,
                 effectiveSubtitleCallback,
-                { link -> serverLinks.add(link) }
+                { link ->
+                    discoveredLinks.add(
+                        ServerLinkCandidate(player, link)
+                    )
+                }
+            )
+        }
+
+        val displayLinks = discoveredLinks
+            .filter { candidate -> isAllowedQuality(candidate.link) }
+            .groupBy { candidate -> candidate.link.url }
+            .values
+            .mapNotNull { sameUrl ->
+                sameUrl.maxByOrNull { candidate ->
+                    playerLabelScore(candidate.player.label)
+                }
+            }
+            .groupBy { candidate ->
+                val serverName = serverDisplayName(
+                    candidate.player.label,
+                    candidate.link.url
+                ).lowercase()
+                serverName to qualityLabel(candidate.link)
+            }
+            .values
+            .mapNotNull { sameServerAndQuality ->
+                sameServerAndQuality.maxByOrNull { candidate ->
+                    extractorLinkScore(candidate.link)
+                }
+            }
+            .sortedWith(
+                compareBy<ServerLinkCandidate> { candidate ->
+                    serverOrder(
+                        serverDisplayName(
+                            candidate.player.label,
+                            candidate.link.url
+                        )
+                    )
+                }.thenBy { candidate -> candidate.player.priority() }
+                    .thenByDescending { candidate -> qualityOrder(candidate.link) }
             )
 
-            val selected = selectBestServerLink(serverLinks)
-
-            val displayKey = selected
-                ?.let { serverDisplayName(player.label, it.url) }
-                ?.lowercase()
-
-            if (
-                selected == null ||
-                displayKey == null ||
-                !emittedServerNames.add(displayKey)
-            ) {
-                false
-            } else {
-                emittedUrls.add(selected.url)
-                callback(withWebsiteServerName(selected, player.label))
-                true
-            }
+        displayLinks.forEach { candidate ->
+            callback(
+                withWebsiteServerName(
+                    candidate.link,
+                    candidate.player.label
+                )
+            )
         }
+
+        val success = displayLinks.isNotEmpty()
 
         Log.w(
             "Anichin",
-            "ANICHIN_V36_DONE candidates=${players.size} emitted=${emittedUrls.size} success=$success"
+            "ANICHIN_V37_DONE candidates=${players.size} discovered=${discoveredLinks.size} " +
+                "emitted=${displayLinks.size} success=$success"
         )
 
         return success
@@ -1556,8 +1669,8 @@ class AnichinProvider : MainAPI() {
 
         return when {
             value.contains("ok.ru") || value.contains("okru") || value.contains("odnoklassniki") -> 0
-            value.contains("dailymotion") -> 1
-            value.contains("rumble") -> 2
+            value.contains("rumble") -> 1
+            value.contains("dailymotion") -> 2
             value.contains("anichin.stream") -> 3
             value.contains("anichin-player.web.id") -> 4
             value.contains("streamruby") || value.contains("ruby") -> 5
@@ -1606,8 +1719,11 @@ class AnichinProvider : MainAPI() {
         private const val PLAYER_REQUEST_TIMEOUT_MS = 10_000L
         private const val EXTRACTOR_TIMEOUT_MS = 12_000L
         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
-        private const val POSTER_TIMEOUT_MS = 15_000L
-        private const val POSTER_CONCURRENCY = 4
+        private const val POSTER_TIMEOUT_MS = 7_000L
+        private const val POSTER_BATCH_TIMEOUT_MS = 10_000L
+        private const val POSTER_CONCURRENCY = 8
+        private const val MIN_POSTER_WIDTH = 300
         private const val MAX_POSTER_BYTES = 4_000_000
+        private const val MIN_VIDEO_QUALITY = 720
     }
 }

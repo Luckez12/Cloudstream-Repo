@@ -7,8 +7,8 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
@@ -190,30 +190,24 @@ open class OkRuExtractor : ExtractorApi() {
         }
 
         /*
-         * Preferred path: OK.ru metadata often exposes an HLS master playlist.
-         * Emit that as ONE source. Cloudstream/ExoPlayer reads its variants and
-         * exposes 1080p/720p/480p/etc inside the player's video-track selector,
-         * the same way Rumble's HLS master behaves.
-         *
-         * If a page has no HLS master, keep the old per-quality MP4 fallback so
-         * no working OK.ru rendition is lost.
+         * Preferred path: expand OK.ru's HLS master into named quality links
+         * and keep the adaptive master as Auto. The provider filters anything
+         * below 720p. If no master exists, retain the MP4-quality fallback.
          */
         adaptiveHlsUrl?.let { hlsUrl ->
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = hlsUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = embedUrl
-                    this.headers = mapOf(
-                        "User-Agent" to USER_AGENT,
-                        "Referer" to embedUrl,
-                        "Origin" to "https://ok.ru"
-                    )
-                }
+            val streamHeaders = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Referer" to embedUrl,
+                "Origin" to "https://ok.ru"
             )
+
+            M3u8Helper.generateM3u8(
+                source = name,
+                streamUrl = hlsUrl,
+                referer = embedUrl,
+                headers = streamHeaders,
+                name = name
+            ).forEach(callback)
             return
         }
 

@@ -5,8 +5,7 @@ import com.lagradost.cloudstream3.USER_AGENT
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.M3u8Helper
 
 class Rumble : ExtractorApi() {
     override var name = "Rumble"
@@ -48,19 +47,21 @@ class Rumble : ExtractorApi() {
 
             if (!playlist.text.contains("#EXTM3U", ignoreCase = true)) continue
 
-            callback(
-                newExtractorLink(
-                    this@Rumble.name,
-                    "Rumble",
-                    hlsUrl,
-                    ExtractorLinkType.M3U8
-                ) {
-                    this.referer = url
-                    this.headers = mapOf("User-Agent" to USER_AGENT)
-                }
+            val streamHeaders = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Referer" to url
             )
 
-            // One verified HLS master/media playlist is enough for this Rumble page.
+            M3u8Helper.generateM3u8(
+                source = name,
+                streamUrl = hlsUrl,
+                referer = url,
+                headers = streamHeaders,
+                name = name
+            ).forEach(callback)
+
+            // One verified playlist is enough; generateM3u8 expands its
+            // 720p/1080p variants and also keeps the adaptive master.
             return
         }
     }
