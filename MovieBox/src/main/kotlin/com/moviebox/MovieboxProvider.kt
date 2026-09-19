@@ -1467,7 +1467,7 @@ class MovieboxProvider : MainAPI() {
             (explicitPlaybackQuality(it.stream.resolutions) ?: -1) >= 720
         }
 
-        fun emitLink(url: String, quality: Int, label: String) {
+        suspend fun emitLink(url: String, quality: Int, label: String) {
             if (url.isBlank() || !emittedUrls.add(url)) return
             if (quality >= 720) emittedQualities += quality
             callback.invoke(
