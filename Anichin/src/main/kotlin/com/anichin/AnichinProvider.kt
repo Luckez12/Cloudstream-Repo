@@ -5,9 +5,14 @@ import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -48,7 +53,12 @@ class AnichinProvider : MainAPI() {
     )
 
     private val posterCache = ConcurrentHashMap<String, String>()
+    private val posterInFlight: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
     private val posterSemaphore = Semaphore(POSTER_CONCURRENCY)
+    private val posterWarmupScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO
+    )
 
     private fun imageHeadersFor(imageUrl: String?): Map<String, String> {
         val headers = mutableMapOf(
@@ -149,24 +159,46 @@ class AnichinProvider : MainAPI() {
         val url: String
     )
 
-    private fun Element.getImageUrl(): String? {
-        fun srcset(value: String): String? = value
-            .split(',')
-            .map { it.trim().substringBefore(' ').trim() }
-            .filter { it.isNotBlank() && !it.startsWith("data:", true) }
-            .lastOrNull()
+    private fun Element.getImageUrl(preferThumbnail: Boolean = false): String? {
+        fun srcset(value: String): String? {
+            val candidates = value
+                .split(',')
+                .mapNotNull { entry ->
+                    val parts = entry.trim().split(Regex("""\s+"""))
+                    val url = parts.firstOrNull()
+                        ?.takeIf {
+                            it.isNotBlank() && !it.startsWith("data:", true)
+                        }
+                        ?: return@mapNotNull null
+                    val width = parts.getOrNull(1)
+                        ?.removeSuffix("w")
+                        ?.toIntOrNull()
+                    url to width
+                }
+
+            if (!preferThumbnail) return candidates.lastOrNull()?.first
+
+            return candidates
+                .filter { (_, width) -> width != null && width >= MIN_POSTER_WIDTH }
+                .minByOrNull { (_, width) -> width ?: Int.MAX_VALUE }
+                ?.first
+                ?: candidates.lastOrNull()?.first
+        }
+
+        val responsivePoster = srcset(attr("data-lazy-srcset"))
+            ?: srcset(attr("data-srcset"))
+            ?: srcset(attr("srcset"))
 
         return listOf(
+            responsivePoster.takeIf { preferThumbnail },
             attr("data-src"),
             attr("data-lazy-src"),
             attr("data-original"),
             attr("data-cfsrc"),
-            srcset(attr("data-lazy-srcset")).orEmpty(),
-            srcset(attr("data-srcset")).orEmpty(),
-            srcset(attr("srcset")).orEmpty(),
+            responsivePoster,
             attr("src")
         ).firstOrNull { imageUrl ->
-            imageUrl.isNotBlank() &&
+            !imageUrl.isNullOrBlank() &&
                 !imageUrl.startsWith("data:", ignoreCase = true)
         }
     }
@@ -250,9 +282,53 @@ class AnichinProvider : MainAPI() {
 
             if (dataUri != null) {
                 posterCache[fixed] = dataUri
+                trimPosterCache()
             }
 
             dataUri
+        }
+    }
+
+    private fun trimPosterCache() {
+        while (posterCache.size > MAX_POSTER_CACHE_ENTRIES) {
+            val oldestAvailableKey = posterCache.keys.firstOrNull() ?: return
+            posterCache.remove(oldestAvailableKey)
+        }
+    }
+
+    /**
+     * Warm protected poster data without delaying home/search responses.
+     * Cloudstream does not expose a provider-side UI refresh callback, so a
+     * newly cached poster appears when the card is rebound (scroll/tab/refresh)
+     * and is immediately available on the next visit during this app session.
+     */
+    private fun warmPosterCache(
+        cards: List<CardData>,
+        pageReferer: String
+    ) {
+        cards.forEach { card ->
+            val fixed = card.poster
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { fixUrlNull(it) }
+                ?: return@forEach
+
+            if (
+                fixed.startsWith("data:", true) ||
+                posterCache.containsKey(fixed) ||
+                !posterInFlight.add(fixed)
+            ) {
+                return@forEach
+            }
+
+            posterWarmupScope.launch {
+                try {
+                    delay(POSTER_WARMUP_DELAY_MS)
+                    inlinePoster(fixed, pageReferer)
+                } finally {
+                    posterInFlight.remove(fixed)
+                }
+            }
         }
     }
 
@@ -321,7 +397,8 @@ class AnichinProvider : MainAPI() {
 
         val href = fixUrl(anchor.attr("href"))
 
-        val posterUrl = selectFirst("div.bsx > a img, img")?.getImageUrl()
+        val posterUrl = selectFirst("div.bsx > a img, img")
+            ?.getImageUrl(preferThumbnail = true)
 
         val badge = selectFirst(".typez, .type, .status")
             ?.text()
@@ -337,25 +414,26 @@ class AnichinProvider : MainAPI() {
         return CardData(title, href, posterUrl, tvType)
     }
 
-    private suspend fun buildSearchResponses(
+    private fun buildSearchResponses(
         cards: List<CardData>,
         pageReferer: String
-    ): List<SearchResponse> = coroutineScope {
-        cards.map { card ->
-            async {
-                val poster = inlinePoster(card.poster, pageReferer)
-                    ?: card.poster?.let { fixUrlNull(it) }
+    ): List<SearchResponse> {
+        val responses = cards.map { card ->
+            val fixedPoster = card.poster?.let { fixUrlNull(it) }
+            val poster = fixedPoster?.let { posterCache[it] ?: it }
 
-                newAnimeSearchResponse(
-                    card.title,
-                    card.href,
-                    card.type
-                ) {
-                    this.posterUrl = poster
-                    this.posterHeaders = imageHeadersFor(poster)
-                }
+            newAnimeSearchResponse(
+                card.title,
+                card.href,
+                card.type
+            ) {
+                this.posterUrl = poster
+                this.posterHeaders = imageHeadersFor(poster)
             }
-        }.awaitAll()
+        }
+
+        warmPosterCache(cards, pageReferer)
+        return responses
     }
 
     override suspend fun search(
@@ -1485,8 +1563,11 @@ class AnichinProvider : MainAPI() {
         private const val PLAYER_REQUEST_TIMEOUT_MS = 10_000L
         private const val EXTRACTOR_TIMEOUT_MS = 12_000L
         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
-        private const val POSTER_TIMEOUT_MS = 15_000L
-        private const val POSTER_CONCURRENCY = 4
+        private const val POSTER_TIMEOUT_MS = 10_000L
+        private const val POSTER_WARMUP_DELAY_MS = 500L
+        private const val POSTER_CONCURRENCY = 2
+        private const val MIN_POSTER_WIDTH = 300
+        private const val MAX_POSTER_CACHE_ENTRIES = 48
         private const val MAX_POSTER_BYTES = 4_000_000
     }
 }
