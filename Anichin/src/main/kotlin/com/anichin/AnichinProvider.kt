@@ -857,6 +857,64 @@ class AnichinProvider : MainAPI() {
         return PLAYER_HOST_HINTS.any { value.contains(it) }
     }
 
+    private fun playerLabelScore(label: String): Int {
+        val value = label.trim().lowercase()
+        return when {
+            value.isBlank() || value == "server" -> 0
+            value.startsWith("direct ") ||
+                value.startsWith("embedded ") ||
+                value.startsWith("fallback ") -> 1
+            else -> 10
+        }
+    }
+
+    private fun dedupePlayers(players: List<PlayerOption>): List<PlayerOption> {
+        return players
+            .filter { it.url.startsWith("http") }
+            .groupBy { it.url }
+            .values
+            .mapNotNull { matches ->
+                matches.maxByOrNull { playerLabelScore(it.label) }
+            }
+            .sortedBy { it.priority() }
+    }
+
+    private fun serverDisplayName(label: String, url: String): String {
+        val cleanLabel = label
+            .replace(
+                Regex("""\s*\[(?:ads?|setting\s+dns)\]\s*""", RegexOption.IGNORE_CASE),
+                " "
+            )
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+
+        if (playerLabelScore(cleanLabel) >= 10) {
+            return cleanLabel
+        }
+
+        val host = runCatching { URI(url).host.orEmpty().lowercase() }
+            .getOrDefault("")
+
+        return when {
+            host.contains("dailymotion") || host.contains("dmcdn") -> "Dailymotion"
+            host == "ok.ru" || host.endsWith(".ok.ru") ||
+                host.contains("odnoklassniki") || host.contains("mycdn") -> "OK.ru"
+            host.contains("rumble") -> "Rumble"
+            host.contains("morencius") || host.contains("vidhide") -> "Vidhide"
+            host.contains("anichin-player") -> "New Player"
+            host.contains("anichin.stream") -> "Anichin Stream"
+            host.contains("drive.google") || host.contains("googleusercontent") -> "Google Drive"
+            host.contains("streamruby") || host.contains("rubyvid") -> "StreamRuby"
+            host.contains("streamwish") || host.contains("wish") -> "StreamWish"
+            host.contains("emturbovid") || host.contains("turboviplay") -> "Emturbovid"
+            host.contains("filemoon") -> "Filemoon"
+            host.contains("streamtape") -> "Streamtape"
+            host.contains("mixdrop") -> "Mixdrop"
+            host.isNotBlank() -> host.removePrefix("www.")
+            else -> "Anichin"
+        }
+    }
+
     private fun playerRequestHeaders(): Map<String, String> = mapOf(
         "User-Agent" to USER_AGENT,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1060,10 +1118,7 @@ class AnichinProvider : MainAPI() {
             )
         }
 
-        return players
-            .filter { it.url.startsWith("http") }
-            .distinctBy { it.url }
-            .sortedBy { it.priority() }
+        return dedupePlayers(players)
     }
 
     private fun Document.collectNestedPlayerUrls(
@@ -1158,6 +1213,7 @@ class AnichinProvider : MainAPI() {
     private suspend fun tryLoadExtractor(
         url: String,
         referer: String,
+        serverLabel: String,
         attemptedUrls: MutableSet<String>,
         emittedUrls: MutableSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -1172,6 +1228,8 @@ class AnichinProvider : MainAPI() {
         if (isDirectMediaUrl(url)) {
             if (!emittedUrls.add(url)) return false
 
+            val displayName = serverDisplayName(serverLabel, url)
+
             val type = when {
                 url.contains(".m3u8", true) -> ExtractorLinkType.M3U8
                 url.contains(".mpd", true) -> ExtractorLinkType.DASH
@@ -1180,8 +1238,8 @@ class AnichinProvider : MainAPI() {
 
             callback(
                 newExtractorLink(
-                    source = "Anichin Direct",
-                    name = "Anichin Direct",
+                    source = displayName,
+                    name = displayName,
                     url = url,
                     type = type
                 ) {
@@ -1282,6 +1340,7 @@ class AnichinProvider : MainAPI() {
     private suspend fun resolvePlayerPipeline(
         wrapperUrl: String,
         episodeUrl: String,
+        serverLabel: String,
         attemptedUrls: MutableSet<String>,
         emittedUrls: MutableSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -1290,6 +1349,7 @@ class AnichinProvider : MainAPI() {
         val directSuccess = tryLoadExtractor(
             wrapperUrl,
             episodeUrl,
+            serverLabel,
             attemptedUrls,
             emittedUrls,
             subtitleCallback,
@@ -1312,6 +1372,7 @@ class AnichinProvider : MainAPI() {
             val playerSuccess = tryLoadExtractor(
                 playerUrl,
                 wrapperUrl,
+                serverLabel,
                 attemptedUrls,
                 emittedUrls,
                 subtitleCallback,
@@ -1338,6 +1399,7 @@ class AnichinProvider : MainAPI() {
                         tryLoadExtractor(
                             nestedUrl,
                             playerUrl,
+                            serverLabel,
                             attemptedUrls,
                             emittedUrls,
                             subtitleCallback,
@@ -1396,18 +1458,17 @@ class AnichinProvider : MainAPI() {
                 )
             }
         }
-            .distinctBy { it.url }
-            .sortedBy { it.priority() }
+            .let(::dedupePlayers)
 
         Log.w(
             "Anichin",
-            "ANICHIN_V31_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V34_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V31_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V34_DONE candidates=0 success=false")
             return false
         }
 
@@ -1415,6 +1476,7 @@ class AnichinProvider : MainAPI() {
             resolvePlayerPipeline(
                 player.url,
                 data,
+                player.label,
                 attemptedUrls,
                 emittedUrls,
                 effectiveSubtitleCallback,
@@ -1424,7 +1486,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V31_DONE candidates=${players.size} emitted=${emittedUrls.size} success=$success"
+            "ANICHIN_V34_DONE candidates=${players.size} emitted=${emittedUrls.size} success=$success"
         )
 
         return success
