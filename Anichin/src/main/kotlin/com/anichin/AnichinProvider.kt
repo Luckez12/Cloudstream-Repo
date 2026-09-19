@@ -17,6 +17,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -914,6 +915,47 @@ class AnichinProvider : MainAPI() {
         }
     }
 
+    private fun extractorLinkScore(link: ExtractorLink): Int {
+        val url = link.url.lowercase()
+        val quality = link.quality.coerceAtLeast(0)
+
+        return when {
+            url.contains("master.m3u8") || url.contains("master_") -> 1_000_000 + quality
+            link.type == ExtractorLinkType.M3U8 &&
+                link.quality == Qualities.Unknown.value -> 900_000
+            link.type == ExtractorLinkType.M3U8 -> 800_000 + quality
+            link.type == ExtractorLinkType.DASH -> 700_000 + quality
+            else -> 100_000 + quality
+        }
+    }
+
+    private fun selectBestServerLink(links: List<ExtractorLink>): ExtractorLink? {
+        return links
+            .filter { it.url.isNotBlank() }
+            .distinctBy { it.url }
+            .maxByOrNull(::extractorLinkScore)
+    }
+
+    private suspend fun withWebsiteServerName(
+        link: ExtractorLink,
+        serverLabel: String
+    ): ExtractorLink {
+        val displayName = serverDisplayName(serverLabel, link.url)
+
+        return newExtractorLink(
+            source = displayName,
+            name = displayName,
+            url = link.url,
+            type = link.type
+        ) {
+            this.referer = link.referer
+            this.headers = link.headers
+            this.quality = link.quality
+            this.extractorData = link.extractorData
+            this.audioTracks = link.audioTracks
+        }
+    }
+
     private fun playerRequestHeaders(): Map<String, String> = mapOf(
         "User-Agent" to USER_AGENT,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1214,7 +1256,6 @@ class AnichinProvider : MainAPI() {
         referer: String,
         serverLabel: String,
         attemptedUrls: MutableSet<String>,
-        emittedUrls: MutableSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
@@ -1225,8 +1266,6 @@ class AnichinProvider : MainAPI() {
         }
 
         if (isDirectMediaUrl(url)) {
-            if (!emittedUrls.add(url)) return false
-
             val displayName = serverDisplayName(serverLabel, url)
 
             val type = when {
@@ -1251,9 +1290,11 @@ class AnichinProvider : MainAPI() {
         }
 
         val emitted = AtomicBoolean(false)
+        val discoveredUrls: MutableSet<String> =
+            ConcurrentHashMap.newKeySet()
 
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
-            if (emittedUrls.add(link.url)) {
+            if (discoveredUrls.add(link.url)) {
                 emitted.set(true)
                 callback(link)
             }
@@ -1341,7 +1382,6 @@ class AnichinProvider : MainAPI() {
         episodeUrl: String,
         serverLabel: String,
         attemptedUrls: MutableSet<String>,
-        emittedUrls: MutableSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
@@ -1350,7 +1390,6 @@ class AnichinProvider : MainAPI() {
             episodeUrl,
             serverLabel,
             attemptedUrls,
-            emittedUrls,
             subtitleCallback,
             callback
         )
@@ -1373,7 +1412,6 @@ class AnichinProvider : MainAPI() {
                 wrapperUrl,
                 serverLabel,
                 attemptedUrls,
-                emittedUrls,
                 subtitleCallback,
                 callback
             )
@@ -1400,7 +1438,6 @@ class AnichinProvider : MainAPI() {
                             playerUrl,
                             serverLabel,
                             attemptedUrls,
-                            emittedUrls,
                             subtitleCallback,
                             callback
                         )
@@ -1443,6 +1480,9 @@ class AnichinProvider : MainAPI() {
         val emittedUrls: MutableSet<String> =
             ConcurrentHashMap.newKeySet()
 
+        val emittedServerNames: MutableSet<String> =
+            ConcurrentHashMap.newKeySet()
+
         val topLevelPlayers = document.collectTopLevelPlayers(data)
         val nestedPlayers = document.collectNestedPlayerUrls(data)
 
@@ -1461,31 +1501,51 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V35_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V36_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V35_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V36_DONE candidates=0 success=false")
             return false
         }
 
         val success = collectTwoLane(players) { player ->
+            val serverLinks: MutableList<ExtractorLink> =
+                Collections.synchronizedList(mutableListOf())
+
             resolvePlayerPipeline(
                 player.url,
                 data,
                 player.label,
                 attemptedUrls,
-                emittedUrls,
                 effectiveSubtitleCallback,
-                callback
+                { link -> serverLinks.add(link) }
             )
+
+            val selected = selectBestServerLink(serverLinks)
+
+            val displayKey = selected
+                ?.let { serverDisplayName(player.label, it.url) }
+                ?.lowercase()
+
+            if (
+                selected == null ||
+                displayKey == null ||
+                !emittedServerNames.add(displayKey)
+            ) {
+                false
+            } else {
+                emittedUrls.add(selected.url)
+                callback(withWebsiteServerName(selected, player.label))
+                true
+            }
         }
 
         Log.w(
             "Anichin",
-            "ANICHIN_V35_DONE candidates=${players.size} emitted=${emittedUrls.size} success=$success"
+            "ANICHIN_V36_DONE candidates=${players.size} emitted=${emittedUrls.size} success=$success"
         )
 
         return success
