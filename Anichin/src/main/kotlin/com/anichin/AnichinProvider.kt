@@ -283,7 +283,7 @@ class AnichinProvider : MainAPI() {
             .select("div.listupd > article")
             .mapNotNull { it.toCardData(typeHint) }
 
-        val home = buildSearchResponses(cards, pageUrl)
+        val home = buildSearchResponses(cards)
 
         val hasNext = document.selectFirst(
             "a.next.page-numbers, .pagination .next a, .hpage a.r, a[rel=next]"
@@ -337,25 +337,24 @@ class AnichinProvider : MainAPI() {
         return CardData(title, href, posterUrl, tvType)
     }
 
-    private suspend fun buildSearchResponses(
-        cards: List<CardData>,
-        pageReferer: String
-    ): List<SearchResponse> = coroutineScope {
-        cards.map { card ->
-            async {
-                val poster = inlinePoster(card.poster, pageReferer)
-                    ?: card.poster?.let { fixUrlNull(it) }
+    /**
+     * Keep home/search fast: return poster URLs immediately and let
+     * Cloudstream's image loader fetch them with the saved clearance headers.
+     * Inline Base64 fetching is reserved for the detail page only.
+     */
+    private fun buildSearchResponses(
+        cards: List<CardData>
+    ): List<SearchResponse> = cards.map { card ->
+        val poster = card.poster?.let { fixUrlNull(it) }
 
-                newAnimeSearchResponse(
-                    card.title,
-                    card.href,
-                    card.type
-                ) {
-                    this.posterUrl = poster
-                    this.posterHeaders = imageHeadersFor(poster)
-                }
-            }
-        }.awaitAll()
+        newAnimeSearchResponse(
+            card.title,
+            card.href,
+            card.type
+        ) {
+            this.posterUrl = poster
+            this.posterHeaders = imageHeadersFor(poster)
+        }
     }
 
     override suspend fun search(
@@ -382,7 +381,7 @@ class AnichinProvider : MainAPI() {
                 .select("div.listupd > article")
                 .mapNotNull { it.toCardData() }
 
-            val results = buildSearchResponses(cards, pageUrl)
+            val results = buildSearchResponses(cards)
 
             if (results.isEmpty()) break
 
@@ -1462,13 +1461,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V34_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V35_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V34_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V35_DONE candidates=0 success=false")
             return false
         }
 
@@ -1486,7 +1485,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V34_DONE candidates=${players.size} emitted=${emittedUrls.size} success=$success"
+            "ANICHIN_V35_DONE candidates=${players.size} emitted=${emittedUrls.size} success=$success"
         )
 
         return success
