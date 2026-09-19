@@ -14,7 +14,7 @@ on:
   # workflow, so the build must explicitly listen for repository_dispatch.
   repository_dispatch:
     types:
-      - vueo_build
+      - cloudstream_build
 
   push:
     branches:
@@ -23,7 +23,7 @@ on:
       - "**/*.md"
       # Uploading a ZIP should run Apply ZIP Patch first, not build the repo
       # before the ZIP has been extracted. The patched commit is built through
-      # the vueo_build repository_dispatch above.
+      # the cloudstream_build repository_dispatch above.
       - "**/*.zip"
 
 permissions:
