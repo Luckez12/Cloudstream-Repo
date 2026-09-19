@@ -9,6 +9,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Document
@@ -38,6 +40,82 @@ class AnichinProvider : MainAPI() {
         "anime/?status=completed&order=update" to "Completed"
     )
 
+    private val siteHeaders = mapOf(
+        "User-Agent" to USER_AGENT,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control" to "no-cache"
+    )
+
+    private fun hostOf(url: String): String = runCatching {
+        URI(url).host.orEmpty()
+    }.getOrDefault("")
+
+    /**
+     * Fetch an Anichin page and invoke Cloudstream's WebView challenge solver
+     * only when the site answers with an anti-bot status. Clearance cookies are
+     * cached and shared for later home, search, detail and episode requests.
+     */
+    private suspend fun fetchSiteDocument(
+        url: String,
+        referer: String = "$mainUrl/"
+    ): Document {
+        val host = hostOf(url)
+
+        suspend fun requestWithCloudflare(): Document {
+            val response = app.get(
+                url,
+                headers = siteHeaders,
+                referer = referer,
+                timeout = SITE_REQUEST_TIMEOUT_SECONDS,
+                interceptor = sharedCloudflareKiller
+            )
+
+            if (!response.isSuccessful) {
+                val status = response.code
+                response.okhttpResponse.close()
+                throw IllegalStateException("HTTP $status from $host")
+            }
+
+            return response.document
+        }
+
+        if (sharedCloudflareKiller.savedCookies.containsKey(host)) {
+            try {
+                return requestWithCloudflare()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                sharedCloudflareKiller.savedCookies.remove(host)
+            }
+        }
+
+        val first = app.get(
+            url,
+            headers = siteHeaders,
+            referer = referer,
+            timeout = SITE_REQUEST_TIMEOUT_SECONDS
+        )
+
+        if (first.code !in CLOUDFLARE_STATUS_CODES) {
+            if (!first.isSuccessful) {
+                val status = first.code
+                first.okhttpResponse.close()
+                throw IllegalStateException("HTTP $status from $host")
+            }
+            return first.document
+        }
+
+        first.okhttpResponse.close()
+
+        return sharedCloudflareMutex.withLock {
+            if (sharedCloudflareKiller.savedCookies.containsKey(host)) {
+                return@withLock requestWithCloudflare()
+            }
+            requestWithCloudflare()
+        }
+    }
+
     private data class PlayerOption(
         val label: String,
         val url: String
@@ -60,9 +138,9 @@ class AnichinProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
 
-        val document = app.get(
+        val document = fetchSiteDocument(
             "${mainUrl}/${request.data}&page=$page"
-        ).document
+        )
 
         val typeHint = if (
             request.data.contains("type=movie", ignoreCase = true)
@@ -153,9 +231,9 @@ class AnichinProvider : MainAPI() {
 
         for (page in 1..3) {
 
-            val document = app.get(
+            val document = fetchSiteDocument(
                 "${mainUrl}/page/$page/?s=$encodedQuery"
-            ).document
+            )
 
             val results = document
                 .select("div.listupd > article")
@@ -392,9 +470,8 @@ class AnichinProvider : MainAPI() {
         url: String
     ): LoadResponse {
 
-        val document = app.get(
-            fixUrl(url)
-        ).document
+        val detailUrl = fixUrl(url)
+        val document = fetchSiteDocument(detailUrl)
 
         val title = document
             .selectFirst("h1.entry-title")
@@ -1126,7 +1203,7 @@ class AnichinProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val document = withTimeoutOrNull(EPISODE_REQUEST_TIMEOUT_MS) {
-            app.get(data).document
+            fetchSiteDocument(data)
         } ?: return false
 
         val needsClosedCaptions = document.text().contains(
@@ -1217,6 +1294,10 @@ class AnichinProvider : MainAPI() {
     }
 
     companion object {
+        private val sharedCloudflareKiller by lazy { CloudflareCompat() }
+        private val sharedCloudflareMutex = Mutex()
+        private val CLOUDFLARE_STATUS_CODES = setOf(403, 429, 503)
+
         private val PLAYER_HOST_HINTS = listOf(
             "ok.ru",
             "odnoklassniki",
@@ -1250,5 +1331,6 @@ class AnichinProvider : MainAPI() {
         private const val EPISODE_REQUEST_TIMEOUT_MS = 10_000L
         private const val PLAYER_REQUEST_TIMEOUT_MS = 10_000L
         private const val EXTRACTOR_TIMEOUT_MS = 12_000L
+        private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
     }
 }
