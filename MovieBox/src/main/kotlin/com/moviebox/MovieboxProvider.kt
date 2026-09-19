@@ -1011,8 +1011,8 @@ class MovieboxProvider : MainAPI() {
         return emptyList()
     }
 
-    private fun allowedSubtitleLanguage(caption: Media.Data.Captions): String? {
-        val values = listOfNotNull(caption.lan, caption.lanName)
+    private fun allowedSubtitleLanguage(vararg rawValues: String?): String? {
+        val values = rawValues.filterNotNull()
             .map { value ->
                 value.trim()
                     .lowercase()
@@ -1093,8 +1093,7 @@ class MovieboxProvider : MainAPI() {
                         .orEmpty()
                         .filter { caption ->
                             !caption.url.isNullOrBlank() &&
-                                (allowedSubtitleLanguage(caption) != null ||
-                                    !caption.lanName.isNullOrBlank() || !caption.lan.isNullOrBlank())
+                                allowedSubtitleLanguage(caption.lan, caption.lanName) != null
                         }
 
                     if (hostCaptions.isNotEmpty()) {
@@ -1417,22 +1416,9 @@ class MovieboxProvider : MainAPI() {
     private data class DirectCaption(val language: String, val url: String)
 
     private fun directCaptionLanguage(node: JsonNode): String? {
-        val raw = listOf("lanName", "languageName", "language", "lan", "lang", "langCode", "name")
-            .firstNotNullOfOrNull { playbackNodeText(node, it) }
-            ?: return null
-        val clean = raw.trim()
-        if (clean.isBlank()) return null
-        val normalized = clean.lowercase().replace('_', '-')
-        return when {
-            normalized == "ms" || normalized == "msa" || normalized == "may" ||
-                normalized.startsWith("ms-") || normalized.contains("malay") ||
-                normalized.contains("melayu") -> "Malay"
-            normalized == "en" || normalized == "eng" || normalized.startsWith("en-") ||
-                normalized.contains("english") -> "English"
-            normalized == "id" || normalized == "ind" || normalized == "in" ||
-                normalized.startsWith("id-") || normalized.contains("indones") -> "Indonesian"
-            else -> clean.take(45)
-        }
+        val rawValues = listOf("lanName", "languageName", "language", "lan", "lang", "langCode", "name")
+            .mapNotNull { playbackNodeText(node, it) }
+        return allowedSubtitleLanguage(*rawValues.toTypedArray())
     }
 
     private fun parseDirectCaptions(raw: String): List<DirectCaption> {
@@ -1461,8 +1447,8 @@ class MovieboxProvider : MainAPI() {
                     lower.endsWith(".ass") || lower.endsWith(".ssa") ||
                     lower.contains("/subtitle") || lower.contains("/caption") ||
                     lower.contains("cacdn.")
-                if (!isVideo && (isCaption || (subtitleCollection && language != null))) {
-                    result[url] = DirectCaption(language ?: "Unknown", url)
+                if (language != null && !isVideo && (isCaption || subtitleCollection)) {
+                    result[url] = DirectCaption(language, url)
                 }
             }
             val fields = node.fields()
@@ -1514,13 +1500,13 @@ class MovieboxProvider : MainAPI() {
                         tokenFromXUser(response.headers["x-user"])?.let { playbackAuthToken = it }
                         val captions = if (response.code in 200..299)
                             parseDirectCaptions(response.text) else emptyList()
-                        Log.i("MovieBox", "MOVIEBOX_V22_SUB_DIRECT endpoint=${path.substringAfterLast('/')} http=${response.code} count=${captions.size}")
+                        Log.i("MovieBox", "MOVIEBOX_V23_SUB_DIRECT endpoint=${path.substringAfterLast('/')} http=${response.code} count=${captions.size}")
                         if (captions.isNotEmpty()) return captions
                         if (response.code == 401 || response.code == 403) break
                     } catch (error: CancellationException) {
                         throw error
                     } catch (error: Throwable) {
-                        Log.w("MovieBox", "MOVIEBOX_V22_SUB_DIRECT_FAIL endpoint=${path.substringAfterLast('/')} type=${error::class.simpleName}")
+                        Log.w("MovieBox", "MOVIEBOX_V23_SUB_DIRECT_FAIL endpoint=${path.substringAfterLast('/')} type=${error::class.simpleName}")
                     }
                 }
             }
@@ -1704,23 +1690,22 @@ class MovieboxProvider : MainAPI() {
             subjectId, season, episode, selectedDirectResources
         )
         directCaptions.forEach { subtitle ->
+            val language = allowedSubtitleLanguage(subtitle.language) ?: return@forEach
             if (emittedSubtitleUrls.add(subtitle.url)) {
-                subtitleCallback.invoke(newSubtitleFile(subtitle.language, subtitle.url))
+                subtitleCallback.invoke(newSubtitleFile(language, subtitle.url))
             }
         }
         if (emittedSubtitleUrls.isEmpty()) {
             loadCaptionsAcrossHosts(subjectId, resolvedStreams).forEach { subtitle ->
                 val subtitleUrl = subtitle.url ?: return@forEach
-                val language = allowedSubtitleLanguage(subtitle)
-                    ?: subtitle.lanName?.takeIf { it.isNotBlank() }
-                    ?: subtitle.lan?.takeIf { it.isNotBlank() }
+                val language = allowedSubtitleLanguage(subtitle.lan, subtitle.lanName)
                     ?: return@forEach
                 if (emittedSubtitleUrls.add(subtitleUrl)) {
                     subtitleCallback.invoke(newSubtitleFile(language, subtitleUrl))
                 }
             }
         }
-        Log.i("MovieBox", "MOVIEBOX_V22_SUB_DONE direct=${directCaptions.size} emitted=${emittedSubtitleUrls.size} h5Seeds=${resolvedStreams.size}")
+        Log.i("MovieBox", "MOVIEBOX_V23_SUB_DONE direct=${directCaptions.size} emitted=${emittedSubtitleUrls.size} h5Seeds=${resolvedStreams.size}")
 
         Log.i(
             "MovieBox",
