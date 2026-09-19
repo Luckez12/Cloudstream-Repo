@@ -47,6 +47,34 @@ class AnichinProvider : MainAPI() {
         "Cache-Control" to "no-cache"
     )
 
+    private val posterCache = ConcurrentHashMap<String, String>()
+    private val posterSemaphore = Semaphore(POSTER_CONCURRENCY)
+
+    private fun imageHeadersFor(imageUrl: String?): Map<String, String> {
+        val headers = mutableMapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer" to "$mainUrl/"
+        )
+
+        val imageHost = imageUrl
+            ?.takeUnless { it.startsWith("data:", true) }
+            ?.let(::hostOf)
+            .orEmpty()
+
+        val cookies = sharedCloudflareKiller.savedCookies[imageHost]
+            ?: sharedCloudflareKiller.savedCookies[hostOf(mainUrl)]
+
+        if (!cookies.isNullOrEmpty()) {
+            headers["Cookie"] = cookies.entries.joinToString("; ") {
+                "${it.key}=${it.value}"
+            }
+        }
+
+        return headers
+    }
+
     private fun hostOf(url: String): String = runCatching {
         URI(url).host.orEmpty()
     }.getOrDefault("")
@@ -122,10 +150,20 @@ class AnichinProvider : MainAPI() {
     )
 
     private fun Element.getImageUrl(): String? {
+        fun srcset(value: String): String? = value
+            .split(',')
+            .map { it.trim().substringBefore(' ').trim() }
+            .filter { it.isNotBlank() && !it.startsWith("data:", true) }
+            .lastOrNull()
+
         return listOf(
             attr("data-src"),
             attr("data-lazy-src"),
             attr("data-original"),
+            attr("data-cfsrc"),
+            srcset(attr("data-lazy-srcset")).orEmpty(),
+            srcset(attr("data-srcset")).orEmpty(),
+            srcset(attr("srcset")).orEmpty(),
             attr("src")
         ).firstOrNull { imageUrl ->
             imageUrl.isNotBlank() &&
@@ -133,14 +171,105 @@ class AnichinProvider : MainAPI() {
         }
     }
 
+    private fun guessImageMime(bytes: ByteArray, contentType: String?): String {
+        val declared = contentType
+            ?.substringBefore(';')
+            ?.trim()
+            ?.lowercase()
+
+        if (declared?.startsWith("image/") == true) return declared
+
+        return when {
+            bytes.size >= 3 &&
+                bytes[0] == 0xFF.toByte() &&
+                bytes[1] == 0xD8.toByte() -> "image/jpeg"
+            bytes.size >= 8 &&
+                bytes[0] == 0x89.toByte() &&
+                bytes[1] == 0x50.toByte() -> "image/png"
+            bytes.size >= 12 &&
+                bytes.copyOfRange(0, 4).decodeToString() == "RIFF" -> "image/webp"
+            else -> "image/jpeg"
+        }
+    }
+
+    /**
+     * Cloudstream's image loader does not use the provider's Cloudflare
+     * interceptor. Fetch protected posters here and return a data URI so the
+     * UI can render them without making a second unauthenticated request.
+     */
+    private suspend fun inlinePoster(rawUrl: String?, referer: String): String? {
+        val fixed = rawUrl
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { fixUrlNull(it) }
+            ?: return null
+
+        if (fixed.startsWith("data:", true)) return fixed
+
+        posterCache[fixed]?.let { return it }
+
+        return posterSemaphore.withPermit {
+            posterCache[fixed]?.let { return@withPermit it }
+
+            val dataUri = try {
+                withTimeoutOrNull(POSTER_TIMEOUT_MS) {
+                    val response = app.get(
+                        fixed,
+                        referer = referer.ifBlank { "$mainUrl/" },
+                        headers = imageHeadersFor(fixed),
+                        timeout = SITE_REQUEST_TIMEOUT_SECONDS,
+                        interceptor = sharedCloudflareKiller
+                    )
+
+                    if (!response.isSuccessful) {
+                        response.okhttpResponse.close()
+                        return@withTimeoutOrNull null
+                    }
+
+                    val body = response.body
+                    val bytes = body.bytes()
+                    body.close()
+
+                    if (bytes.isEmpty() || bytes.size > MAX_POSTER_BYTES) {
+                        return@withTimeoutOrNull null
+                    }
+
+                    val mime = guessImageMime(
+                        bytes,
+                        response.headers["Content-Type"]
+                    )
+
+                    "data:$mime;base64," +
+                        Base64.encodeToString(bytes, Base64.NO_WRAP)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+
+            if (dataUri != null) {
+                posterCache[fixed] = dataUri
+            }
+
+            dataUri
+        }
+    }
+
+    private data class CardData(
+        val title: String,
+        val href: String,
+        val poster: String?,
+        val type: TvType
+    )
+
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
 
-        val document = fetchSiteDocument(
-            "${mainUrl}/${request.data}&page=$page"
-        )
+        val pageUrl = "${mainUrl}/${request.data}&page=$page"
+        val document = fetchSiteDocument(pageUrl)
 
         val typeHint = if (
             request.data.contains("type=movie", ignoreCase = true)
@@ -150,9 +279,11 @@ class AnichinProvider : MainAPI() {
             null
         }
 
-        val home = document
+        val cards = document
             .select("div.listupd > article")
-            .mapNotNull { it.toSearchResult(typeHint) }
+            .mapNotNull { it.toCardData(typeHint) }
+
+        val home = buildSearchResponses(cards, pageUrl)
 
         val hasNext = document.selectFirst(
             "a.next.page-numbers, .pagination .next a, .hpage a.r, a[rel=next]"
@@ -168,9 +299,9 @@ class AnichinProvider : MainAPI() {
         )
     }
 
-    private fun Element.toSearchResult(
+    private fun Element.toCardData(
         typeHint: TvType? = null
-    ): SearchResponse? {
+    ): CardData? {
 
         val anchor = selectFirst("div.bsx > a[href]")
             ?: selectFirst("a[href]")
@@ -190,9 +321,7 @@ class AnichinProvider : MainAPI() {
 
         val href = fixUrl(anchor.attr("href"))
 
-        val posterUrl = selectFirst("div.bsx > a img, img")
-            ?.getImageUrl()
-            ?.let { fixUrlNull(it) }
+        val posterUrl = selectFirst("div.bsx > a img, img")?.getImageUrl()
 
         val badge = selectFirst(".typez, .type, .status")
             ?.text()
@@ -205,13 +334,28 @@ class AnichinProvider : MainAPI() {
             else -> TvType.Anime
         }
 
-        return newAnimeSearchResponse(
-            title,
-            href,
-            tvType
-        ) {
-            this.posterUrl = posterUrl
-        }
+        return CardData(title, href, posterUrl, tvType)
+    }
+
+    private suspend fun buildSearchResponses(
+        cards: List<CardData>,
+        pageReferer: String
+    ): List<SearchResponse> = coroutineScope {
+        cards.map { card ->
+            async {
+                val poster = inlinePoster(card.poster, pageReferer)
+                    ?: card.poster?.let { fixUrlNull(it) }
+
+                newAnimeSearchResponse(
+                    card.title,
+                    card.href,
+                    card.type
+                ) {
+                    this.posterUrl = poster
+                    this.posterHeaders = imageHeadersFor(poster)
+                }
+            }
+        }.awaitAll()
     }
 
     override suspend fun search(
@@ -231,13 +375,14 @@ class AnichinProvider : MainAPI() {
 
         for (page in 1..3) {
 
-            val document = fetchSiteDocument(
-                "${mainUrl}/page/$page/?s=$encodedQuery"
-            )
+            val pageUrl = "${mainUrl}/page/$page/?s=$encodedQuery"
+            val document = fetchSiteDocument(pageUrl)
 
-            val results = document
+            val cards = document
                 .select("div.listupd > article")
-                .mapNotNull { it.toSearchResult() }
+                .mapNotNull { it.toCardData() }
+
+            val results = buildSearchResponses(cards, pageUrl)
 
             if (results.isEmpty()) break
 
@@ -479,7 +624,7 @@ class AnichinProvider : MainAPI() {
             ?.trim()
             .orEmpty()
 
-        val poster = (
+        val rawPoster = (
             document
                 .selectFirst("div.thumb img, div.ime img, img.wp-post-image")
                 ?.getImageUrl()
@@ -487,6 +632,11 @@ class AnichinProvider : MainAPI() {
                     .selectFirst("meta[property=og:image]")
                     ?.attr("content")
                     ?.trim()
+        )
+
+        val poster = (
+            inlinePoster(rawPoster, detailUrl)
+                ?: rawPoster?.let { fixUrlNull(it) }
         ).orEmpty()
 
         val description = extractSynopsis(document)
@@ -538,11 +688,12 @@ class AnichinProvider : MainAPI() {
                         ?.trim()
                         .orEmpty()
 
-                    val episodePoster = episodeElement
-                        .selectFirst("a img")
-                        ?.getImageUrl()
-                        ?.let { fixUrlNull(it) }
-                        ?: fixUrlNull(poster)
+                    val episodePoster = poster
+                        .takeIf { it.isNotBlank() }
+                        ?: episodeElement
+                            .selectFirst("a img")
+                            ?.getImageUrl()
+                            ?.let { fixUrlNull(it) }
 
                     val episodeNumber = episodeNumberFrom(
                         episodeElement,
@@ -593,7 +744,8 @@ class AnichinProvider : MainAPI() {
                 TvType.Anime,
                 episodes
             ) {
-                this.posterUrl = fixUrlNull(poster)
+                this.posterUrl = poster.takeIf { it.isNotBlank() }
+                this.posterHeaders = imageHeadersFor(poster)
                 this.plot = description
             }
 
@@ -611,7 +763,8 @@ class AnichinProvider : MainAPI() {
                 TvType.Movie,
                 movieHref
             ) {
-                this.posterUrl = fixUrlNull(poster)
+                this.posterUrl = poster.takeIf { it.isNotBlank() }
+                this.posterHeaders = imageHeadersFor(poster)
                 this.plot = description
             }
         }
@@ -1332,5 +1485,8 @@ class AnichinProvider : MainAPI() {
         private const val PLAYER_REQUEST_TIMEOUT_MS = 10_000L
         private const val EXTRACTOR_TIMEOUT_MS = 12_000L
         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
+        private const val POSTER_TIMEOUT_MS = 15_000L
+        private const val POSTER_CONCURRENCY = 4
+        private const val MAX_POSTER_BYTES = 4_000_000
     }
 }
