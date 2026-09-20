@@ -157,7 +157,8 @@ class AnichinProvider : MainAPI() {
 
     private data class PlayerOption(
         val label: String,
-        val url: String
+        val url: String,
+        val selectionRank: Int
     )
 
     private fun Element.getImageUrl(preferThumbnail: Boolean = false): String? {
@@ -953,9 +954,15 @@ class AnichinProvider : MainAPI() {
             .groupBy { it.url }
             .values
             .mapNotNull { matches ->
-                matches.maxByOrNull { playerLabelScore(it.label) }
+                matches.maxWithOrNull(
+                    compareBy<PlayerOption> { it.selectionRank }
+                        .thenBy { playerLabelScore(it.label) }
+                )
             }
-            .sortedBy { it.priority() }
+            .sortedWith(
+                compareBy<PlayerOption> { it.priority() }
+                    .thenByDescending { it.selectionRank }
+            )
     }
 
     private fun serverDisplayName(label: String, url: String): String {
@@ -1179,7 +1186,8 @@ class AnichinProvider : MainAPI() {
             players.add(
                 PlayerOption(
                     label = "Direct ${index + 1}",
-                    url = url
+                    url = url,
+                    selectionRank = DIRECT_IFRAME_RANK
                 )
             )
         }
@@ -1221,7 +1229,8 @@ class AnichinProvider : MainAPI() {
                 players.add(
                     PlayerOption(
                         label = label,
-                        url = url
+                        url = url,
+                        selectionRank = LABELED_SERVER_RANK
                     )
                 )
             }
@@ -1243,7 +1252,8 @@ class AnichinProvider : MainAPI() {
                         players.add(
                             PlayerOption(
                                 label = element.text().trim().ifBlank { "Server" },
-                                url = url
+                                url = url,
+                                selectionRank = DATA_ATTRIBUTE_RANK
                             )
                         )
                     }
@@ -1255,7 +1265,8 @@ class AnichinProvider : MainAPI() {
             players.add(
                 PlayerOption(
                     label = "Embedded ${index + 1}",
-                    url = url
+                    url = url,
+                    selectionRank = EMBEDDED_TEXT_RANK
                 )
             )
         }
@@ -1603,7 +1614,8 @@ class AnichinProvider : MainAPI() {
                 add(
                     PlayerOption(
                         label = "Fallback ${index + 1}",
-                        url = url
+                        url = url,
+                        selectionRank = NESTED_FALLBACK_RANK
                     )
                 )
             }
@@ -1612,13 +1624,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V45_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V46_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V45_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V46_DONE candidates=0 success=false")
             return false
         }
 
@@ -1749,7 +1761,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V45_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V46_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -1817,6 +1829,11 @@ class AnichinProvider : MainAPI() {
         private const val FALLBACK_GROUP_TIMEOUT_MS = 5_000L
         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
         private const val POSTER_TIMEOUT_MS = 10_000L
+        private const val LABELED_SERVER_RANK = 100
+        private const val DATA_ATTRIBUTE_RANK = 60
+        private const val DIRECT_IFRAME_RANK = 30
+        private const val EMBEDDED_TEXT_RANK = 10
+        private const val NESTED_FALLBACK_RANK = 0
         private const val POSTER_WARMUP_DELAY_MS = 500L
         private const val POSTER_CONCURRENCY = 2
         private const val MIN_POSTER_WIDTH = 300
