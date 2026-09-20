@@ -22,10 +22,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://anichin.moe&size=%size%",
-        "fileHash": "sha256-0183371a759ac6e533b1e931ecdac2da6f55ef7c1c55b3ba0e733aedfa8c4fde",
+        "fileHash": "sha256-30f6a72464b6058594ccf0b13bf2100b8985168511036de910dafea7acb949de",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 105706,
+        "fileSize": 105712,
         "status": 1,
         "language": "id",
         "authors": [
