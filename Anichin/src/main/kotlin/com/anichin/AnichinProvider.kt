@@ -1612,13 +1612,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V44_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V45_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V44_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V45_DONE candidates=0 success=false")
             return false
         }
 
@@ -1669,19 +1669,10 @@ class AnichinProvider : MainAPI() {
                 .filterNot(::isAdaptiveMaster)
                 .maxByOrNull(::qualityOrder)
 
-            val masterLink = rawMasterLink?.let { rawMaster ->
-                if (player.priority() <= 2) {
-                    FilteredHlsMaster.create(
-                        link = rawMaster,
-                        sourceName = serverDisplayName(player.label, rawMaster.url),
-                        minimumHeight = MIN_VIDEO_QUALITY
-                    )
-                } else {
-                    rawMaster
-                }
-            }
-
-            val orderedLinks = listOfNotNull(masterLink ?: fixedFallback)
+            // Pass the website's native master URL straight to Cloudstream.
+            // Rebuilding it as a data URI delays startup and is unsupported by
+            // some ExoPlayer/Cloudstream versions.
+            val orderedLinks = listOfNotNull(rawMasterLink ?: fixedFallback)
 
             var emittedForServer = false
 
@@ -1758,7 +1749,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V44_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V45_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
