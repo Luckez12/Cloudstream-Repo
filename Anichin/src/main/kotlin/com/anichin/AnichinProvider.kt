@@ -40,7 +40,7 @@ class AnichinProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "anime/?order=update" to "Latest Release",
+        HOMEPAGE_LATEST_ROUTE to "Latest Release",
         "anime/?type=movie&order=update" to "Movie",
         "anime/?order=popular" to "Popular",
         "anime/?status=completed&order=update" to "Completed"
@@ -92,8 +92,9 @@ class AnichinProvider : MainAPI() {
 
     /**
      * Fetch an Anichin page and invoke Cloudstream's WebView challenge solver
-     * only when the site answers with an anti-bot status. Clearance cookies are
-     * cached and shared for later home, search, detail and episode requests.
+     * when the site answers with an anti-bot status or returns a successful
+     * HTTP response containing a challenge page. Clearance cookies are cached
+     * and shared for later home, search, detail and episode requests.
      */
     private suspend fun fetchSiteDocument(
         url: String,
@@ -116,7 +117,13 @@ class AnichinProvider : MainAPI() {
                 throw IllegalStateException("HTTP $status from $host")
             }
 
-            return response.document
+            val document = response.document
+            if (document.isCloudflareChallenge()) {
+                response.okhttpResponse.close()
+                throw IllegalStateException("Cloudflare challenge from $host")
+            }
+
+            return document
         }
 
         if (sharedCloudflareKiller.savedCookies.containsKey(host)) {
@@ -142,7 +149,10 @@ class AnichinProvider : MainAPI() {
                 first.okhttpResponse.close()
                 throw IllegalStateException("HTTP $status from $host")
             }
-            return first.document
+            val document = first.document
+            if (!document.isCloudflareChallenge()) {
+                return document
+            }
         }
 
         first.okhttpResponse.close()
@@ -153,6 +163,30 @@ class AnichinProvider : MainAPI() {
             }
             requestWithCloudflare()
         }
+    }
+
+    private fun Document.isCloudflareChallenge(): Boolean {
+        val pageTitle = title().trim()
+        if (
+            pageTitle.equals("Just a moment...", ignoreCase = true) ||
+            pageTitle.contains("Attention Required", ignoreCase = true)
+        ) {
+            return true
+        }
+
+        if (
+            selectFirst(
+                "#challenge-platform, #challenge-form, " +
+                    "form[action*=\"/cdn-cgi/challenge-platform\"], " +
+                    "script[src*=\"challenges.cloudflare.com\"]"
+            ) != null
+        ) {
+            return true
+        }
+
+        val pageText = text()
+        return pageText.contains("Performing security verification", ignoreCase = true) ||
+            pageText.contains("Checking your browser before accessing", ignoreCase = true)
     }
 
     private data class PlayerOption(
@@ -346,20 +380,58 @@ class AnichinProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
 
-        val pageUrl = "${mainUrl}/${request.data}&page=$page"
-        val document = fetchSiteDocument(pageUrl)
+        val isLatestRelease = request.data == HOMEPAGE_LATEST_ROUTE
+        val archiveRoute = if (isLatestRelease) LATEST_ARCHIVE_ROUTE else request.data
+        val archiveUrl = buildArchivePageUrl(archiveRoute, page)
+
+        var pageUrl = archiveUrl
+        val document: Document
+        val cards: List<CardData>
+        var source = "archive"
 
         val typeHint = if (
-            request.data.contains("type=movie", ignoreCase = true)
+            archiveRoute.contains("type=movie", ignoreCase = true)
         ) {
             TvType.Movie
         } else {
             null
         }
 
-        val cards = document
-            .select("div.listupd > article")
-            .mapNotNull { it.toCardData(typeHint) }
+        if (isLatestRelease) {
+            val homepageUrl = if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page/"
+            val homepageDocument = try {
+                fetchSiteDocument(homepageUrl)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                null
+            }
+
+            val homepageCards = homepageDocument
+                ?.latestReleaseArticles()
+                ?.mapNotNull { it.toCardData() }
+                ?.distinctBy { it.href }
+                .orEmpty()
+
+            if (homepageDocument != null && homepageCards.isNotEmpty()) {
+                pageUrl = homepageUrl
+                document = homepageDocument
+                cards = homepageCards
+                source = "homepage"
+            } else {
+                document = fetchSiteDocument(archiveUrl)
+                cards = document.archiveArticles(typeHint)
+                source = "fallback"
+            }
+        } else {
+            document = fetchSiteDocument(archiveUrl)
+            cards = document.archiveArticles(typeHint)
+        }
+
+        Log.i(
+            "Anichin",
+            "ANICHIN_V49_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+        )
 
         val home = buildSearchResponses(cards, pageUrl)
 
@@ -375,6 +447,45 @@ class AnichinProvider : MainAPI() {
             ),
             hasNext = hasNext
         )
+    }
+
+    private fun buildArchivePageUrl(route: String, page: Int): String {
+        val separator = if (route.contains('?')) "&" else "?"
+        return "$mainUrl/$route${separator}page=$page"
+    }
+
+    private fun Document.archiveArticles(typeHint: TvType?): List<CardData> =
+        select("div.listupd > article")
+            .mapNotNull { it.toCardData(typeHint) }
+            .distinctBy { it.href }
+
+    private fun Document.latestReleaseArticles(): List<Element> {
+        val latestHeading = select("h1, h2, h3, h4, .releases h1, .releases h2, .releases h3")
+            .firstOrNull { heading ->
+                val label = heading.text().trim()
+                LATEST_HEADING_LABELS.any { expected ->
+                    label.contains(expected, ignoreCase = true)
+                }
+            }
+
+        var scope = latestHeading
+        repeat(6) {
+            scope = scope?.parent()
+            val articles = scope
+                ?.select("div.listupd > article")
+                ?.toList()
+                .orEmpty()
+            if (articles.isNotEmpty()) return articles
+        }
+
+        return select("div.listupd")
+            .map { list ->
+                list.children().filter { child ->
+                    child.tagName().equals("article", ignoreCase = true)
+                }
+            }
+            .firstOrNull { it.isNotEmpty() }
+            .orEmpty()
     }
 
     private fun Element.toCardData(
@@ -1624,13 +1735,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V48_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V49_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V48_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V49_DONE candidates=0 success=false")
             return false
         }
 
@@ -1775,7 +1886,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V48_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V49_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -1799,6 +1910,15 @@ class AnichinProvider : MainAPI() {
     }
 
     companion object {
+        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest__"
+        private const val LATEST_ARCHIVE_ROUTE = "anime/?order=update"
+        private val LATEST_HEADING_LABELS = listOf(
+            "Latest Release",
+            "Latest Update",
+            "Rilis Terbaru",
+            "Episode Terbaru",
+            "Update Terbaru"
+        )
         private val sharedCloudflareKiller by lazy { CloudflareCompat() }
         private val sharedCloudflareMutex = Mutex()
         private val CLOUDFLARE_STATUS_CODES = setOf(403, 429, 503)
