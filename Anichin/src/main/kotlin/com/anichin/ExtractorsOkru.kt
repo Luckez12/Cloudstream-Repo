@@ -214,7 +214,6 @@ open class OkRuExtractor : ExtractorApi() {
                     this.quality = Qualities.Unknown.value
                 }
             )
-            return
         }
 
         videos.values.forEach { video ->

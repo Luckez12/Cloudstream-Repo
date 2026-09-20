@@ -1446,6 +1446,25 @@ class AnichinProvider : MainAPI() {
             .any { it }
     }
 
+    private suspend fun <T> collectFirstSuccessfulSequentially(
+        items: List<T>,
+        block: suspend (T) -> Boolean
+    ): Boolean {
+        for (item in items) {
+            val succeeded = try {
+                block(item)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                false
+            }
+
+            if (succeeded) return true
+        }
+
+        return false
+    }
+
     private suspend fun <T> collectTwoLane(
         items: List<T>,
         block: suspend (T) -> Boolean
@@ -1593,13 +1612,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V43_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V44_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V43_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V44_DONE candidates=0 success=false")
             return false
         }
 
@@ -1642,13 +1661,25 @@ class AnichinProvider : MainAPI() {
              * every adaptive track, so do not repeat its 1080p/720p children.
              * Only use the highest fixed link when no master was found.
              */
-            val masterLink = eligibleLinks
+            val rawMasterLink = eligibleLinks
                 .filter(::isAdaptiveMaster)
                 .maxByOrNull(::extractorLinkScore)
 
             val fixedFallback = eligibleLinks
                 .filterNot(::isAdaptiveMaster)
                 .maxByOrNull(::qualityOrder)
+
+            val masterLink = rawMasterLink?.let { rawMaster ->
+                if (player.priority() <= 2) {
+                    FilteredHlsMaster.create(
+                        link = rawMaster,
+                        sourceName = serverDisplayName(player.label, rawMaster.url),
+                        minimumHeight = MIN_VIDEO_QUALITY
+                    )
+                } else {
+                    rawMaster
+                }
+            }
 
             val orderedLinks = listOfNotNull(masterLink ?: fixedFallback)
 
@@ -1702,9 +1733,8 @@ class AnichinProvider : MainAPI() {
                 preferredServerGroups,
                 PREFERRED_SERVER_CONCURRENCY,
             ) { serverPlayers ->
-                collectSuccessful(
+                collectFirstSuccessfulSequentially(
                     serverPlayers,
-                    PREFERRED_CANDIDATE_CONCURRENCY,
                     ::resolveAndEmit
                 )
             }
@@ -1728,7 +1758,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V43_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V44_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -1786,14 +1816,13 @@ class AnichinProvider : MainAPI() {
         private const val FULL_LANE_CONCURRENCY = 4
         private const val MAX_NESTED_CONCURRENCY = 3
         private const val PREFERRED_SERVER_CONCURRENCY = 3
-        private const val PREFERRED_CANDIDATE_CONCURRENCY = 2
         private const val FALLBACK_SERVER_CONCURRENCY = 3
         private const val EPISODE_REQUEST_TIMEOUT_MS = 8_000L
         private const val PLAYER_REQUEST_TIMEOUT_MS = 6_000L
         private const val EXTRACTOR_TIMEOUT_MS = 7_000L
-        private const val PREFERRED_PIPELINE_TIMEOUT_MS = 5_000L
+        private const val PREFERRED_PIPELINE_TIMEOUT_MS = 6_000L
         private const val FALLBACK_PIPELINE_TIMEOUT_MS = 4_500L
-        private const val PREFERRED_GROUP_TIMEOUT_MS = 5_500L
+        private const val PREFERRED_GROUP_TIMEOUT_MS = 7_000L
         private const val FALLBACK_GROUP_TIMEOUT_MS = 5_000L
         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
         private const val POSTER_TIMEOUT_MS = 10_000L
