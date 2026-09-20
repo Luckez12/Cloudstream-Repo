@@ -1624,13 +1624,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V46_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V47_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V46_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V47_DONE candidates=0 success=false")
             return false
         }
 
@@ -1677,14 +1677,18 @@ class AnichinProvider : MainAPI() {
                 .filter(::isAdaptiveMaster)
                 .maxByOrNull(::extractorLinkScore)
 
-            val fixedFallback = eligibleLinks
+            val fixedFallbacks = eligibleLinks
                 .filterNot(::isAdaptiveMaster)
-                .maxByOrNull(::qualityOrder)
+                .sortedByDescending(::qualityOrder)
 
             // Pass the website's native master URL straight to Cloudstream.
             // Rebuilding it as a data URI delays startup and is unsupported by
             // some ExoPlayer/Cloudstream versions.
-            val orderedLinks = listOfNotNull(rawMasterLink ?: fixedFallback)
+            val orderedLinks = when {
+                rawMasterLink != null -> listOf(rawMasterLink)
+                player.priority() == 1 -> fixedFallbacks.distinctBy { it.quality }
+                else -> listOfNotNull(fixedFallbacks.firstOrNull())
+            }
 
             var emittedForServer = false
 
@@ -1736,8 +1740,18 @@ class AnichinProvider : MainAPI() {
                 preferredServerGroups,
                 PREFERRED_SERVER_CONCURRENCY,
             ) { serverPlayers ->
+                val exactServerPlayers = if (
+                    serverPlayers.firstOrNull()?.priority() == 1
+                ) {
+                    serverPlayers
+                        .filter { it.selectionRank == LABELED_SERVER_RANK }
+                        .ifEmpty { serverPlayers }
+                } else {
+                    serverPlayers
+                }
+
                 collectFirstSuccessfulSequentially(
-                    serverPlayers,
+                    exactServerPlayers,
                     ::resolveAndEmit
                 )
             }
@@ -1761,7 +1775,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V46_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V47_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 

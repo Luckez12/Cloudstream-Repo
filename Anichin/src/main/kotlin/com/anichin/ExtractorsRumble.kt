@@ -24,107 +24,110 @@ class Rumble : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         val directVideoId = extractEmbedVideoId(url)
-        val pageText = if (directVideoId == null) {
-            try {
-                app.get(
-                    url,
-                    referer = referer ?: "$mainUrl/",
-                    headers = mapOf("User-Agent" to USER_AGENT)
-                ).text
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                return
-            }
+        val sourcePage = if (directVideoId == null) {
+            fetchText(url, referer ?: "$mainUrl/") ?: return
         } else {
             null
         }
 
         val videoId = directVideoId
-            ?: pageText?.let(::extractMainPlayerVideoId)
+            ?: sourcePage?.let(::extractMainPlayerVideoId)
             ?: return
 
         val embedUrl = "$mainUrl/embed/$videoId"
-        val metadataText = try {
-            app.get(
-                "$mainUrl/embedJS/u3/?request=video&ver=2&v=$videoId",
-                referer = embedUrl,
-                headers = mapOf("User-Agent" to USER_AGENT)
-            ).text
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            return
-        }
+        val embedPage = fetchText(embedUrl, referer ?: url)
 
-        val metadata = AppUtils.tryParseJson<JsonNode>(metadataText)
+        /*
+         * The object embedded under m.f[videoId] belongs to this exact video.
+         * Older Rumble uploads often expose only ua.mp4 and no ua.hls.
+         */
+        val metadata = embedPage
+            ?.let { extractExactVideoMetadata(it, videoId) }
+            ?: fetchApiMetadata(videoId, embedUrl)
             ?: return
-
-        val candidates = mutableListOf<HlsCandidate>()
-        collectHlsCandidates(
-            metadata.path("ua").path("hls"),
-            inheritedHeight = null,
-            output = candidates
-        )
 
         val streamHeaders = mapOf(
             "User-Agent" to USER_AGENT,
             "Referer" to embedUrl
         )
 
-        val verifiedMedia = mutableListOf<HlsCandidate>()
+        if (
+            emitExactHls(
+                metadata = metadata,
+                embedUrl = embedUrl,
+                headers = streamHeaders,
+                callback = callback
+            )
+        ) {
+            return
+        }
 
-        candidates
+        emitExactMp4(
+            metadata = metadata,
+            embedUrl = embedUrl,
+            headers = streamHeaders,
+            callback = callback
+        )
+    }
+
+    private suspend fun fetchText(url: String, referer: String): String? {
+        return try {
+            app.get(
+                url,
+                referer = referer,
+                headers = mapOf("User-Agent" to USER_AGENT),
+                timeout = 6L
+            ).text
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun fetchApiMetadata(
+        videoId: String,
+        embedUrl: String
+    ): JsonNode? {
+        val metadataText = fetchText(
+            "$mainUrl/embedJS/u3/?request=video&ver=2&v=$videoId",
+            embedUrl
+        ) ?: return null
+
+        return AppUtils.tryParseJson<JsonNode>(metadataText)
+    }
+
+    private suspend fun emitExactHls(
+        metadata: JsonNode,
+        embedUrl: String,
+        headers: Map<String, String>,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val candidates = mutableListOf<MediaCandidate>()
+        collectMediaCandidates(
+            node = metadata.path("ua").path("hls"),
+            inheritedHeight = null,
+            extension = ".m3u8",
+            output = candidates
+        )
+
+        val verifiedMedia = mutableListOf<MediaCandidate>()
+        val orderedCandidates = candidates
             .distinctBy { it.url }
             .sortedWith(
-                compareBy<HlsCandidate> { candidate ->
+                compareBy<MediaCandidate> { candidate ->
                     if (
                         candidate.url.contains("master", true) ||
                         candidate.url.contains("/hls-vod/", true)
                     ) 0 else 1
                 }.thenBy { it.height ?: Int.MAX_VALUE }
             )
-            .forEach { candidate ->
-                val playlist = try {
-                    app.get(
-                        candidate.url,
-                        referer = embedUrl,
-                        headers = streamHeaders,
-                        timeout = 5L
-                    ).text
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    return@forEach
-                }
 
-                if (!playlist.contains("#EXTM3U", ignoreCase = true)) {
-                    return@forEach
-                }
+        for (candidate in orderedCandidates) {
+            val playlist = fetchText(candidate.url, embedUrl) ?: continue
+            if (!playlist.contains("#EXTM3U", ignoreCase = true)) continue
 
-                if (playlist.contains("#EXT-X-STREAM-INF", ignoreCase = true)) {
-                    callback(
-                        newExtractorLink(
-                            source = name,
-                            name = name,
-                            url = candidate.url,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = embedUrl
-                            this.headers = streamHeaders
-                            this.quality = Qualities.Unknown.value
-                        }
-                    )
-                    return
-                }
-
-                verifiedMedia += candidate
-            }
-
-        verifiedMedia
-            .filter { (it.height ?: 0) >= 720 }
-            .sortedByDescending { it.height }
-            .forEach { candidate ->
+            if (playlist.contains("#EXT-X-STREAM-INF", ignoreCase = true)) {
                 callback(
                     newExtractorLink(
                         source = name,
@@ -133,7 +136,67 @@ class Rumble : ExtractorApi() {
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.referer = embedUrl
-                        this.headers = streamHeaders
+                        this.headers = headers
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+                return true
+            }
+
+            verifiedMedia += candidate
+        }
+
+        val fixedHls = verifiedMedia
+            .filter { (it.height ?: 0) >= MINIMUM_HEIGHT }
+            .distinctBy { it.height }
+            .sortedByDescending { it.height }
+
+        fixedHls.forEach { candidate ->
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = candidate.url,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = embedUrl
+                    this.headers = headers
+                    this.quality = candidate.height ?: Qualities.Unknown.value
+                }
+            )
+        }
+
+        return fixedHls.isNotEmpty()
+    }
+
+    private fun emitExactMp4(
+        metadata: JsonNode,
+        embedUrl: String,
+        headers: Map<String, String>,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val candidates = mutableListOf<MediaCandidate>()
+        collectMediaCandidates(
+            node = metadata.path("ua").path("mp4"),
+            inheritedHeight = null,
+            extension = ".mp4",
+            output = candidates
+        )
+
+        candidates
+            .filter { (it.height ?: 0) >= MINIMUM_HEIGHT }
+            .distinctBy { it.height }
+            .sortedByDescending { it.height }
+            .forEach { candidate ->
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = name,
+                        url = candidate.url,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = embedUrl
+                        this.headers = headers
                         this.quality = candidate.height ?: Qualities.Unknown.value
                     }
                 )
@@ -157,16 +220,77 @@ class Rumble : ExtractorApi() {
             .find(normalized)
             ?.groupValues
             ?.getOrNull(1)
+            ?: PLAY_VIDEO_OBJECT_ID
+                .find(normalized)
+                ?.groupValues
+                ?.getOrNull(1)
             ?: EMBED_VIDEO_ID
                 .find(normalized)
                 ?.groupValues
                 ?.getOrNull(1)
     }
 
-    private fun collectHlsCandidates(
+    private fun extractExactVideoMetadata(
+        pageText: String,
+        videoId: String
+    ): JsonNode? {
+        val markers = listOf(
+            "m.f[\"$videoId\"]=",
+            "m.f['$videoId']="
+        )
+
+        for (marker in markers) {
+            val markerIndex = pageText.indexOf(marker)
+            if (markerIndex < 0) continue
+
+            val objectStart = pageText.indexOf('{', markerIndex + marker.length)
+            if (objectStart < 0) continue
+
+            val objectEnd = findJsonObjectEnd(pageText, objectStart)
+            if (objectEnd <= objectStart) continue
+
+            val json = pageText.substring(objectStart, objectEnd + 1)
+            AppUtils.tryParseJson<JsonNode>(json)?.let { return it }
+        }
+
+        return null
+    }
+
+    private fun findJsonObjectEnd(text: String, start: Int): Int {
+        var depth = 0
+        var inString = false
+        var escaped = false
+
+        for (index in start until text.length) {
+            val character = text[index]
+
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    character == '\\' -> escaped = true
+                    character == '"' -> inString = false
+                }
+                continue
+            }
+
+            when (character) {
+                '"' -> inString = true
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return index
+                }
+            }
+        }
+
+        return -1
+    }
+
+    private fun collectMediaCandidates(
         node: JsonNode,
         inheritedHeight: Int?,
-        output: MutableList<HlsCandidate>
+        extension: String,
+        output: MutableList<MediaCandidate>
     ) {
         when {
             node.isObject -> {
@@ -178,15 +302,16 @@ class Rumble : ExtractorApi() {
                 node.path("url")
                     .takeIf { it.isTextual }
                     ?.asText()
-                    ?.takeIf { it.contains(".m3u8", ignoreCase = true) }
-                    ?.let { output += HlsCandidate(it, ownHeight) }
+                    ?.takeIf { it.contains(extension, ignoreCase = true) }
+                    ?.let { output += MediaCandidate(it, ownHeight) }
 
                 node.fields().forEach { (key, child) ->
                     if (key != "url" && key != "meta") {
-                        collectHlsCandidates(
-                            child,
-                            key.toIntOrNull() ?: ownHeight,
-                            output
+                        collectMediaCandidates(
+                            node = child,
+                            inheritedHeight = key.toIntOrNull() ?: ownHeight,
+                            extension = extension,
+                            output = output
                         )
                     }
                 }
@@ -194,22 +319,29 @@ class Rumble : ExtractorApi() {
 
             node.isArray -> {
                 node.forEach { child ->
-                    collectHlsCandidates(child, inheritedHeight, output)
+                    collectMediaCandidates(
+                        node = child,
+                        inheritedHeight = inheritedHeight,
+                        extension = extension,
+                        output = output
+                    )
                 }
             }
 
-            node.isTextual && node.asText().contains(".m3u8", true) -> {
-                output += HlsCandidate(node.asText(), inheritedHeight)
+            node.isTextual && node.asText().contains(extension, true) -> {
+                output += MediaCandidate(node.asText(), inheritedHeight)
             }
         }
     }
 
-    private data class HlsCandidate(
+    private data class MediaCandidate(
         val url: String,
         val height: Int?
     )
 
     companion object {
+        private const val MINIMUM_HEIGHT = 720
+
         private val EMBED_VIDEO_ID = Regex(
             """rumble\.com/embed/(?:[0-9a-z]+\.)?([0-9a-z]+)""",
             RegexOption.IGNORE_CASE
@@ -217,6 +349,11 @@ class Rumble : ExtractorApi() {
 
         private val PLAY_VIDEO_ID = Regex(
             """Rumble\(\s*["']play["']\s*,\s*\{[\s\S]{0,1500}?["']?video["']?\s*:\s*["']([0-9a-z]+)["']""",
+            RegexOption.IGNORE_CASE
+        )
+
+        private val PLAY_VIDEO_OBJECT_ID = Regex(
+            """Rumble\(\s*["']play["']\s*,\s*\{[\s\S]{0,1500}?["']?video["']?\s*:\s*\{[\s\S]{0,300}?["']?id["']?\s*:\s*["']([0-9a-z]+)["']""",
             RegexOption.IGNORE_CASE
         )
     }
