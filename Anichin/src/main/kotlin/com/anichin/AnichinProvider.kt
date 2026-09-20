@@ -25,6 +25,7 @@ import java.net.URLEncoder
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class AnichinProvider : MainAPI() {
 
@@ -55,9 +56,6 @@ class AnichinProvider : MainAPI() {
 
     private val posterCache = ConcurrentHashMap<String, String>()
     private val posterInFlight: MutableSet<String> =
-        ConcurrentHashMap.newKeySet()
-    private val homePageCache = ConcurrentHashMap<String, HomePageSnapshot>()
-    private val homeRefreshInFlight: MutableSet<String> =
         ConcurrentHashMap.newKeySet()
     private val posterSemaphore = Semaphore(POSTER_CONCURRENCY)
     private val posterWarmupScope = CoroutineScope(
@@ -177,9 +175,17 @@ class AnichinProvider : MainAPI() {
         url: String,
         referer: String = "$mainUrl/"
     ): Document {
+        val requestHeaders = siteHeaders.toMutableMap()
+        val savedCookies = sharedCloudflareKiller.savedCookies[hostOf(url)]
+        if (!savedCookies.isNullOrEmpty()) {
+            requestHeaders["Cookie"] = savedCookies.entries.joinToString("; ") {
+                "${it.key}=${it.value}"
+            }
+        }
+
         val response = app.get(
             url,
-            headers = siteHeaders,
+            headers = requestHeaders,
             referer = referer,
             timeout = HOME_FAST_TIMEOUT_SECONDS
         )
@@ -443,7 +449,7 @@ class AnichinProvider : MainAPI() {
             ?.let { (now - it.savedAtMs).coerceAtLeast(0L) }
             ?: Long.MAX_VALUE
 
-        val shouldTryFastNetwork = cached == null ||
+        val shouldTryFastNetwork = cached != null &&
             cachedAgeMs >= HOME_SYNC_REVALIDATE_AFTER_MS
 
         val fastSnapshot = if (shouldTryFastNetwork) {
@@ -467,11 +473,27 @@ class AnichinProvider : MainAPI() {
             homePageCache[cacheKey] = fastSnapshot
         }
 
-        val selected = fastSnapshot ?: cached
+        val shouldRunColdBootstrap = fastSnapshot == null &&
+            (cached == null || cachedAgeMs >= HOME_FORCE_CLOUDFLARE_AFTER_MS)
+
+        val coldSnapshot = if (shouldRunColdBootstrap) {
+            fetchHomePageWithCloudflare(
+                cacheKey = cacheKey,
+                knownSavedAtMs = cached?.savedAtMs ?: -1L,
+                pageUrl = pageUrl,
+                isLatestRelease = isLatestRelease,
+                typeHint = typeHint
+            )
+        } else {
+            null
+        }
+
+        val selected = fastSnapshot ?: coldSnapshot ?: cached
         val source = when {
             fastSnapshot != null -> "fast-network"
+            coldSnapshot != null -> "cloudflare-bootstrap"
             cached != null -> "cache"
-            else -> "empty-background-refresh"
+            else -> "bootstrap-failed"
         }
 
         val selectedAgeMs = selected
@@ -480,7 +502,9 @@ class AnichinProvider : MainAPI() {
 
         if (
             fastSnapshot == null &&
-            (selected == null || selectedAgeMs >= HOME_BACKGROUND_REFRESH_AFTER_MS)
+            coldSnapshot == null &&
+            selected != null &&
+            selectedAgeMs >= HOME_BACKGROUND_REFRESH_AFTER_MS
         ) {
             refreshHomePageInBackground(
                 cacheKey = cacheKey,
@@ -493,7 +517,7 @@ class AnichinProvider : MainAPI() {
         val cards = selected?.cards.orEmpty()
         Log.i(
             "Anichin",
-            "ANICHIN_V50_HOME name=${request.name} source=$source page=$page " +
+            "ANICHIN_V51_HOME name=${request.name} source=$source page=$page " +
                 "ageMs=${if (selected == null) -1 else selectedAgeMs} cards=${cards.size}"
         )
 
@@ -507,6 +531,49 @@ class AnichinProvider : MainAPI() {
             ),
             hasNext = selected?.hasNext ?: false
         )
+    }
+
+    private suspend fun fetchHomePageWithCloudflare(
+        cacheKey: String,
+        knownSavedAtMs: Long,
+        pageUrl: String,
+        isLatestRelease: Boolean,
+        typeHint: TvType?
+    ): HomePageSnapshot? = homeBootstrapMutex.withLock {
+        val newerSnapshot = homePageCache[cacheKey]
+        if (newerSnapshot != null && newerSnapshot.savedAtMs > knownSavedAtMs) {
+            return@withLock newerSnapshot
+        }
+
+        val now = System.currentTimeMillis()
+        if (now < homeBootstrapCooldownUntilMs.get()) {
+            return@withLock null
+        }
+
+        val snapshot = try {
+            withTimeoutOrNull(HOME_COLD_START_TIMEOUT_MS) {
+                fetchSiteDocument(pageUrl).toHomePageSnapshot(
+                    pageUrl = pageUrl,
+                    isLatestRelease = isLatestRelease,
+                    typeHint = typeHint
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+
+        if (snapshot == null) {
+            homeBootstrapCooldownUntilMs.set(
+                System.currentTimeMillis() + HOME_BOOTSTRAP_FAILURE_COOLDOWN_MS
+            )
+        } else {
+            homeBootstrapCooldownUntilMs.set(0L)
+            homePageCache[cacheKey] = snapshot
+        }
+
+        snapshot
     }
 
     private fun Document.toHomePageSnapshot(
@@ -546,7 +613,7 @@ class AnichinProvider : MainAPI() {
 
         posterWarmupScope.launch {
             try {
-                val document = fetchSiteDocument(pageUrl)
+                val document = fetchSiteDocumentFast(pageUrl)
                 val snapshot = document.toHomePageSnapshot(
                     pageUrl = pageUrl,
                     isLatestRelease = isLatestRelease,
@@ -557,7 +624,7 @@ class AnichinProvider : MainAPI() {
                     homePageCache[cacheKey] = snapshot
                     Log.i(
                         "Anichin",
-                        "ANICHIN_V50_HOME_REFRESH key=$cacheKey cards=${snapshot.cards.size}"
+                        "ANICHIN_V51_HOME_REFRESH key=$cacheKey cards=${snapshot.cards.size}"
                     )
                 }
             } catch (e: CancellationException) {
@@ -565,7 +632,7 @@ class AnichinProvider : MainAPI() {
             } catch (error: Throwable) {
                 Log.w(
                     "Anichin",
-                    "ANICHIN_V50_HOME_REFRESH_FAILED key=$cacheKey " +
+                    "ANICHIN_V51_HOME_REFRESH_FAILED key=$cacheKey " +
                         "error=${error.javaClass.simpleName}"
                 )
             } finally {
@@ -1860,13 +1927,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V50_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V51_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V50_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V51_DONE candidates=0 success=false")
             return false
         }
 
@@ -2011,7 +2078,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V50_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V51_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -2035,7 +2102,7 @@ class AnichinProvider : MainAPI() {
     }
 
     companion object {
-        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest_v50__"
+        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest_v51__"
         private val LATEST_HEADING_LABELS = listOf(
             "Latest Release",
             "Latest Update",
@@ -2045,6 +2112,11 @@ class AnichinProvider : MainAPI() {
         )
         private val sharedCloudflareKiller by lazy { CloudflareCompat() }
         private val sharedCloudflareMutex = Mutex()
+        private val homeBootstrapMutex = Mutex()
+        private val homeBootstrapCooldownUntilMs = AtomicLong(0L)
+        private val homePageCache = ConcurrentHashMap<String, HomePageSnapshot>()
+        private val homeRefreshInFlight: MutableSet<String> =
+            ConcurrentHashMap.newKeySet()
         private val CLOUDFLARE_STATUS_CODES = setOf(403, 429, 503)
 
         private val PLAYER_HOST_HINTS = listOf(
@@ -2088,6 +2160,9 @@ class AnichinProvider : MainAPI() {
         private const val HOME_FAST_TIMEOUT_SECONDS = 5L
         private const val HOME_SYNC_REVALIDATE_AFTER_MS = 2 * 60 * 1_000L
         private const val HOME_BACKGROUND_REFRESH_AFTER_MS = 45_000L
+        private const val HOME_FORCE_CLOUDFLARE_AFTER_MS = 10 * 60 * 1_000L
+        private const val HOME_COLD_START_TIMEOUT_MS = 10_000L
+        private const val HOME_BOOTSTRAP_FAILURE_COOLDOWN_MS = 30_000L
         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
         private const val POSTER_TIMEOUT_MS = 10_000L
         private const val LABELED_SERVER_RANK = 100
