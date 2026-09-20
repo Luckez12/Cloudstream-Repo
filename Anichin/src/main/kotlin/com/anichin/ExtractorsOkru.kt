@@ -7,8 +7,9 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
-import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
@@ -190,9 +191,9 @@ open class OkRuExtractor : ExtractorApi() {
         }
 
         /*
-         * Preferred path: expand OK.ru's HLS master into named quality links
-         * and keep the adaptive master as Auto. The provider filters anything
-         * below 720p. If no master exists, retain the MP4-quality fallback.
+         * Fast preferred path: hand the native master HLS straight to the
+         * player. Expanding it here adds another network request and produces
+         * duplicate 720p/1080p choices that already live inside the master.
          */
         adaptiveHlsUrl?.let { hlsUrl ->
             val streamHeaders = mapOf(
@@ -201,13 +202,18 @@ open class OkRuExtractor : ExtractorApi() {
                 "Origin" to "https://ok.ru"
             )
 
-            M3u8Helper.generateM3u8(
-                source = name,
-                streamUrl = hlsUrl,
-                referer = embedUrl,
-                headers = streamHeaders,
-                name = name
-            ).forEach(callback)
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = hlsUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = embedUrl
+                    this.headers = streamHeaders
+                    this.quality = Qualities.Unknown.value
+                }
+            )
             return
         }
 

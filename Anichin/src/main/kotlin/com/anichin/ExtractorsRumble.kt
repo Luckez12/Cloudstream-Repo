@@ -5,7 +5,10 @@ import com.lagradost.cloudstream3.USER_AGENT
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 
 class Rumble : ExtractorApi() {
     override var name = "Rumble"
@@ -52,16 +55,32 @@ class Rumble : ExtractorApi() {
                 "Referer" to url
             )
 
-            M3u8Helper.generateM3u8(
-                source = name,
-                streamUrl = hlsUrl,
-                referer = url,
-                headers = streamHeaders,
-                name = name
-            ).forEach(callback)
+            if (playlist.text.contains("#EXT-X-STREAM-INF", ignoreCase = true)) {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = name,
+                        url = hlsUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = url
+                        this.headers = streamHeaders
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            } else {
+                // Some Rumble pages expose a media playlist rather than a
+                // master. Preserve the old quality expansion as fallback.
+                M3u8Helper.generateM3u8(
+                    source = name,
+                    streamUrl = hlsUrl,
+                    referer = url,
+                    headers = streamHeaders,
+                    name = name
+                ).forEach(callback)
+            }
 
-            // One verified playlist is enough; generateM3u8 expands its
-            // 720p/1080p variants and also keeps the adaptive master.
+            // One verified playlist is enough.
             return
         }
     }
