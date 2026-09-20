@@ -1624,13 +1624,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V47_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V48_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V47_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V48_DONE candidates=0 success=false")
             return false
         }
 
@@ -1775,7 +1775,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V47_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V48_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 

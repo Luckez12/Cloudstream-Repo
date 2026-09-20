@@ -169,7 +169,7 @@ class Rumble : ExtractorApi() {
         return fixedHls.isNotEmpty()
     }
 
-    private fun emitExactMp4(
+    private suspend fun emitExactMp4(
         metadata: JsonNode,
         embedUrl: String,
         headers: Map<String, String>,
