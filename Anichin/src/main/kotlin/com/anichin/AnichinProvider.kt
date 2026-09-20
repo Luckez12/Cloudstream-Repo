@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -14,7 +13,6 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -1448,62 +1446,6 @@ class AnichinProvider : MainAPI() {
             .any { it }
     }
 
-    private suspend fun <T> collectWithSuccessGrace(
-        items: List<T>,
-        concurrency: Int,
-        successGraceMs: Long,
-        block: suspend (T) -> Boolean
-    ): Boolean = coroutineScope {
-        if (items.isEmpty()) {
-            return@coroutineScope false
-        }
-
-        val semaphore = Semaphore(concurrency.coerceAtLeast(1))
-        val jobs = items.map { item ->
-            async {
-                semaphore.withPermit {
-                    try {
-                        block(item)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
-                        false
-                    }
-                }
-            }
-        }.toMutableList()
-
-        var succeeded = false
-
-        while (jobs.isNotEmpty() && !succeeded) {
-            val completed = select<Pair<Deferred<Boolean>, Boolean>> {
-                jobs.forEach { job ->
-                    job.onAwait { result -> job to result }
-                }
-            }
-
-            jobs.remove(completed.first)
-            succeeded = completed.second
-        }
-
-        if (succeeded && jobs.isNotEmpty()) {
-            /*
-             * Give the other preferred hosts a very short chance to add
-             * their source, but never keep the play screen waiting for a
-             * dead host after the first usable source is ready.
-             */
-            withTimeoutOrNull(successGraceMs) {
-                jobs.awaitAll()
-            }
-        }
-
-        jobs.forEach { job ->
-            if (job.isActive) job.cancel()
-        }
-
-        succeeded
-    }
-
     private suspend fun <T> collectTwoLane(
         items: List<T>,
         block: suspend (T) -> Boolean
@@ -1651,13 +1593,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V42_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V43_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V42_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V43_DONE candidates=0 success=false")
             return false
         }
 
@@ -1742,16 +1684,30 @@ class AnichinProvider : MainAPI() {
 
         val preferredPlayers = players.filter { it.priority() <= 2 }
         val fallbackPlayers = players.filter { it.priority() > 2 }
+        val preferredServerGroups = preferredPlayers
+            .groupBy { it.priority() }
+            .values
+            .toList()
 
         val preferredSuccess = withTimeoutOrNull(
             PREFERRED_GROUP_TIMEOUT_MS
         ) {
-            collectWithSuccessGrace(
-                preferredPlayers,
+            /*
+             * Start one lane for each preferred server family so duplicate
+             * wrapper URLs cannot prevent OK.ru, Rumble or Dailymotion from
+             * running. Each successful pipeline emits immediately, while the
+             * other two lanes continue inside this active loadLinks call.
+             */
+            collectSuccessful(
+                preferredServerGroups,
                 PREFERRED_SERVER_CONCURRENCY,
-                PREFERRED_SUCCESS_GRACE_MS,
-                ::resolveAndEmit
-            )
+            ) { serverPlayers ->
+                collectSuccessful(
+                    serverPlayers,
+                    PREFERRED_CANDIDATE_CONCURRENCY,
+                    ::resolveAndEmit
+                )
+            }
         } ?: (emittedCount.get() > 0)
 
         val fallbackAttempted = !preferredSuccess && emittedCount.get() == 0
@@ -1772,7 +1728,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V42_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V43_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -1830,15 +1786,14 @@ class AnichinProvider : MainAPI() {
         private const val FULL_LANE_CONCURRENCY = 4
         private const val MAX_NESTED_CONCURRENCY = 3
         private const val PREFERRED_SERVER_CONCURRENCY = 3
+        private const val PREFERRED_CANDIDATE_CONCURRENCY = 2
         private const val FALLBACK_SERVER_CONCURRENCY = 3
-        private const val PREFERRED_SUCCESS_GRACE_MS = 700L
-
         private const val EPISODE_REQUEST_TIMEOUT_MS = 8_000L
         private const val PLAYER_REQUEST_TIMEOUT_MS = 6_000L
         private const val EXTRACTOR_TIMEOUT_MS = 7_000L
-        private const val PREFERRED_PIPELINE_TIMEOUT_MS = 3_500L
+        private const val PREFERRED_PIPELINE_TIMEOUT_MS = 5_000L
         private const val FALLBACK_PIPELINE_TIMEOUT_MS = 4_500L
-        private const val PREFERRED_GROUP_TIMEOUT_MS = 4_000L
+        private const val PREFERRED_GROUP_TIMEOUT_MS = 5_500L
         private const val FALLBACK_GROUP_TIMEOUT_MS = 5_000L
         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
         private const val POSTER_TIMEOUT_MS = 10_000L

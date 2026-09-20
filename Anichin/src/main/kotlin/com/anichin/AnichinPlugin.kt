@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 @CloudstreamPlugin
 class AnichinPlugin : BasePlugin() {
     override fun load() {
-        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=42-fast-direct-master")
+        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=43-live-three-master")
         registerMainAPI(AnichinProvider())
 
         // Custom host fixes for Anichin:
