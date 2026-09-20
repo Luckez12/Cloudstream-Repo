@@ -56,6 +56,9 @@ class AnichinProvider : MainAPI() {
     private val posterCache = ConcurrentHashMap<String, String>()
     private val posterInFlight: MutableSet<String> =
         ConcurrentHashMap.newKeySet()
+    private val homePageCache = ConcurrentHashMap<String, HomePageSnapshot>()
+    private val homeRefreshInFlight: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
     private val posterSemaphore = Semaphore(POSTER_CONCURRENCY)
     private val posterWarmupScope = CoroutineScope(
         SupervisorJob() + Dispatchers.IO
@@ -163,6 +166,37 @@ class AnichinProvider : MainAPI() {
             }
             requestWithCloudflare()
         }
+    }
+
+    /**
+     * Fast homepage path: never opens the Cloudflare WebView. A challenge or
+     * slow response falls back to the last good page while the full refresh is
+     * performed separately in the background.
+     */
+    private suspend fun fetchSiteDocumentFast(
+        url: String,
+        referer: String = "$mainUrl/"
+    ): Document {
+        val response = app.get(
+            url,
+            headers = siteHeaders,
+            referer = referer,
+            timeout = HOME_FAST_TIMEOUT_SECONDS
+        )
+
+        if (!response.isSuccessful) {
+            val status = response.code
+            response.okhttpResponse.close()
+            throw IllegalStateException("HTTP $status from ${hostOf(url)}")
+        }
+
+        val document = response.document
+        if (document.isCloudflareChallenge()) {
+            response.okhttpResponse.close()
+            throw IllegalStateException("Cloudflare challenge from ${hostOf(url)}")
+        }
+
+        return document
     }
 
     private fun Document.isCloudflareChallenge(): Boolean {
@@ -375,69 +409,95 @@ class AnichinProvider : MainAPI() {
         val type: TvType
     )
 
+    private data class HomePageSnapshot(
+        val cards: List<CardData>,
+        val hasNext: Boolean,
+        val pageUrl: String,
+        val savedAtMs: Long
+    )
+
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
 
         val isLatestRelease = request.data == HOMEPAGE_LATEST_ROUTE
-        val archiveRoute = if (isLatestRelease) LATEST_ARCHIVE_ROUTE else request.data
-        val archiveUrl = buildArchivePageUrl(archiveRoute, page)
-
-        var pageUrl = archiveUrl
-        val document: Document
-        val cards: List<CardData>
-        var source = "archive"
+        val pageUrl = if (isLatestRelease) {
+            if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page/"
+        } else {
+            buildArchivePageUrl(request.data, page)
+        }
 
         val typeHint = if (
-            archiveRoute.contains("type=movie", ignoreCase = true)
+            request.data.contains("type=movie", ignoreCase = true)
         ) {
             TvType.Movie
         } else {
             null
         }
 
-        if (isLatestRelease) {
-            val homepageUrl = if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page/"
-            val homepageDocument = try {
-                fetchSiteDocument(homepageUrl)
+        val cacheKey = "${request.data}|$page"
+        val now = System.currentTimeMillis()
+        val cached = homePageCache[cacheKey]
+        val cachedAgeMs = cached
+            ?.let { (now - it.savedAtMs).coerceAtLeast(0L) }
+            ?: Long.MAX_VALUE
+
+        val shouldTryFastNetwork = cached == null ||
+            cachedAgeMs >= HOME_SYNC_REVALIDATE_AFTER_MS
+
+        val fastSnapshot = if (shouldTryFastNetwork) {
+            try {
+                val document = fetchSiteDocumentFast(pageUrl)
+                document.toHomePageSnapshot(
+                    pageUrl = pageUrl,
+                    isLatestRelease = isLatestRelease,
+                    typeHint = typeHint
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Throwable) {
                 null
             }
-
-            val homepageCards = homepageDocument
-                ?.latestReleaseArticles()
-                ?.mapNotNull { it.toCardData() }
-                ?.distinctBy { it.href }
-                .orEmpty()
-
-            if (homepageDocument != null && homepageCards.isNotEmpty()) {
-                pageUrl = homepageUrl
-                document = homepageDocument
-                cards = homepageCards
-                source = "homepage"
-            } else {
-                document = fetchSiteDocument(archiveUrl)
-                cards = document.archiveArticles(typeHint)
-                source = "fallback"
-            }
         } else {
-            document = fetchSiteDocument(archiveUrl)
-            cards = document.archiveArticles(typeHint)
+            null
         }
 
+        if (fastSnapshot != null) {
+            homePageCache[cacheKey] = fastSnapshot
+        }
+
+        val selected = fastSnapshot ?: cached
+        val source = when {
+            fastSnapshot != null -> "fast-network"
+            cached != null -> "cache"
+            else -> "empty-background-refresh"
+        }
+
+        val selectedAgeMs = selected
+            ?.let { (now - it.savedAtMs).coerceAtLeast(0L) }
+            ?: Long.MAX_VALUE
+
+        if (
+            fastSnapshot == null &&
+            (selected == null || selectedAgeMs >= HOME_BACKGROUND_REFRESH_AFTER_MS)
+        ) {
+            refreshHomePageInBackground(
+                cacheKey = cacheKey,
+                pageUrl = pageUrl,
+                isLatestRelease = isLatestRelease,
+                typeHint = typeHint
+            )
+        }
+
+        val cards = selected?.cards.orEmpty()
         Log.i(
             "Anichin",
-            "ANICHIN_V49_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V50_HOME name=${request.name} source=$source page=$page " +
+                "ageMs=${if (selected == null) -1 else selectedAgeMs} cards=${cards.size}"
         )
 
-        val home = buildSearchResponses(cards, pageUrl)
-
-        val hasNext = document.selectFirst(
-            "a.next.page-numbers, .pagination .next a, .hpage a.r, a[rel=next]"
-        ) != null
+        val home = buildSearchResponses(cards, selected?.pageUrl ?: pageUrl)
 
         return newHomePageResponse(
             list = HomePageList(
@@ -445,8 +505,73 @@ class AnichinProvider : MainAPI() {
                 list = home,
                 isHorizontalImages = false
             ),
-            hasNext = hasNext
+            hasNext = selected?.hasNext ?: false
         )
+    }
+
+    private fun Document.toHomePageSnapshot(
+        pageUrl: String,
+        isLatestRelease: Boolean,
+        typeHint: TvType?
+    ): HomePageSnapshot? {
+        val cards = if (isLatestRelease) {
+            latestReleaseArticles()
+                .mapNotNull { it.toCardData() }
+                .distinctBy { it.href }
+        } else {
+            archiveArticles(typeHint)
+        }
+
+        if (cards.isEmpty()) return null
+
+        val hasNext = selectFirst(
+            "a.next.page-numbers, .pagination .next a, .hpage a.r, a[rel=next]"
+        ) != null
+
+        return HomePageSnapshot(
+            cards = cards,
+            hasNext = hasNext,
+            pageUrl = pageUrl,
+            savedAtMs = System.currentTimeMillis()
+        )
+    }
+
+    private fun refreshHomePageInBackground(
+        cacheKey: String,
+        pageUrl: String,
+        isLatestRelease: Boolean,
+        typeHint: TvType?
+    ) {
+        if (!homeRefreshInFlight.add(cacheKey)) return
+
+        posterWarmupScope.launch {
+            try {
+                val document = fetchSiteDocument(pageUrl)
+                val snapshot = document.toHomePageSnapshot(
+                    pageUrl = pageUrl,
+                    isLatestRelease = isLatestRelease,
+                    typeHint = typeHint
+                )
+
+                if (snapshot != null) {
+                    homePageCache[cacheKey] = snapshot
+                    Log.i(
+                        "Anichin",
+                        "ANICHIN_V50_HOME_REFRESH key=$cacheKey cards=${snapshot.cards.size}"
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (error: Throwable) {
+                Log.w(
+                    "Anichin",
+                    "ANICHIN_V50_HOME_REFRESH_FAILED key=$cacheKey " +
+                        "error=${error.javaClass.simpleName}"
+                )
+            } finally {
+                homeRefreshInFlight.remove(cacheKey)
+            }
+        }
     }
 
     private fun buildArchivePageUrl(route: String, page: Int): String {
@@ -1735,13 +1860,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V49_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V50_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V49_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V50_DONE candidates=0 success=false")
             return false
         }
 
@@ -1886,7 +2011,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V49_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V50_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -1910,8 +2035,7 @@ class AnichinProvider : MainAPI() {
     }
 
     companion object {
-        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest__"
-        private const val LATEST_ARCHIVE_ROUTE = "anime/?order=update"
+        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest_v50__"
         private val LATEST_HEADING_LABELS = listOf(
             "Latest Release",
             "Latest Update",
@@ -1961,6 +2085,9 @@ class AnichinProvider : MainAPI() {
         private const val FALLBACK_PIPELINE_TIMEOUT_MS = 4_500L
         private const val PREFERRED_GROUP_TIMEOUT_MS = 7_000L
         private const val FALLBACK_GROUP_TIMEOUT_MS = 5_000L
+        private const val HOME_FAST_TIMEOUT_SECONDS = 5L
+        private const val HOME_SYNC_REVALIDATE_AFTER_MS = 2 * 60 * 1_000L
+        private const val HOME_BACKGROUND_REFRESH_AFTER_MS = 45_000L
         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
         private const val POSTER_TIMEOUT_MS = 10_000L
         private const val LABELED_SERVER_RANK = 100
