@@ -1038,9 +1038,9 @@ class AnichinProvider : MainAPI() {
     ): ExtractorLink {
         val serverName = serverDisplayName(serverLabel, link.url)
         val displayName = if (qualityLabel(link) == "Auto") {
-    "$serverName • Auto"
-} else {
-    serverName •
+          "$serverName • Auto"
+        } else {
+           serverName
         }
 
         return newExtractorLink(
