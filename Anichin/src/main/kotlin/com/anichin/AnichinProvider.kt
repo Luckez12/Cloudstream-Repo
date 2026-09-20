@@ -160,11 +160,6 @@ class AnichinProvider : MainAPI() {
         val url: String
     )
 
-    private data class ServerLinkCandidate(
-        val player: PlayerOption,
-        val link: ExtractorLink
-    )
-
     private fun Element.getImageUrl(preferThumbnail: Boolean = false): String? {
         fun srcset(value: String): String? {
             val candidates = value
@@ -1037,16 +1032,6 @@ class AnichinProvider : MainAPI() {
         return if (qualityLabel(link) == "Auto") Int.MAX_VALUE else link.quality
     }
 
-    private fun serverOrder(name: String): Int {
-        val value = name.lowercase()
-        return when {
-            value.contains("ok.ru") || value.contains("okru") -> 0
-            value.contains("rumble") -> 1
-            value.contains("dailymotion") -> 2
-            else -> 10
-        }
-    }
-
     private suspend fun withWebsiteServerName(
         link: ExtractorLink,
         serverLabel: String
@@ -1604,86 +1589,122 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V40_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V41_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V40_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V41_DONE candidates=0 success=false")
             return false
         }
 
-        val discoveredLinks: MutableList<ServerLinkCandidate> =
-            Collections.synchronizedList(mutableListOf())
+        val emittedUrls: MutableSet<String> =
+            ConcurrentHashMap.newKeySet()
+        val emittedServerQualities: MutableSet<String> =
+            ConcurrentHashMap.newKeySet()
+        val emittedCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val emissionLock = Any()
 
-        collectTwoLane(players) { player ->
+        suspend fun resolveAndEmit(player: PlayerOption): Boolean {
             val serverAttempts: MutableSet<String> =
                 ConcurrentHashMap.newKeySet()
+            val serverLinks: MutableList<ExtractorLink> =
+                Collections.synchronizedList(mutableListOf())
 
-            resolvePlayerPipeline(
-                player.url,
-                data,
-                player.label,
-                serverAttempts,
-                effectiveSubtitleCallback,
-                { link ->
-                    discoveredLinks.add(
-                        ServerLinkCandidate(player, link)
-                    )
-                }
-            )
-        }
+            val pipelineTimeout = if (player.priority() <= 2) {
+                PREFERRED_PIPELINE_TIMEOUT_MS
+            } else {
+                FALLBACK_PIPELINE_TIMEOUT_MS
+            }
 
-        val displayLinks = discoveredLinks
-            .filter { candidate -> isAllowedQuality(candidate.link) }
-            .groupBy { candidate -> candidate.link.url }
-            .values
-            .mapNotNull { sameUrl ->
-                sameUrl.maxByOrNull { candidate ->
-                    playerLabelScore(candidate.player.label)
-                }
-            }
-            .groupBy { candidate ->
-                val serverName = serverDisplayName(
-                    candidate.player.label,
-                    candidate.link.url
-                ).lowercase()
-                serverName to qualityLabel(candidate.link)
-            }
-            .values
-            .mapNotNull { sameServerAndQuality ->
-                sameServerAndQuality.maxByOrNull { candidate ->
-                    extractorLinkScore(candidate.link)
-                }
-            }
-            .sortedWith(
-                compareBy<ServerLinkCandidate> { candidate ->
-                    serverOrder(
-                        serverDisplayName(
-                            candidate.player.label,
-                            candidate.link.url
-                        )
-                    )
-                }.thenBy { candidate -> candidate.player.priority() }
-                    .thenByDescending { candidate -> qualityOrder(candidate.link) }
-            )
-
-        displayLinks.forEach { candidate ->
-            callback(
-                withWebsiteServerName(
-                    candidate.link,
-                    candidate.player.label
+            withTimeoutOrNull(pipelineTimeout) {
+                resolvePlayerPipeline(
+                    player.url,
+                    data,
+                    player.label,
+                    serverAttempts,
+                    effectiveSubtitleCallback,
+                    { link -> serverLinks.add(link) }
                 )
-            )
+            }
+
+            val orderedLinks = serverLinks
+                .filter(::isAllowedQuality)
+                .distinctBy { link -> link.url }
+                .groupBy(::qualityLabel)
+                .values
+                .mapNotNull { sameQuality ->
+                    sameQuality.maxByOrNull(::extractorLinkScore)
+                }
+                .sortedWith(
+                    compareByDescending<ExtractorLink>(::isAdaptiveMaster)
+                        .thenByDescending(::qualityOrder)
+                )
+
+            var emittedForServer = false
+
+            for (link in orderedLinks) {
+                val serverName = serverDisplayName(player.label, link.url)
+                val displayKey = "$serverName\u0000${qualityLabel(link)}"
+
+                val shouldEmit = synchronized(emissionLock) {
+                    val normalizedKey = displayKey.lowercase()
+                    if (
+                        emittedUrls.contains(link.url) ||
+                        emittedServerQualities.contains(normalizedKey)
+                    ) {
+                        false
+                    } else {
+                        emittedUrls.add(link.url)
+                        emittedServerQualities.add(normalizedKey)
+                        true
+                    }
+                }
+
+                if (shouldEmit) {
+                    callback(withWebsiteServerName(link, player.label))
+                    emittedCount.incrementAndGet()
+                    emittedForServer = true
+                }
+            }
+
+            return emittedForServer
         }
 
-        val success = displayLinks.isNotEmpty()
+        val preferredPlayers = players.filter { it.priority() <= 2 }
+        val fallbackPlayers = players.filter { it.priority() > 2 }
+
+        val preferredSuccess = withTimeoutOrNull(
+            PREFERRED_GROUP_TIMEOUT_MS
+        ) {
+            collectSuccessful(
+                preferredPlayers,
+                PREFERRED_SERVER_CONCURRENCY,
+                ::resolveAndEmit
+            )
+        } ?: (emittedCount.get() > 0)
+
+        val fallbackAttempted = !preferredSuccess && emittedCount.get() == 0
+
+        val fallbackSuccess = if (fallbackAttempted) {
+            withTimeoutOrNull(FALLBACK_GROUP_TIMEOUT_MS) {
+                collectSuccessful(
+                    fallbackPlayers,
+                    FALLBACK_SERVER_CONCURRENCY,
+                    ::resolveAndEmit
+                )
+            } ?: (emittedCount.get() > 0)
+        } else {
+            false
+        }
+
+        val success = preferredSuccess || fallbackSuccess || emittedCount.get() > 0
 
         Log.w(
             "Anichin",
-            "ANICHIN_V40_DONE candidates=${players.size} discovered=${discoveredLinks.size} " +
-                "emitted=${displayLinks.size} success=$success"
+            "ANICHIN_V41_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+                "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
         return success
@@ -1739,10 +1760,16 @@ class AnichinProvider : MainAPI() {
         private const val FAST_LANE_CONCURRENCY = 4
         private const val FULL_LANE_CONCURRENCY = 4
         private const val MAX_NESTED_CONCURRENCY = 3
+        private const val PREFERRED_SERVER_CONCURRENCY = 3
+        private const val FALLBACK_SERVER_CONCURRENCY = 3
 
         private const val EPISODE_REQUEST_TIMEOUT_MS = 10_000L
         private const val PLAYER_REQUEST_TIMEOUT_MS = 10_000L
         private const val EXTRACTOR_TIMEOUT_MS = 12_000L
+        private const val PREFERRED_PIPELINE_TIMEOUT_MS = 5_500L
+        private const val FALLBACK_PIPELINE_TIMEOUT_MS = 6_000L
+        private const val PREFERRED_GROUP_TIMEOUT_MS = 6_000L
+        private const val FALLBACK_GROUP_TIMEOUT_MS = 8_000L
         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
         private const val POSTER_TIMEOUT_MS = 10_000L
         private const val POSTER_WARMUP_DELAY_MS = 500L
