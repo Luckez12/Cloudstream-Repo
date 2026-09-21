@@ -295,13 +295,13 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V61_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V62_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
         )
 
         if (isLatestRelease) {
             Log.i(
                 "Anichin",
-                "ANICHIN_V61_LATEST page=$page source=$source first=" +
+                "ANICHIN_V62_LATEST page=$page source=$source first=" +
                     cards.take(LATEST_DIAGNOSTIC_LIMIT)
                         .joinToString(" | ") { it.title }
             )
@@ -363,7 +363,7 @@ class AnichinProvider : MainAPI() {
                 ?.firstOrNull { child -> child.hasClass("listupd") }
 
             directList?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let {
-                Log.i("Anichin", "ANICHIN_V61_LATEST_BLOCK mode=child depth=$depth")
+                Log.i("Anichin", "ANICHIN_V62_LATEST_BLOCK mode=child depth=$depth")
                 return it
             }
 
@@ -373,7 +373,7 @@ class AnichinProvider : MainAPI() {
                     sibling?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let { articles ->
                         Log.i(
                             "Anichin",
-                            "ANICHIN_V61_LATEST_BLOCK mode=sibling depth=$depth"
+                            "ANICHIN_V62_LATEST_BLOCK mode=sibling depth=$depth"
                         )
                         return articles
                     }
@@ -393,7 +393,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V61_LATEST_BLOCK mode=fallback cards=${fallback.size}"
+            "ANICHIN_V62_LATEST_BLOCK mode=fallback cards=${fallback.size}"
         )
         return fallback
     }
@@ -451,7 +451,7 @@ class AnichinProvider : MainAPI() {
             val fixed = card.poster?.let { fixUrlNull(it) }
             Log.i(
                 "Anichin",
-                "ANICHIN_V61_POSTER index=${index + 1} " +
+                "ANICHIN_V62_POSTER index=${index + 1} " +
                     "source=${card.posterSource} host=${fixed?.let(::hostOf).orEmpty()} " +
                     "url=${fixed.orEmpty()}"
             )
@@ -756,7 +756,7 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V61_DETAIL_POSTER source=$posterSource " +
+            "ANICHIN_V62_DETAIL_POSTER source=$posterSource " +
                 "host=${fixedPoster?.let(::hostOf).orEmpty()} url=$poster"
         )
 
@@ -933,7 +933,7 @@ class AnichinProvider : MainAPI() {
 
             Log.i(
                 "Anichin",
-                "ANICHIN_V61_EPISODES mode=$episodeSource " +
+                "ANICHIN_V62_EPISODES mode=$episodeSource " +
                     "count=${resolvedEpisodes.size} title=$responseTitle"
             )
 
@@ -1093,19 +1093,32 @@ class AnichinProvider : MainAPI() {
             .replace(Regex("""\s+"""), " ")
             .trim()
 
-        if (playerLabelScore(cleanLabel) >= 10) return cleanLabel
-
         val host = runCatching { URI(url).host.orEmpty().lowercase() }
             .getOrDefault("")
+
+        val hasWebsiteLabel = playerLabelScore(cleanLabel) >= 10
+
+        // Keep explicit website labels bound to their wrapper. "New Player"
+        // is the only ambiguous label because the site currently uses it for
+        // more than one unrelated host.
+        if (
+            hasWebsiteLabel &&
+            !cleanLabel.equals("New Player", ignoreCase = true)
+        ) {
+            return cleanLabel
+        }
 
         return when {
             host.contains("dailymotion") || host.contains("dmcdn") -> "Dailymotion"
             host == "ok.ru" || host.endsWith(".ok.ru") ||
                 host.contains("odnoklassniki") || host.contains("mycdn") -> "OK.ru"
             host.contains("rumble") -> "Rumble"
+            host.contains("rpmvid") -> "RPM Share"
+            host == "d.tube" || host.endsWith(".d.tube") -> "D-Tube"
+            host.contains("turbovidhls") -> "TurboVid"
+            host.contains("abyssplayer") -> "AbyssPlayer"
             host.contains("morencius") || host.contains("vidhide") -> "Vidhide"
-            host.contains("anichin-player") -> "New Player"
-            host.contains("anichin.stream") -> "Anichin Stream"
+            host.contains("anichin-player") -> "Dailymotion"
             host.contains("drive.google") || host.contains("googleusercontent") -> "Google Drive"
             host.contains("streamruby") || host.contains("rubyvid") -> "StreamRuby"
             host.contains("streamwish") || host.contains("wish") -> "StreamWish"
@@ -1113,8 +1126,9 @@ class AnichinProvider : MainAPI() {
             host.contains("filemoon") -> "Filemoon"
             host.contains("streamtape") -> "Streamtape"
             host.contains("mixdrop") -> "Mixdrop"
+            hasWebsiteLabel -> cleanLabel
             host.isNotBlank() -> host.removePrefix("www.")
-            else -> "Anichin"
+            else -> "Server"
         }
     }
 
@@ -1158,11 +1172,10 @@ class AnichinProvider : MainAPI() {
         return if (qualityLabel(link) == "Auto") Int.MAX_VALUE else link.quality
     }
 
-    private suspend fun withWebsiteServerName(
+    private fun withWebsiteServerName(
         link: ExtractorLink,
-        serverLabel: String
+        serverName: String
     ): ExtractorLink {
-        val serverName = serverDisplayName(serverLabel, link.url)
         val displayName = if (qualityLabel(link) == "Auto") {
           "$serverName • Auto"
         } else {
@@ -1711,13 +1724,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V61_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V62_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V61_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V62_DONE candidates=0 success=false")
             return false
         }
 
@@ -1768,6 +1781,14 @@ class AnichinProvider : MainAPI() {
                 .filterNot(::isAdaptiveMaster)
                 .sortedByDescending(::qualityOrder)
 
+            // Resolve the display name from the original website option and
+            // wrapper URL once. Nested extractors must not rename the result
+            // after following a CDN or another internal player.
+            val resolvedServerName = serverDisplayName(
+                player.label,
+                player.url
+            )
+
             // Pass the website's native master URL straight to Cloudstream.
             // Rebuilding it as a data URI delays startup and is unsupported by
             // some ExoPlayer/Cloudstream versions.
@@ -1780,8 +1801,7 @@ class AnichinProvider : MainAPI() {
             var emittedForServer = false
 
             for (link in orderedLinks) {
-                val serverName = serverDisplayName(player.label, link.url)
-                val displayKey = "$serverName\u0000${qualityLabel(link)}"
+                val displayKey = "$resolvedServerName\u0000${qualityLabel(link)}"
 
                 val shouldEmit = synchronized(emissionLock) {
                     val normalizedKey = displayKey.lowercase()
@@ -1798,7 +1818,7 @@ class AnichinProvider : MainAPI() {
                 }
 
                 if (shouldEmit) {
-                    callback(withWebsiteServerName(link, player.label))
+                    callback(withWebsiteServerName(link, resolvedServerName))
                     emittedCount.incrementAndGet()
                     emittedForServer = true
                 }
@@ -1862,7 +1882,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V61_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V62_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -1876,11 +1896,14 @@ class AnichinProvider : MainAPI() {
             value.contains("ok.ru") || value.contains("okru") || value.contains("odnoklassniki") -> 0
             value.contains("rumble") -> 1
             value.contains("dailymotion") -> 2
-            value.contains("anichin.stream") -> 3
-            value.contains("anichin-player.web.id") -> 4
-            value.contains("streamruby") || value.contains("ruby") -> 5
-            value.contains("emturbovid") || value.contains("turboviplay") -> 6
-            value.contains("morencius") || value.contains("vidhide") -> 7
+            value.contains("anichin-player.web.id") -> 3
+            value.contains("streamruby") || value.contains("ruby") -> 4
+            value.contains("rpmvid") -> 5
+            value.contains("d.tube") -> 6
+            value.contains("turbovidhls") || value.contains("turboviplay") ||
+                value.contains("emturbovid") -> 7
+            value.contains("abyssplayer") -> 8
+            value.contains("morencius") || value.contains("vidhide") -> 9
             else -> 20
         }
     }
@@ -1907,7 +1930,10 @@ class AnichinProvider : MainAPI() {
             "dailymotion",
             "rumble",
             "anichin-player.web.id",
-            "anichin.stream",
+            "rpmvid",
+            "d.tube",
+            "turbovidhls",
+            "abyssplayer",
             "streamruby",
             "rubyvid",
             "emturbovid",
