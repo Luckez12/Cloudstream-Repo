@@ -295,13 +295,13 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V57_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V58_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
         )
 
         if (isLatestRelease) {
             Log.i(
                 "Anichin",
-                "ANICHIN_V57_LATEST page=$page source=$source first=" +
+                "ANICHIN_V58_LATEST page=$page source=$source first=" +
                     cards.take(LATEST_DIAGNOSTIC_LIMIT)
                         .joinToString(" | ") { it.title }
             )
@@ -348,8 +348,12 @@ class AnichinProvider : MainAPI() {
                 }
             }
 
-        fun Element.directArticles(): List<Element> = children().filter { child ->
-            child.tagName().equals("article", ignoreCase = true)
+        fun Element.scopedArticles(): List<Element> {
+            val direct = children().filter { child ->
+                child.tagName().equals("article", ignoreCase = true)
+            }
+            return direct.takeIf { it.isNotEmpty() }
+                ?: select("article").toList()
         }
 
         var scope = latestHeading?.parent()
@@ -358,18 +362,18 @@ class AnichinProvider : MainAPI() {
                 ?.children()
                 ?.firstOrNull { child -> child.hasClass("listupd") }
 
-            directList?.directArticles()?.takeIf { it.isNotEmpty() }?.let {
-                Log.i("Anichin", "ANICHIN_V57_LATEST_BLOCK mode=child depth=$depth")
+            directList?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let {
+                Log.i("Anichin", "ANICHIN_V58_LATEST_BLOCK mode=child depth=$depth")
                 return it
             }
 
             var sibling = scope?.nextElementSibling()
             repeat(LATEST_SIBLING_SEARCH_LIMIT) {
                 if (sibling?.hasClass("listupd") == true) {
-                    sibling?.directArticles()?.takeIf { it.isNotEmpty() }?.let { articles ->
+                    sibling?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let { articles ->
                         Log.i(
                             "Anichin",
-                            "ANICHIN_V57_LATEST_BLOCK mode=sibling depth=$depth"
+                            "ANICHIN_V58_LATEST_BLOCK mode=sibling depth=$depth"
                         )
                         return articles
                     }
@@ -382,14 +386,14 @@ class AnichinProvider : MainAPI() {
 
         val fallback = select("div.listupd")
             .map { list ->
-                list.directArticles()
+                list.scopedArticles()
             }
             .firstOrNull { it.isNotEmpty() }
             .orEmpty()
 
         Log.w(
             "Anichin",
-            "ANICHIN_V57_LATEST_BLOCK mode=fallback cards=${fallback.size}"
+            "ANICHIN_V58_LATEST_BLOCK mode=fallback cards=${fallback.size}"
         )
         return fallback
     }
@@ -447,7 +451,7 @@ class AnichinProvider : MainAPI() {
             val fixed = card.poster?.let { fixUrlNull(it) }
             Log.i(
                 "Anichin",
-                "ANICHIN_V57_POSTER index=${index + 1} " +
+                "ANICHIN_V58_POSTER index=${index + 1} " +
                     "source=${card.posterSource} host=${fixed?.let(::hostOf).orEmpty()} " +
                     "url=${fixed.orEmpty()}"
             )
@@ -752,7 +756,7 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V57_DETAIL_POSTER source=$posterSource " +
+            "ANICHIN_V58_DETAIL_POSTER source=$posterSource " +
                 "host=${fixedPoster?.let(::hostOf).orEmpty()} url=$poster"
         )
 
@@ -1662,13 +1666,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V57_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V58_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V57_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V58_DONE candidates=0 success=false")
             return false
         }
 
@@ -1813,7 +1817,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V57_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V58_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -1837,11 +1841,12 @@ class AnichinProvider : MainAPI() {
     }
 
     companion object {
-        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest_v57_live_block__"
+        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest_v58_rilisan_terbaru__"
         private const val LATEST_ARCHIVE_ROUTE = "anime/?order=update"
         private val LATEST_HEADING_LABELS = listOf(
             "Latest Release",
             "Latest Update",
+            "Rilisan Terbaru",
             "Rilis Terbaru",
             "Episode Terbaru",
             "Update Terbaru"
