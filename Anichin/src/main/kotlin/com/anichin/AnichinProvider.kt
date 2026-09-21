@@ -427,7 +427,7 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V54_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V55_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
         )
 
         val home = buildSearchResponses(cards, pageUrl)
@@ -542,7 +542,13 @@ class AnichinProvider : MainAPI() {
             }
         }
 
-        warmPosterCache(cards, pageReferer)
+        // Let Cloudstream load raw URLs lazily with the saved Cloudflare
+        // cookies. Only prime the first visible row as a protected-image
+        // fallback instead of queueing every card on the homepage.
+        warmPosterCache(
+            cards.take(HOME_POSTER_WARMUP_LIMIT),
+            pageReferer
+        )
         return responses
     }
 
@@ -822,10 +828,10 @@ class AnichinProvider : MainAPI() {
                     ?.trim()
         )
 
-        val poster = (
-            inlinePoster(rawPoster, detailUrl)
-                ?: rawPoster?.let { fixUrlNull(it) }
-        ).orEmpty()
+        val fixedPoster = rawPoster?.let { fixUrlNull(it) }
+        val poster = fixedPoster
+            ?.let { posterCache[it] ?: it }
+            .orEmpty()
 
         val description = extractSynopsis(document)
 
@@ -839,6 +845,14 @@ class AnichinProvider : MainAPI() {
         } else {
             TvType.TvSeries
         }
+
+        // Metadata must not wait behind homepage poster downloads. Prime this
+        // poster after returning the raw URL; a later rebind/visit can use the
+        // cached data URI if the image host rejects Cloudstream's direct load.
+        warmPosterCache(
+            listOf(CardData(title, detailUrl, fixedPoster, tvType)),
+            detailUrl
+        )
 
         return if (tvType == TvType.TvSeries) {
 
@@ -1732,13 +1746,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V54_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V55_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V54_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V55_DONE candidates=0 success=false")
             return false
         }
 
@@ -1883,7 +1897,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V54_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V55_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -1907,7 +1921,7 @@ class AnichinProvider : MainAPI() {
     }
 
     companion object {
-        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest_v54_gate__"
+        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest_v55_posters__"
         private const val LATEST_ARCHIVE_ROUTE = "anime/?order=update"
         private val LATEST_HEADING_LABELS = listOf(
             "Latest Release",
@@ -1966,8 +1980,9 @@ class AnichinProvider : MainAPI() {
         private const val DIRECT_IFRAME_RANK = 30
         private const val EMBEDDED_TEXT_RANK = 10
         private const val NESTED_FALLBACK_RANK = 0
-        private const val POSTER_WARMUP_DELAY_MS = 500L
-        private const val POSTER_CONCURRENCY = 2
+        private const val POSTER_WARMUP_DELAY_MS = 2_000L
+        private const val POSTER_CONCURRENCY = 4
+        private const val HOME_POSTER_WARMUP_LIMIT = 4
         private const val MIN_POSTER_WIDTH = 300
         private const val MAX_POSTER_CACHE_ENTRIES = 48
         private const val MAX_POSTER_BYTES = 4_000_000
