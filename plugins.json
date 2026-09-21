@@ -22,10 +22,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://anichin.moe&size=%size%",
-        "fileHash": "sha256-fcb6662560e5258c97833a13daa39dedaebc62bf5dab35ffa9e93b1964799a8b",
+        "fileHash": "sha256-1d155fa6e0a0eb03c6f902c53b49cefe46e115bb448536046bfd06acf6f95422",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 123495,
+        "fileSize": 123557,
         "status": 1,
         "language": "id",
         "authors": [
@@ -35,7 +35,7 @@
             "Anime",
             "Movie"
         ],
-        "version": 57,
+        "version": 58,
         "internalName": "Anichin",
         "description": "Anichin \u2014 Streaming Donghua Subtitle Indonesia",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/Anichin.cs3",
