@@ -295,13 +295,13 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V60_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V61_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
         )
 
         if (isLatestRelease) {
             Log.i(
                 "Anichin",
-                "ANICHIN_V60_LATEST page=$page source=$source first=" +
+                "ANICHIN_V61_LATEST page=$page source=$source first=" +
                     cards.take(LATEST_DIAGNOSTIC_LIMIT)
                         .joinToString(" | ") { it.title }
             )
@@ -363,7 +363,7 @@ class AnichinProvider : MainAPI() {
                 ?.firstOrNull { child -> child.hasClass("listupd") }
 
             directList?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let {
-                Log.i("Anichin", "ANICHIN_V60_LATEST_BLOCK mode=child depth=$depth")
+                Log.i("Anichin", "ANICHIN_V61_LATEST_BLOCK mode=child depth=$depth")
                 return it
             }
 
@@ -373,7 +373,7 @@ class AnichinProvider : MainAPI() {
                     sibling?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let { articles ->
                         Log.i(
                             "Anichin",
-                            "ANICHIN_V60_LATEST_BLOCK mode=sibling depth=$depth"
+                            "ANICHIN_V61_LATEST_BLOCK mode=sibling depth=$depth"
                         )
                         return articles
                     }
@@ -393,7 +393,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V60_LATEST_BLOCK mode=fallback cards=${fallback.size}"
+            "ANICHIN_V61_LATEST_BLOCK mode=fallback cards=${fallback.size}"
         )
         return fallback
     }
@@ -451,7 +451,7 @@ class AnichinProvider : MainAPI() {
             val fixed = card.poster?.let { fixUrlNull(it) }
             Log.i(
                 "Anichin",
-                "ANICHIN_V60_POSTER index=${index + 1} " +
+                "ANICHIN_V61_POSTER index=${index + 1} " +
                     "source=${card.posterSource} host=${fixed?.let(::hostOf).orEmpty()} " +
                     "url=${fixed.orEmpty()}"
             )
@@ -756,7 +756,7 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V60_DETAIL_POSTER source=$posterSource " +
+            "ANICHIN_V61_DETAIL_POSTER source=$posterSource " +
                 "host=${fixedPoster?.let(::hostOf).orEmpty()} url=$poster"
         )
 
@@ -933,7 +933,7 @@ class AnichinProvider : MainAPI() {
 
             Log.i(
                 "Anichin",
-                "ANICHIN_V60_EPISODES mode=$episodeSource " +
+                "ANICHIN_V61_EPISODES mode=$episodeSource " +
                     "count=${resolvedEpisodes.size} title=$responseTitle"
             )
 
@@ -1711,13 +1711,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V60_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V61_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V60_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V61_DONE candidates=0 success=false")
             return false
         }
 
@@ -1862,7 +1862,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V60_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V61_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
