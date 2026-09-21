@@ -93,8 +93,9 @@ class AnichinProvider : MainAPI() {
     /**
      * Fetch an Anichin page and invoke Cloudstream's WebView challenge solver
      * when the site answers with an anti-bot status or returns a successful
-     * HTTP response containing a challenge page. Clearance cookies are cached
-     * and shared for later home, search, detail and episode requests.
+     * HTTP response containing a challenge page. When no clearance exists,
+     * only one request is allowed to enter the solver; concurrent homepage
+     * sections wait for it and then reuse the same cached cookies.
      */
     private suspend fun fetchSiteDocument(
         url: String,
@@ -123,46 +124,42 @@ class AnichinProvider : MainAPI() {
                 throw IllegalStateException("Cloudflare challenge from $host")
             }
 
+            sharedSiteReadyHosts.add(host)
             return document
         }
 
-        if (sharedCloudflareKiller.savedCookies.containsKey(host)) {
+        val cookiesAtStart = sharedCloudflareKiller.savedCookies[host]
+        if (cookiesAtStart != null || sharedSiteReadyHosts.contains(host)) {
             try {
                 return requestWithCloudflare()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Throwable) {
-                sharedCloudflareKiller.savedCookies.remove(host)
+                sharedCloudflareMutex.withLock {
+                    sharedSiteReadyHosts.remove(host)
+                    if (sharedCloudflareKiller.savedCookies[host] == cookiesAtStart) {
+                        sharedCloudflareKiller.savedCookies.remove(host)
+                    }
+                }
             }
         }
 
-        val first = app.get(
-            url,
-            headers = siteHeaders,
-            referer = referer,
-            timeout = SITE_REQUEST_TIMEOUT_SECONDS
-        )
-
-        if (first.code !in CLOUDFLARE_STATUS_CODES) {
-            if (!first.isSuccessful) {
-                val status = first.code
-                first.okhttpResponse.close()
-                throw IllegalStateException("HTTP $status from $host")
+        val bootstrapDocument = sharedCloudflareMutex.withLock {
+            if (
+                sharedCloudflareKiller.savedCookies.containsKey(host) ||
+                sharedSiteReadyHosts.contains(host)
+            ) {
+                return@withLock null
             }
-            val document = first.document
-            if (!document.isCloudflareChallenge()) {
-                return document
-            }
-        }
 
-        first.okhttpResponse.close()
-
-        return sharedCloudflareMutex.withLock {
-            if (sharedCloudflareKiller.savedCookies.containsKey(host)) {
-                return@withLock requestWithCloudflare()
-            }
             requestWithCloudflare()
         }
+
+        if (bootstrapDocument != null) return bootstrapDocument
+
+        // The first request has completed the challenge. Waiting sections can
+        // now continue in parallel using the shared clearance cookies.
+        return requestWithCloudflare()
     }
 
     private fun Document.isCloudflareChallenge(): Boolean {
@@ -430,7 +427,7 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V49_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V54_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
         )
 
         val home = buildSearchResponses(cards, pageUrl)
@@ -1735,13 +1732,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V49_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V54_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V49_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V54_DONE candidates=0 success=false")
             return false
         }
 
@@ -1886,7 +1883,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V49_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V54_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -1910,7 +1907,7 @@ class AnichinProvider : MainAPI() {
     }
 
     companion object {
-        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest_v53_rollback__"
+        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest_v54_gate__"
         private const val LATEST_ARCHIVE_ROUTE = "anime/?order=update"
         private val LATEST_HEADING_LABELS = listOf(
             "Latest Release",
@@ -1921,7 +1918,8 @@ class AnichinProvider : MainAPI() {
         )
         private val sharedCloudflareKiller by lazy { CloudflareCompat() }
         private val sharedCloudflareMutex = Mutex()
-        private val CLOUDFLARE_STATUS_CODES = setOf(403, 429, 503)
+        private val sharedSiteReadyHosts: MutableSet<String> =
+            ConcurrentHashMap.newKeySet()
 
         private val PLAYER_HOST_HINTS = listOf(
             "ok.ru",
