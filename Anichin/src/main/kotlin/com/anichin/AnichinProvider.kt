@@ -295,13 +295,13 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V58_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V59_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
         )
 
         if (isLatestRelease) {
             Log.i(
                 "Anichin",
-                "ANICHIN_V58_LATEST page=$page source=$source first=" +
+                "ANICHIN_V59_LATEST page=$page source=$source first=" +
                     cards.take(LATEST_DIAGNOSTIC_LIMIT)
                         .joinToString(" | ") { it.title }
             )
@@ -363,7 +363,7 @@ class AnichinProvider : MainAPI() {
                 ?.firstOrNull { child -> child.hasClass("listupd") }
 
             directList?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let {
-                Log.i("Anichin", "ANICHIN_V58_LATEST_BLOCK mode=child depth=$depth")
+                Log.i("Anichin", "ANICHIN_V59_LATEST_BLOCK mode=child depth=$depth")
                 return it
             }
 
@@ -373,7 +373,7 @@ class AnichinProvider : MainAPI() {
                     sibling?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let { articles ->
                         Log.i(
                             "Anichin",
-                            "ANICHIN_V58_LATEST_BLOCK mode=sibling depth=$depth"
+                            "ANICHIN_V59_LATEST_BLOCK mode=sibling depth=$depth"
                         )
                         return articles
                     }
@@ -393,7 +393,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V58_LATEST_BLOCK mode=fallback cards=${fallback.size}"
+            "ANICHIN_V59_LATEST_BLOCK mode=fallback cards=${fallback.size}"
         )
         return fallback
     }
@@ -451,7 +451,7 @@ class AnichinProvider : MainAPI() {
             val fixed = card.poster?.let { fixUrlNull(it) }
             Log.i(
                 "Anichin",
-                "ANICHIN_V58_POSTER index=${index + 1} " +
+                "ANICHIN_V59_POSTER index=${index + 1} " +
                     "source=${card.posterSource} host=${fixed?.let(::hostOf).orEmpty()} " +
                     "url=${fixed.orEmpty()}"
             )
@@ -756,7 +756,7 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V58_DETAIL_POSTER source=$posterSource " +
+            "ANICHIN_V59_DETAIL_POSTER source=$posterSource " +
                 "host=${fixedPoster?.let(::hostOf).orEmpty()} url=$poster"
         )
 
@@ -775,8 +775,32 @@ class AnichinProvider : MainAPI() {
 
         return if (tvType == TvType.TvSeries) {
 
-            val episodes = document
-                .select(".eplister li")
+            /*
+             * Series pages expose their rows through .eplister. The cards in
+             * Latest Release, however, point directly to an episode page.
+             * Those pages already contain the full series list in the
+             * #singlepisode sidebar, so reuse it instead of making another
+             * network request to the series page.
+             */
+            val standardEpisodeRows = document.select(".eplister li")
+            val sidebarEpisodeRows = if (standardEpisodeRows.isEmpty()) {
+                document.select("#singlepisode .episodelist li")
+            } else {
+                emptyList()
+            }
+            val episodeRows = if (standardEpisodeRows.isNotEmpty()) {
+                standardEpisodeRows
+            } else {
+                sidebarEpisodeRows
+            }
+
+            val episodeSource = when {
+                standardEpisodeRows.isNotEmpty() -> "series-list"
+                sidebarEpisodeRows.isNotEmpty() -> "episode-sidebar"
+                else -> "single-fallback"
+            }
+
+            val episodes = episodeRows
                 .mapNotNull { episodeElement ->
 
                     val rawLink = episodeElement
@@ -792,7 +816,7 @@ class AnichinProvider : MainAPI() {
                     val link = fixUrl(rawLink)
 
                     val episodeTitle = episodeElement
-                        .selectFirst(".epl-title")
+                        .selectFirst(".epl-title, .playinfo h3")
                         ?.text()
                         ?.trim()
                         .orEmpty()
@@ -808,6 +832,14 @@ class AnichinProvider : MainAPI() {
                         ?.text()
                         ?.trim()
                         .orEmpty()
+                        .ifBlank {
+                            episodeElement
+                                .selectFirst(".playinfo span")
+                                ?.text()
+                                ?.substringAfter(" - ", "")
+                                ?.trim()
+                                .orEmpty()
+                        }
 
                     val episodePoster = poster
                         .takeIf { it.isNotBlank() }
@@ -860,11 +892,56 @@ class AnichinProvider : MainAPI() {
                 }
                 .reversed()
 
+            val resolvedEpisodes = episodes.ifEmpty {
+                val currentEpisodeNumber = episodeNumberFrom(
+                    document,
+                    detailUrl,
+                    title
+                )
+
+                listOf(
+                    newEpisode(detailUrl) {
+                        this.name = cleanEpisodeDisplayTitle(
+                            title,
+                            currentEpisodeNumber
+                        )
+                        this.posterUrl = poster.takeIf { it.isNotBlank() }
+
+                        if (
+                            currentEpisodeNumber != null &&
+                            currentEpisodeNumber % 1.0 == 0.0
+                        ) {
+                            this.episode = currentEpisodeNumber.toInt()
+                        }
+                    }
+                )
+            }
+
+            val seriesAnchor = document
+                .selectFirst("#singlepisode .headlist h2 a[href]")
+            val responseTitle = seriesAnchor
+                ?.text()
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: title
+            val responseUrl = seriesAnchor
+                ?.attr("href")
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { fixUrl(it) }
+                ?: detailUrl
+
+            Log.i(
+                "Anichin",
+                "ANICHIN_V59_EPISODES mode=$episodeSource " +
+                    "count=${resolvedEpisodes.size} title=$responseTitle"
+            )
+
             newTvSeriesLoadResponse(
-                title,
-                url,
+                responseTitle,
+                responseUrl,
                 TvType.Anime,
-                episodes
+                resolvedEpisodes
             ) {
                 this.posterUrl = poster.takeIf { it.isNotBlank() }
                 this.posterHeaders = imageHeadersFor(poster)
@@ -1666,13 +1743,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V58_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V59_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V58_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V59_DONE candidates=0 success=false")
             return false
         }
 
@@ -1817,7 +1894,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V58_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V59_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 

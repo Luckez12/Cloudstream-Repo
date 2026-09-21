@@ -1,4 +1,4 @@
-version = 58
+version = 59
 cloudstream {
     description = "Anichin — Streaming Donghua Subtitle Indonesia"
     language = "id"
