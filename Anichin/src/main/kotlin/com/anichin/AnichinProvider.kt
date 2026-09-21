@@ -264,7 +264,7 @@ class AnichinProvider : MainAPI() {
         }
 
         if (isLatestRelease) {
-            val homepageUrl = if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page/"
+            val homepageUrl = latestHomepageUrl(page)
             val homepageDocument = try {
                 fetchSiteDocument(homepageUrl)
             } catch (e: CancellationException) {
@@ -295,8 +295,17 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V56_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V57_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
         )
+
+        if (isLatestRelease) {
+            Log.i(
+                "Anichin",
+                "ANICHIN_V57_LATEST page=$page source=$source first=" +
+                    cards.take(LATEST_DIAGNOSTIC_LIMIT)
+                        .joinToString(" | ") { it.title }
+            )
+        }
 
         val home = buildSearchResponses(cards)
 
@@ -319,6 +328,12 @@ class AnichinProvider : MainAPI() {
         return "$mainUrl/$route${separator}page=$page"
     }
 
+    private fun latestHomepageUrl(page: Int): String {
+        val base = if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page/"
+        val freshnessBucket = System.currentTimeMillis() / LATEST_CACHE_BUCKET_MS
+        return "${base}?cs_latest=$freshnessBucket"
+    }
+
     private fun Document.archiveArticles(typeHint: TvType?): List<CardData> =
         select("div.listupd > article")
             .mapNotNull { it.toCardData(typeHint) }
@@ -333,24 +348,50 @@ class AnichinProvider : MainAPI() {
                 }
             }
 
-        var scope = latestHeading
-        repeat(6) {
-            scope = scope?.parent()
-            val articles = scope
-                ?.select("div.listupd > article")
-                ?.toList()
-                .orEmpty()
-            if (articles.isNotEmpty()) return articles
+        fun Element.directArticles(): List<Element> = children().filter { child ->
+            child.tagName().equals("article", ignoreCase = true)
         }
 
-        return select("div.listupd")
-            .map { list ->
-                list.children().filter { child ->
-                    child.tagName().equals("article", ignoreCase = true)
+        var scope = latestHeading?.parent()
+        repeat(LATEST_BLOCK_SEARCH_DEPTH) { depth ->
+            val directList = scope
+                ?.children()
+                ?.firstOrNull { child -> child.hasClass("listupd") }
+
+            directList?.directArticles()?.takeIf { it.isNotEmpty() }?.let {
+                Log.i("Anichin", "ANICHIN_V57_LATEST_BLOCK mode=child depth=$depth")
+                return it
+            }
+
+            var sibling = scope?.nextElementSibling()
+            repeat(LATEST_SIBLING_SEARCH_LIMIT) {
+                if (sibling?.hasClass("listupd") == true) {
+                    sibling?.directArticles()?.takeIf { it.isNotEmpty() }?.let { articles ->
+                        Log.i(
+                            "Anichin",
+                            "ANICHIN_V57_LATEST_BLOCK mode=sibling depth=$depth"
+                        )
+                        return articles
+                    }
                 }
+                sibling = sibling?.nextElementSibling()
+            }
+
+            scope = scope?.parent()
+        }
+
+        val fallback = select("div.listupd")
+            .map { list ->
+                list.directArticles()
             }
             .firstOrNull { it.isNotEmpty() }
             .orEmpty()
+
+        Log.w(
+            "Anichin",
+            "ANICHIN_V57_LATEST_BLOCK mode=fallback cards=${fallback.size}"
+        )
+        return fallback
     }
 
     private fun Element.toCardData(
@@ -406,7 +447,7 @@ class AnichinProvider : MainAPI() {
             val fixed = card.poster?.let { fixUrlNull(it) }
             Log.i(
                 "Anichin",
-                "ANICHIN_V56_POSTER index=${index + 1} " +
+                "ANICHIN_V57_POSTER index=${index + 1} " +
                     "source=${card.posterSource} host=${fixed?.let(::hostOf).orEmpty()} " +
                     "url=${fixed.orEmpty()}"
             )
@@ -711,7 +752,7 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V56_DETAIL_POSTER source=$posterSource " +
+            "ANICHIN_V57_DETAIL_POSTER source=$posterSource " +
                 "host=${fixedPoster?.let(::hostOf).orEmpty()} url=$poster"
         )
 
@@ -1621,13 +1662,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V56_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V57_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V56_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V57_DONE candidates=0 success=false")
             return false
         }
 
@@ -1772,7 +1813,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V56_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V57_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -1796,7 +1837,7 @@ class AnichinProvider : MainAPI() {
     }
 
     companion object {
-        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest_v56_native_posters__"
+        private const val HOMEPAGE_LATEST_ROUTE = "__homepage_latest_v57_live_block__"
         private const val LATEST_ARCHIVE_ROUTE = "anime/?order=update"
         private val LATEST_HEADING_LABELS = listOf(
             "Latest Release",
@@ -1849,6 +1890,10 @@ class AnichinProvider : MainAPI() {
         private const val PREFERRED_GROUP_TIMEOUT_MS = 7_000L
         private const val FALLBACK_GROUP_TIMEOUT_MS = 5_000L
         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
+        private const val LATEST_CACHE_BUCKET_MS = 5 * 60 * 1_000L
+        private const val LATEST_BLOCK_SEARCH_DEPTH = 4
+        private const val LATEST_SIBLING_SEARCH_LIMIT = 3
+        private const val LATEST_DIAGNOSTIC_LIMIT = 5
         private const val LABELED_SERVER_RANK = 100
         private const val DATA_ATTRIBUTE_RANK = 60
         private const val DIRECT_IFRAME_RANK = 30
