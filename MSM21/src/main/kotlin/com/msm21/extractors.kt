@@ -687,7 +687,7 @@ object MsmWebViewProbe {
         }.getOrDefault(value.substringBefore('?').take(120))
     }
 
-    private const val TAG = "MSM21_TRACE"
+    private const val TAG = "MSM21"
 
     private val BLOCKED_MEDIA_PARTS = listOf(
         "googlesyndication",

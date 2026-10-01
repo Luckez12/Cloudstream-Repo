@@ -78,7 +78,7 @@ internal object MsmMediaPolicy {
         val masters = checked.filter { it.state == "master" }
         val selected = if (masters.isNotEmpty()) listOf(masters.maxBy { it.link.quality })
             else checked.filter { it.state != "rejected" }
-        Log.i("MSM21_TRACE", "MSM21_V12_SELECT label=$label candidates=${checked.size} " +
+        Log.i("MSM21", "MSM21_V12_SELECT label=$label candidates=${checked.size} " +
             "masters=${masters.size} rejected=${checked.count { it.state == "rejected" }} emitted=${selected.size}")
         selected.map { result ->
             val link = result.link

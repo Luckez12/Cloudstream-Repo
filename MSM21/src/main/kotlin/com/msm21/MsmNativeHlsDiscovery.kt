@@ -58,10 +58,10 @@ internal object MsmNativeHlsDiscovery {
             withTimeoutOrNull(8_000L) {
                 val response = app.get(url, referer = referer,
                     headers = mapOf("User-Agent" to USER_AGENT), timeout = 4L)
-                Log.i("MSM21_TRACE", "MSM21_V12_NATIVE_PAGE host=$host http=${response.code}")
+                Log.i("MSM21", "MSM21_V12_NATIVE_PAGE host=$host http=${response.code}")
                 if (response.text.contains("_cf_chl_opt") ||
                     response.text.contains("challenges.cloudflare.com")) {
-                    Log.w("MSM21_TRACE", "MSM21_V12_NATIVE_BLOCKED host=$host kind=cloudflare")
+                    Log.w("MSM21", "MSM21_V12_NATIVE_BLOCKED host=$host kind=cloudflare")
                     return@withTimeoutOrNull
                 }
                 if (response.code !in 200..299) return@withTimeoutOrNull
@@ -77,7 +77,7 @@ internal object MsmNativeHlsDiscovery {
                         candidates.add(absolute.toString())
                     }
                 }
-                Log.i("MSM21_TRACE", "MSM21_V12_NATIVE_SCAN host=$host candidates=${candidates.size}")
+                Log.i("MSM21", "MSM21_V12_NATIVE_SCAN host=$host candidates=${candidates.size}")
                 val limiter = Semaphore(3)
                 // Complete each probe independently; already verified results survive a local timeout.
                 coroutineScope {
@@ -111,11 +111,11 @@ internal object MsmNativeHlsDiscovery {
                                             if (master) masters.add(link) else media.add(link)
                                         }
                                     }
-                                    Log.i("MSM21_TRACE", "MSM21_V12_NATIVE_PROBE host=$host http=${playlist.code} master=$master media=$validMedia")
+                                    Log.i("MSM21", "MSM21_V12_NATIVE_PROBE host=$host http=${playlist.code} master=$master media=$validMedia")
                                 }
                             } catch (e: CancellationException) { throw e }
                             catch (e: Exception) {
-                                Log.w("MSM21_TRACE", "MSM21_V12_NATIVE_PROBE_FAILED host=$host error=${e.javaClass.simpleName}")
+                                Log.w("MSM21", "MSM21_V12_NATIVE_PROBE_FAILED host=$host error=${e.javaClass.simpleName}")
                             }
                         }
                     } }.awaitAll()
@@ -123,9 +123,9 @@ internal object MsmNativeHlsDiscovery {
             }
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) {
-            Log.w("MSM21_TRACE", "MSM21_V12_NATIVE_FAILED host=$host error=${e.javaClass.simpleName}")
+            Log.w("MSM21", "MSM21_V12_NATIVE_FAILED host=$host error=${e.javaClass.simpleName}")
         }
-        Log.i("MSM21_TRACE", "MSM21_V12_NATIVE_DONE host=$host masters=${masters.size} media=${media.size}")
+        Log.i("MSM21", "MSM21_V12_NATIVE_DONE host=$host masters=${masters.size} media=${media.size}")
         return MsmNativeHlsResult(masters.toList(), media.toList())
     }
 }

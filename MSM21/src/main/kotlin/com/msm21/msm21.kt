@@ -996,7 +996,7 @@ class msm21 : MainAPI() {
     )
 
     companion object {
-        private const val TAG = "MSM21_TRACE"
+        private const val TAG = "MSM21"
         private const val AJAX_BATCH_SIZE = 8
         private const val MAX_WEBVIEW_MIRRORS = Int.MAX_VALUE
         private const val NATIVE_CONCURRENCY = 4
