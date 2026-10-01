@@ -292,6 +292,7 @@ class Pencurimovie : MainAPI() {
                     async {
                         semaphore.withPermit {
                             for (player in serverPlayers) {
+                                val startedAt = System.nanoTime()
                                 val produced = AtomicBoolean(false)
                                 try {
                                     val attempts = mutableSetOf<String>()
@@ -301,9 +302,10 @@ class Pencurimovie : MainAPI() {
                                     }
                                     // A local timeout may happen after an extractor already emitted links.
                                     // Preserve those partial results, as in Anichin's per-server pipeline.
-                                    for (link in links.toList()) {
+                                    for (selected in selectPlayerLinks(links.toList(), player)) {
+                                        val link = selected.link
                                         if (link.url.isNotBlank() && emittedUrls.add(link.url)) {
-                                            val namedLink = withServerName(link, player)
+                                            val namedLink = withServerName(link, player, selected.master)
                                             callback(namedLink)
                                             produced.set(true)
                                             foundStream.set(true)
@@ -314,7 +316,8 @@ class Pencurimovie : MainAPI() {
                                 } catch (e: Exception) {
                                     Log.w("PencuriMovie", "PM_V5_SERVER_FAILED label=${player.label} error=${e.javaClass.simpleName}")
                                 } finally {
-                                    Log.i("PencuriMovie", "PM_V5_SERVER label=${player.label} success=${produced.get()}")
+                                    val elapsed = (System.nanoTime() - startedAt) / 1_000_000
+                                    Log.i("PencuriMovie", "PM_V6_SERVER label=${player.label} success=${produced.get()} elapsedMs=$elapsed")
                                 }
                             }
                         }
@@ -326,13 +329,81 @@ class Pencurimovie : MainAPI() {
         return foundStream.get()
     }
 
-    private suspend fun withServerName(link: ExtractorLink, player: PlayerOption): ExtractorLink {
+    private data class CheckedLink(val link: ExtractorLink, val state: String) {
+        val master: Boolean get() = state == "master"
+    }
+
+    // Inspect the actual playlist. A filename or unknown quality is not proof of a master.
+    // Network failures remain unverified and must not silently remove old working sources.
+    private suspend fun inspectPlaylist(link: ExtractorLink): CheckedLink {
+        if (link.type != ExtractorLinkType.M3U8) return CheckedLink(link, "other")
+        val state = try {
+            withTimeoutOrNull(4_000L) {
+                val response = app.get(
+                    link.url,
+                    referer = link.referer,
+                    headers = link.headers,
+                    timeout = 4L
+                )
+                val lines = response.text.trimStart('\uFEFF').trim()
+                    .lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+                when {
+                    response.code == 404 || response.code == 410 -> "invalid"
+                    response.code !in 200..299 -> "unverified"
+                    lines.firstOrNull() != "#EXTM3U" -> "unverified"
+                    lines.indices.any { index ->
+                        lines[index].startsWith("#EXT-X-STREAM-INF:") &&
+                            lines.drop(index + 1).firstOrNull { !it.startsWith("#") }
+                                ?.let { value ->
+                                    runCatching { URI(response.url).resolve(value).scheme }
+                                        .getOrNull() in listOf("http", "https")
+                                } == true
+                    } -> "master"
+                    lines.any { it.startsWith("#EXTINF:") } -> "media"
+                    else -> "unverified"
+                }
+            } ?: "unverified"
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            "unverified"
+        }
+        return CheckedLink(link, state)
+    }
+
+    private suspend fun selectPlayerLinks(
+        links: List<ExtractorLink>,
+        player: PlayerOption
+    ): List<CheckedLink> {
+        val unique = links.filter { it.url.isNotBlank() }.distinctBy { it.url }
+        // At most three playlist requests per active host lane; all host lanes retain equal priority.
+        val probes = Semaphore(3)
+        val checked = coroutineScope {
+            unique.map { link -> async { probes.withPermit { inspectPlaylist(link) } } }.awaitAll()
+        }
+        val masters = checked.filter { it.master }
+        val media = checked.filter { it.state == "media" }
+        val unverified = checked.filter { it.state == "unverified" }
+        val selected = when {
+            masters.isNotEmpty() -> listOf(masters.maxByOrNull { it.link.quality }!!)
+            media.isNotEmpty() -> listOf(media.maxByOrNull { it.link.quality }!!) + unverified
+            else -> checked.filter { it.state != "invalid" }
+        }
+        checked.forEach { result ->
+            Log.i("PencuriMovie", "PM_V6_PLAYLIST label=${player.label} state=${result.state} quality=${result.link.quality}")
+        }
+        Log.i("PencuriMovie", "PM_V6_SELECT label=${player.label} candidates=${unique.size} masters=${masters.size} emitted=${selected.size}")
+        return selected
+    }
+
+    private suspend fun withServerName(link: ExtractorLink, player: PlayerOption, master: Boolean): ExtractorLink {
         val serverName = player.label.ifBlank { URI(player.url).host.orEmpty() }
-        val displayName = listOf(serverName, link.name).filter { it.isNotBlank() }.distinct().joinToString(" • ")
+        val displayName = listOf(serverName, link.name, if (master) "HLS Auto" else "")
+            .filter { it.isNotBlank() }.distinct().joinToString(" • ")
         return newExtractorLink(source = displayName, name = displayName, url = link.url, type = link.type) {
             this.referer = link.referer
             this.headers = link.headers
-            this.quality = link.quality
+            this.quality = if (master) Qualities.Unknown.value else link.quality
             this.extractorData = link.extractorData
             this.audioTracks = link.audioTracks
         }

@@ -150,10 +150,13 @@ private suspend fun loadPackedPlayer(
             absolute(match.groupValues[2])?.let { match.groupValues[1] to it }
         }.toList()
     // hls3 can point to an obfuscated master.txt. Prefer the real, native m3u8.
-    val media = objectSources.firstOrNull { (_, value) -> URI(value).path.endsWith(".m3u8", true) }?.second
-        ?: Regex("""(?i)["']?file["']?\s*:\s*["']([^"']+\.m3u8[^"']*)["']""")
-            .find(scripts)?.groupValues?.getOrNull(1)?.let(::absolute)
-        ?: return false
+    val mediaSources = objectSources.map { it.second }
+        .filter { URI(it).path.orEmpty().endsWith(".m3u8", true) }
+        .ifEmpty {
+            Regex("""(?i)["']?file["']?\s*:\s*["']([^"']+\.m3u8[^"']*)["']""")
+                .findAll(scripts).mapNotNull { it.groupValues.getOrNull(1)?.let(::absolute) }.toList()
+        }.distinct()
+    if (mediaSources.isEmpty()) return false
 
     fun field(text: String, key: String): String? = Regex(
         """["']?$key["']?\s*:\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE
@@ -166,10 +169,13 @@ private suspend fun loadPackedPlayer(
             if (subtitle != null) subtitleCallback(SubtitleFile(field(block, "label") ?: "Subtitle", subtitle))
         }
     }
-    callback(newExtractorLink(source = name, name = name, url = media, type = ExtractorLinkType.M3U8) {
-        this.referer = response.url
-        this.headers = mapOf("User-Agent" to USER_AGENT)
-        this.quality = Qualities.Unknown.value
-    })
+    // Expose every native playlist to the provider so it can verify and prefer a real master.
+    for (media in mediaSources) {
+        callback(newExtractorLink(source = name, name = name, url = media, type = ExtractorLinkType.M3U8) {
+            this.referer = response.url
+            this.headers = mapOf("User-Agent" to USER_AGENT)
+            this.quality = Qualities.Unknown.value
+        })
+    }
     return true
 }
