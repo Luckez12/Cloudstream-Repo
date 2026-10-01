@@ -12,7 +12,9 @@ buildscript {
 
     dependencies {
         classpath("com.android.tools.build:gradle:8.7.3")
-        classpath("com.github.recloudstream:gradle:-SNAPSHOT")
+        // Pin the published plugin module; the moving -SNAPSHOT artifact is unavailable.
+        // Upstream commit: 81b1d424d236a447d9f2e95a229faef79002f761
+        classpath("com.github.recloudstream.gradle:gradle:81b1d424d2")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
 
     }
