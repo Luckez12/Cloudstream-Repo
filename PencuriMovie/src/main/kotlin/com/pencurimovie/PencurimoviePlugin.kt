@@ -9,5 +9,12 @@ class PencurimoviePlugin : BasePlugin() {
         registerMainAPI(Pencurimovie())
         registerExtractorAPI(Dsvplay())
         registerExtractorAPI(Hglink())
+        registerExtractorAPI(Hgcloud())
+        registerExtractorAPI(Dhcplay())
+        registerExtractorAPI(Hgnative("https://hanerix.com"))
+        registerExtractorAPI(Hgnative("https://audinifer.com"))
+        registerExtractorAPI(Hgnative("https://vibuxer.com"))
+        registerExtractorAPI(PencuriMixDropTop())
+        registerExtractorAPI(PencuriMorencius())
     }
 }

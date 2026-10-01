@@ -1,5 +1,6 @@
 package com.pencurimovie
 import com.lagradost.cloudstream3.*
+import android.util.Log
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
@@ -18,7 +19,7 @@ import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 class Pencurimovie : MainAPI() {
-    override var mainUrl = "https://ww21.pencurimovie.sbs"
+    override var mainUrl = "https://ww44.pencurimovie.baby"
     private var directUrl: String? = null
     override var name = "PencuriMovie 👾"
     override val hasMainPage = true
@@ -246,278 +247,256 @@ class Pencurimovie : MainAPI() {
             }
         }
     }
+    private data class PlayerOption(val label: String, val url: String)
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        loadMainUrlIfNeeded()
-        val pageUrl = rewriteToCurrentDomain(data)
-        val response = app.get(
-            pageUrl,
-            headers = mapOf("Referer" to mainUrl),
-            timeout = 50L
-        )
-        val document = response.document
-        val embedUrls = collectEmbedUrls(document, response.text, pageUrl)
-        if (embedUrls.isEmpty()) return false
-
-        val foundStream = AtomicBoolean(false)
-        val emittedUrls = ConcurrentHashMap.newKeySet<String>()
-        val attemptedTargets = ConcurrentHashMap.newKeySet<String>()
-        val semaphore = Semaphore(MAX_EMBED_CONCURRENCY)
-
-        fun emit(link: ExtractorLink) {
-            if (emittedUrls.add(link.url)) {
-                foundStream.set(true)
-                callback(link)
-            }
-        }
-
-        coroutineScope {
-            embedUrls.map { embedUrl ->
-                async {
-                    semaphore.withPermit {
-                        try {
-                            withTimeoutOrNull(EMBED_PIPELINE_TIMEOUT_MS) {
-                                val finalUrl = followRedirect(
-                                    embedUrl,
-                                    maxHops = 5
-                                )
-                                if (finalUrl.isBlank() ||
-                                    !attemptedTargets.add(finalUrl)
-                                ) {
-                                    return@withTimeoutOrNull
-                                }
-
-                                val directProduced = AtomicBoolean(false)
-                                withTimeoutOrNull(EXTRACTOR_TIMEOUT_MS) {
-                                    loadExtractor(
-                                        finalUrl,
-                                        pageUrl,
-                                        subtitleCallback
-                                    ) { link ->
-                                        directProduced.set(true)
-                                        emit(link)
-                                    }
-                                }
-
-                                if (!directProduced.get()) {
-                                    val nestedUrl = findNestedEmbed(
-                                        finalUrl,
-                                        pageUrl
-                                    )
-                                    if (!nestedUrl.isNullOrBlank() &&
-                                        nestedUrl != finalUrl
-                                    ) {
-                                        val nestedFinal = followRedirect(
-                                            nestedUrl,
-                                            maxHops = 4
-                                        )
-                                        if (nestedFinal.isNotBlank() &&
-                                            attemptedTargets.add(nestedFinal)
-                                        ) {
-                                            withTimeoutOrNull(
-                                                EXTRACTOR_TIMEOUT_MS
-                                            ) {
-                                                loadExtractor(
-                                                    nestedFinal,
-                                                    finalUrl,
-                                                    subtitleCallback
-                                                ) { link ->
-                                                    emit(link)
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (_: Exception) {
-                            // One dead server must not block the rest.
-                        }
-                    }
-                }
-            }.awaitAll()
-        }
-
-        return foundStream.get()
-    }
-    private fun collectEmbedUrls(
-        document: Document,
-        html: String,
-        baseUrl: String
-    ): List<String> {
-        val found = linkedSetOf<String>()
-        fun addCandidate(rawValue: String) {
-            val cleaned = cleanCandidateUrl(rawValue)
-            if (cleaned.isBlank()) return
-            if (cleaned.startsWith("#")) return
-            if (cleaned.startsWith("javascript:", ignoreCase = true)) return
-            val resolved = resolveUrl(baseUrl, cleaned)
-            if (resolved.isBlank()) return
-            if (resolved == baseUrl) return
-            if (isNonVideoFrame(resolved)) return
-            if (!isLikelyPlayerUrl(resolved)) return
-            found.add(resolved)
-        }
-        val focusedSelectors = listOf(
-            "div.movieplay iframe",
-            "div.movieplay [data-src]",
-            "div.movieplay [data-video]",
-            "div.movieplay [data-url]",
-            "div.movieplay [data-embed]",
-            "div.movieplay [data-link]",
-            "div#movieplay iframe",
-            "div#movieplay [data-src]",
-            "div#movieplay [data-video]",
-            "div#movieplay [data-url]",
-            "div#player iframe",
-            "div#player [data-src]",
-            "div#player [data-video]",
-            "div#player [data-url]",
-            "div.player iframe",
-            "div.player [data-src]",
-            "div.player [data-video]",
-            "div.player [data-url]",
-            "div.playbox iframe",
-            "div.playbox [data-src]",
-            "[id*=server] iframe",
-            "[id*=server] [data-src]",
-            "[id*=server] [data-video]",
-            "[id*=server] [data-url]",
-            "[class*=server] iframe",
-            "[class*=server] [data-src]",
-            "[class*=server] [data-video]",
-            "[class*=server] [data-url]"
-        ).joinToString(", ")
-        document.select(focusedSelectors).forEach { element ->
-            element.getEmbedValues().forEach(::addCandidate)
-        }
-        if (found.isEmpty()) {
-            document.select(
-                "iframe, [data-src], [data-video], [data-url], " +
-                    "[data-embed], [data-link], [data-player]"
-            ).forEach { element ->
-                element.getEmbedValues().forEach(::addCandidate)
-            }
-        }
-        if (found.isEmpty()) {
-            document.select(
-                "a[href][class*=server], " +
-                    "[class*=server] a[href], " +
-                    "[id*=server] a[href], " +
-                    "a[href][class*=play], " +
-                    "[class*=play] a[href]"
-            ).forEach { element ->
-                addCandidate(element.attr("href"))
-            }
-        }
-        if (found.isEmpty()) {
-            extractUrlsFromScripts(html)
-                .take(24)
-                .forEach(::addCandidate)
-        }
-        return found.toList()
-    }
-    private fun extractUrlsFromScripts(html: String): List<String> {
-        val results = linkedSetOf<String>()
-        val patterns = listOf(
-            Regex(
-                """(?i)(?:src|file|url|embed|video|player)["']?\s*[:=]\s*["'](https?:[^"'\s<]+)["']"""
-            ),
-            Regex(
-                """(?i)(?:iframe|source)["']?\s*[:=]\s*["'](https?:[^"'\s<]+)["']"""
-            )
-        )
-        patterns.forEach { regex ->
-            regex.findAll(html).forEach { match ->
-                match.groupValues.getOrNull(1)
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let(results::add)
-            }
-        }
-        return results.toList()
-    }
-    private fun cleanCandidateUrl(value: String): String {
-        return value
-            .trim()
-            .trim('"', '\'', ' ')
-            .replace("\\/", "/")
-            .replace("&amp;", "&")
-            .replace("&#038;", "&")
-    }
-    private fun isLikelyPlayerUrl(url: String): Boolean {
-        val lower = url.lowercase()
-        if (!lower.startsWith("http://") &&
-            !lower.startsWith("https://")
-        ) {
-            return false
-        }
-        val blockedExtensions = listOf(
-            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
-            ".css", ".js", ".woff", ".woff2", ".ttf", ".ico"
-        )
-        if (blockedExtensions.any { ext ->
-                lower.substringBefore("?").endsWith(ext)
-            }
-        ) {
-            return false
-        }
-        val blockedHostsOrPaths = listOf(
-            "google-analytics",
-            "googletagmanager",
-            "doubleclick.net",
-            "facebook.com",
-            "instagram.com",
-            "t.me/",
-            "telegram.me/",
-            "twitter.com",
-            "x.com/",
-            "schema.org",
-            "w3.org"
-        )
-        if (blockedHostsOrPaths.any { lower.contains(it) }) {
-            return false
-        }
-        return true
-    }
-    private suspend fun findNestedEmbed(
-        url: String,
-        referer: String
-    ): String? {
-        return try {
-            val response = app.get(
-                url,
-                headers = mapOf("Referer" to referer),
-                timeout = 25L
-            )
-            val document = response.document
-            val element = document.selectFirst(
-                "iframe[data-src], iframe[src], " +
-                    "[data-video], [data-url], [data-embed], [data-link]"
-            )
-            val direct = element
-                ?.getEmbedValues()
-                ?.firstOrNull { it.isNotBlank() }
-                ?.let { resolveUrl(url, cleanCandidateUrl(it)) }
-            if (!direct.isNullOrBlank() &&
-                !isNonVideoFrame(direct)
-            ) {
-                direct
-            } else {
-                extractUrlsFromScripts(response.text)
-                    .firstOrNull()
-                    ?.let { resolveUrl(url, cleanCandidateUrl(it)) }
-                    ?.takeIf { !isNonVideoFrame(it) }
+        val response = try {
+            withTimeoutOrNull(PAGE_TIMEOUT_MS) {
+                loadMainUrlIfNeeded()
+                app.get(
+                    rewriteToCurrentDomain(data),
+                    headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to USER_AGENT),
+                    timeout = 15L
+                )
             }
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("PencuriMovie", "PM_V5_PAGE_FAILED ${e.javaClass.simpleName}")
             null
+        } ?: return false
+
+        val pageUrl = response.url
+        val players = collectPlayerOptions(response.document, pageUrl)
+        Log.i("PencuriMovie", "PM_V5_DISCOVERY candidates=${players.size}")
+        if (players.isEmpty()) return false
+
+        val foundStream = AtomicBoolean(false)
+        val emittedUrls = ConcurrentHashMap.newKeySet<String>()
+        val emittedSubtitles = ConcurrentHashMap.newKeySet<String>()
+        val semaphore = Semaphore(MAX_EMBED_CONCURRENCY)
+        val subtitles: (SubtitleFile) -> Unit = { subtitle ->
+            if (emittedSubtitles.add(subtitle.url)) subtitleCallback(subtitle)
         }
+
+        // One lane per host keeps duplicate wrappers from occupying every permit.
+        // Emit every available quality. A failing server does not suppress others.
+        withTimeoutOrNull(ALL_PLAYERS_TIMEOUT_MS) {
+            coroutineScope {
+                players.groupBy { URI(it.url).host.orEmpty().lowercase() }.values.map { serverPlayers ->
+                    async {
+                        semaphore.withPermit {
+                            for (player in serverPlayers) {
+                                val produced = AtomicBoolean(false)
+                                try {
+                                    val attempts = mutableSetOf<String>()
+                                    val links = java.util.Collections.synchronizedList(mutableListOf<ExtractorLink>())
+                                    withTimeoutOrNull(EMBED_PIPELINE_TIMEOUT_MS) {
+                                        resolvePlayer(player.url, pageUrl, 0, attempts, subtitles) { link -> links.add(link) }
+                                    }
+                                    // A local timeout may happen after an extractor already emitted links.
+                                    // Preserve those partial results, as in Anichin's per-server pipeline.
+                                    for (link in links.toList()) {
+                                        if (link.url.isNotBlank() && emittedUrls.add(link.url)) {
+                                            val namedLink = withServerName(link, player)
+                                            callback(namedLink)
+                                            produced.set(true)
+                                            foundStream.set(true)
+                                        }
+                                    }
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    Log.w("PencuriMovie", "PM_V5_SERVER_FAILED label=${player.label} error=${e.javaClass.simpleName}")
+                                } finally {
+                                    Log.i("PencuriMovie", "PM_V5_SERVER label=${player.label} success=${produced.get()}")
+                                }
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+        }
+        Log.i("PencuriMovie", "PM_V5_DONE emitted=${emittedUrls.size} success=${foundStream.get()}")
+        return foundStream.get()
+    }
+
+    private suspend fun withServerName(link: ExtractorLink, player: PlayerOption): ExtractorLink {
+        val serverName = player.label.ifBlank { URI(player.url).host.orEmpty() }
+        val displayName = listOf(serverName, link.name).filter { it.isNotBlank() }.distinct().joinToString(" • ")
+        return newExtractorLink(source = displayName, name = displayName, url = link.url, type = link.type) {
+            this.referer = link.referer
+            this.headers = link.headers
+            this.quality = link.quality
+            this.extractorData = link.extractorData
+            this.audioTracks = link.audioTracks
+        }
+    }
+
+    private fun collectPlayerOptions(document: Document, baseUrl: String): List<PlayerOption> {
+        val found = linkedMapOf<String, PlayerOption>()
+        fun add(raw: String, label: String) {
+            val url = candidateUrl(baseUrl, raw) ?: return
+            found.putIfAbsent(url, PlayerOption(label, url))
+        }
+
+        // MovieMo keeps all servers in hidden #tabN blocks. No AJAX click is needed.
+        document.select(".player_nav .idTabs a[href]").forEach { anchor ->
+            val tabId = anchor.attr("href").substringAfter('#', "")
+            if (tabId.isBlank()) return@forEach
+            val tab = document.getElementById(tabId) ?: return@forEach
+            val label = anchor.parents().firstOrNull { it.tagName() == "li" }
+                ?.selectFirst(".les-title strong")?.text()?.trim().orEmpty()
+                .ifBlank { "Server" }
+            collectEmbedUrls(tab, baseUrl).forEach { add(it, label) }
+        }
+
+        val playerArea = document.selectFirst("#player2, #content-embed, .content-embed, #movieplay, .movieplay")
+        collectEmbedUrls(playerArea ?: document, baseUrl).forEach { add(it, "") }
+        return found.values.take(MAX_TOP_LEVEL_PLAYERS)
+    }
+
+    private fun collectEmbedUrls(root: Element, baseUrl: String): List<String> {
+        val found = linkedSetOf<String>()
+        fun add(raw: String) { candidateUrl(baseUrl, raw)?.let(found::add) }
+        root.select(
+            "iframe, video[src], source[src], [data-src], [data-video], [data-url], " +
+                "[data-embed], [data-link], [data-player], [data-iframe]"
+        ).forEach { element -> element.getEmbedValues().forEach(::add) }
+        root.select("script, textarea").forEach { script ->
+            extractUrlsFromScripts(script.data().ifBlank { script.html() }).forEach(::add)
+        }
+        return found.toList()
+    }
+
+    private fun extractUrlsFromScripts(html: String): List<String> {
+        val text = cleanCandidateUrl(html)
+        return Regex(
+            """(?i)["']?(?:src|file|source|url|embed|video|player)["']?\s*[:=]\s*["']([^"'\s<>]+)["']"""
+        ).findAll(text).map { it.groupValues[1] }.distinct().take(MAX_NESTED_PLAYERS).toList()
+    }
+
+    private fun cleanCandidateUrl(value: String): String = value.trim().trim('"', '\'', ' ')
+        .replace("\\/", "/")
+        .replace("\\u0026", "&")
+        .replace("\\u003d", "=")
+        .replace("&amp;", "&")
+        .replace("&#038;", "&")
+        .replace("&quot;", "\"")
+
+    private fun candidateUrl(baseUrl: String, raw: String): String? {
+        val clean = cleanCandidateUrl(raw)
+        if (clean.isBlank() || clean.startsWith('#') ||
+            clean.startsWith("javascript:", true) || clean.startsWith("data:", true)
+        ) return null
+        val resolved = resolveUrl(baseUrl, clean)
+        if (resolved.substringBefore('#') == baseUrl.substringBefore('#') ||
+            isNonVideoFrame(resolved) || !isLikelyPlayerUrl(resolved)
+        ) return null
+        return resolved
+    }
+
+    private fun isLikelyPlayerUrl(url: String): Boolean {
+        val uri = runCatching { URI(url) }.getOrNull() ?: return false
+        if (uri.scheme?.lowercase() !in setOf("http", "https") || uri.host.isNullOrBlank()) return false
+        val path = uri.path.orEmpty().lowercase()
+        if (listOf(".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".css", ".js", ".ico", ".woff", ".woff2", ".ttf")
+                .any { path.endsWith(it) }) return false
+        val host = uri.host.lowercase()
+        return listOf("google-analytics", "googletagmanager", "doubleclick.net", "facebook.com", "instagram.com",
+            "t.me", "telegram.me", "twitter.com", "x.com", "schema.org", "w3.org")
+            .none { host == it || host.endsWith(".$it") || host.contains("google-analytics") }
+    }
+
+    private fun directMediaType(url: String): ExtractorLinkType? {
+        val path = runCatching { URI(url).path.orEmpty().lowercase() }.getOrDefault("")
+        return when {
+            path.endsWith(".m3u8") -> ExtractorLinkType.M3U8
+            path.endsWith(".mpd") -> ExtractorLinkType.DASH
+            path.endsWith(".mp4") -> ExtractorLinkType.VIDEO
+            else -> null
+        }
+    }
+
+    private suspend fun tryExtractor(
+        url: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val type = directMediaType(url)
+        if (type != null) {
+            callback(newExtractorLink(source = name, name = name, url = url, type = type) {
+                this.referer = referer
+                this.headers = mapOf("User-Agent" to USER_AGENT)
+                this.quality = Qualities.Unknown.value
+            })
+            return true
+        }
+        val produced = AtomicBoolean(false)
+        try {
+            withTimeoutOrNull(EXTRACTOR_TIMEOUT_MS) {
+                loadExtractor(url, referer, subtitleCallback) { link ->
+                    if (link.url.isNotBlank()) {
+                        produced.set(true)
+                        callback(link)
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("PencuriMovie", "PM_V5_EXTRACTOR_FAILED host=${URI(url).host} error=${e.javaClass.simpleName}")
+        }
+        return produced.get()
+    }
+
+    private suspend fun resolvePlayer(
+        url: String,
+        referer: String,
+        depth: Int,
+        attempts: MutableSet<String>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        if (!attempts.add("$url\u0000$referer")) return false
+        if (tryExtractor(url, referer, subtitleCallback, callback)) return true
+
+        // Keep redirects as fallback: known host extractors should get the original URL first.
+        val response = try {
+            withTimeoutOrNull(PLAYER_REQUEST_TIMEOUT_MS) {
+                app.get(url, referer = referer, headers = mapOf("User-Agent" to USER_AGENT), timeout = 8L)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) { null } ?: return false
+        val current = response.url
+        val redirect = response.document.selectFirst("meta[http-equiv~=(?i)refresh]")
+            ?.attr("content")?.let(::extractMetaRefreshUrl)
+            ?: extractJavascriptRedirect(response.text)
+        val targets = linkedSetOf<String>()
+        if (current != url) targets.add(current)
+        redirect?.let { candidateUrl(current, it) }?.let(targets::add)
+        if (depth < MAX_NESTED_DEPTH) targets.addAll(collectEmbedUrls(response.document, current))
+        if (depth >= MAX_NESTED_DEPTH) {
+            // Even at the depth limit, an HTTP/meta redirect can reach an extractor.
+            return targets.take(MAX_NESTED_PLAYERS).any { target ->
+                val targetReferer = if (target == current) referer else current
+                attempts.add("$target\u0000$targetReferer") && tryExtractor(target, targetReferer, subtitleCallback, callback)
+            }
+        }
+        var produced = false
+        for (target in targets.take(MAX_NESTED_PLAYERS)) {
+            if (target == url || target == current && current == url) continue
+            val targetReferer = if (target == current) referer else current
+            if (resolvePlayer(target, targetReferer, depth + 1, attempts, subtitleCallback, callback)) produced = true
+        }
+        return produced
     }
     private suspend fun followRedirect(
         url: String,
@@ -654,6 +633,7 @@ class Pencurimovie : MainAPI() {
             attr("data-embed"),
             attr("data-link"),
             attr("data-player"),
+            attr("data-iframe"),
             attr("href")
         )
             .map { it.trim() }
@@ -679,8 +659,14 @@ class Pencurimovie : MainAPI() {
     }
     private companion object {
         const val MAX_EMBED_CONCURRENCY = 4
-        const val EMBED_PIPELINE_TIMEOUT_MS = 20_000L
-        const val EXTRACTOR_TIMEOUT_MS = 10_000L
+        const val EMBED_PIPELINE_TIMEOUT_MS = 35_000L
+        const val EXTRACTOR_TIMEOUT_MS = 26_000L
+        const val PAGE_TIMEOUT_MS = 20_000L
+        const val PLAYER_REQUEST_TIMEOUT_MS = 8_000L
+        const val ALL_PLAYERS_TIMEOUT_MS = 70_000L
+        const val MAX_NESTED_DEPTH = 2
+        const val MAX_NESTED_PLAYERS = 8
+        const val MAX_TOP_LEVEL_PLAYERS = 24
     }
 
 }
