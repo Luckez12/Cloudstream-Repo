@@ -518,7 +518,14 @@ class Pencurimovie : MainAPI() {
             })
             return true
         }
-        val produced = AtomicBoolean(false)
+        // Search the player itself before allowing a built-in MP4 extractor to end the pipeline.
+        val native = NativeHlsDiscovery.discover(url, referer)
+        if (native.masters.isNotEmpty()) {
+            native.masters.forEach(callback)
+            return true
+        }
+        native.media.forEach(callback)
+        val produced = AtomicBoolean(native.media.isNotEmpty())
         try {
             withTimeoutOrNull(EXTRACTOR_TIMEOUT_MS) {
                 loadExtractor(url, referer, subtitleCallback) { link ->
