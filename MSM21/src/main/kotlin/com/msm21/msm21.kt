@@ -31,7 +31,7 @@ class msm21 : MainAPI() {
     override val hasMainPage = true
     override val hasDownloadSupport = true
     override val usesWebView = true
-    override val loadLinksTimeoutMs = 60_000L
+    override val loadLinksTimeoutMs = 90_000L
 
     override val supportedTypes = setOf(
         TvType.Movie,
@@ -404,106 +404,34 @@ class msm21 : MainAPI() {
             return standard.foundStream || webViewFound
         }
 
-        // Fast native servers and fallback servers start together.
-        // Direct extractor callbacks are emitted immediately as each source resolves.
-        // Abyss is intentionally disabled for now. Current MSM Abyss links resolve to
-        // Google Storage objects that consistently return HTTP 403 in Cloudstream,
-        // and probing them adds a long delay without producing a usable source.
-        val uniqueOptions = options
-            .distinctBy { it.optionKey() }
-            .filterNot { it.isDisabledOption() }
-
-        val selectedFastOptions = uniqueOptions
-            .filter { it.isFastNativeOption() }
-            .sortedBy { it.fastPriority() }
-
-        val fastOptionKeys = selectedFastOptions
-            .map { it.optionKey() }
-            .toSet()
-
-        val fallbackOptions = uniqueOptions
-            .filterNot { it.optionKey() in fastOptionKeys }
-            .sortedBy { it.fallbackPriority() }
-
-        val laneResults = coroutineScope {
-            val fastLane = async {
-                if (selectedFastOptions.isEmpty()) {
-                    ExtractionBatchResult(false, emptyList())
-                } else {
-                    val ajaxSemaphore = Semaphore(AJAX_BATCH_SIZE)
-                    val results = selectedFastOptions.map { option ->
-                        async {
-                            val mirrors = ajaxSemaphore.withPermit {
-                                fetchMirror(option, pageUrl)
-                                    .distinctBy { it.url }
-                            }
-                            loadStandardMirrors(
-                                mirrors = mirrors,
-                                pageUrl = pageUrl,
-                                subtitleCallback = subtitleCallback,
-                                callback = callback,
-                                emittedUrls = emittedUrls
-                            )
-                        }
-                    }.awaitAll()
-
-                    ExtractionBatchResult(
-                        foundStream = results.any { it.foundStream },
-                        unresolved = results.flatMap { it.unresolved }
-                    )
-                }
-            }
-
-            val fallbackLane = async {
-                var foundStream = false
-                val unresolved = mutableListOf<EmbedMirror>()
-
-                for (batch in fallbackOptions.chunked(FALLBACK_BATCH_SIZE)) {
-                    val mirrors = fetchMirrors(batch, pageUrl)
-                        .distinctBy { it.url }
-                    if (mirrors.isEmpty()) continue
-
-                    val standard = loadStandardMirrors(
-                        mirrors = mirrors,
+        // Every real website option gets its own pipeline. No host is excluded
+        // and a successful native mirror does not suppress JavaScript mirrors.
+        val uniqueOptions = options.distinctBy { it.optionKey() }
+        val ajaxSemaphore = Semaphore(AJAX_BATCH_SIZE)
+        val nativeSemaphore = Semaphore(NATIVE_CONCURRENCY)
+        val webViewSemaphore = Semaphore(WEBVIEW_CONCURRENCY)
+        val foundStream = coroutineScope {
+            uniqueOptions.map { option ->
+                async {
+                    val mirrors = ajaxSemaphore.withPermit {
+                        fetchMirror(option, pageUrl).distinctBy { it.url }
+                    }
+                    val standard = nativeSemaphore.withPermit {
+                        loadStandardMirrors(mirrors, pageUrl, subtitleCallback, callback, emittedUrls)
+                    }
+                    val webViewFound = probeWithWebView(
+                        mirrors = standard.unresolved,
                         pageUrl = pageUrl,
-                        subtitleCallback = subtitleCallback,
                         callback = callback,
-                        emittedUrls = emittedUrls
+                        emittedUrls = emittedUrls,
+                        maxMirrors = Int.MAX_VALUE,
+                        semaphore = webViewSemaphore
                     )
-                    foundStream = foundStream || standard.foundStream
-                    unresolved += standard.unresolved
+                    Log.i(TAG, "MSM21_V12_OPTION_DONE label=${option.label} mirrors=${mirrors.size} " +
+                        "success=${standard.foundStream || webViewFound}")
+                    standard.foundStream || webViewFound
                 }
-
-                ExtractionBatchResult(
-                    foundStream = foundStream,
-                    unresolved = unresolved
-                )
-            }
-
-            awaitAll(fastLane, fallbackLane)
-        }
-
-        var foundStream = laneResults.any { it.foundStream }
-
-        val webViewCandidates = laneResults
-            .flatMap { it.unresolved }
-            .distinctBy { it.url }
-            .sortedBy { it.webViewPriority() }
-            .take(MAX_WEBVIEW_MIRRORS)
-
-        // Do not hold Cloudstream open for slow JavaScript mirrors after a normal
-        // extractor has already produced a usable source. This is important for
-        // "skip source selection", which waits for loadLinks() to finish.
-        if (!foundStream && webViewCandidates.isNotEmpty()) {
-            foundStream = probeWithWebView(
-                mirrors = webViewCandidates,
-                pageUrl = pageUrl,
-                callback = callback,
-                emittedUrls = emittedUrls,
-                maxMirrors = MAX_WEBVIEW_MIRRORS
-            ) || foundStream
-        } else if (foundStream && webViewCandidates.isNotEmpty()) {
-            Log.i(TAG, "MSM21_WEBVIEW_SKIPPED reason=native_source_found count=${webViewCandidates.size}")
+            }.awaitAll().any { it }
         }
 
         if (!foundStream) {
@@ -520,99 +448,57 @@ class msm21 : MainAPI() {
         emittedUrls: MutableSet<String>
     ): ExtractionBatchResult = coroutineScope {
         val foundStream = AtomicBoolean(false)
-        val unresolved = mirrors
-            .distinctBy { it.url }
-            .filterNot { it.isDisabledMirror() }
-            .map { mirror ->
+        val unresolved = mirrors.distinctBy { it.url }.map { mirror ->
             async {
-                val emitted = AtomicBoolean(false)
+                val candidates = java.util.Collections.synchronizedList(mutableListOf<ExtractorLink>())
+                val collect: (ExtractorLink) -> Unit = { link ->
+                    if (MsmMediaPolicy.isRejected(link.url)) {
+                        Log.w(TAG, "MSM21_V12_REJECT label=${mirror.label} target=${urlForLog(link.url)}")
+                    } else if (link.url.isNotBlank()) {
+                        candidates.add(link)
+                    }
+                }
                 try {
                     withTimeoutOrNull(MIRROR_PIPELINE_TIMEOUT_MS) {
-                        // Keep the normal Cloudstream extractor path first. Only
-                        // resolve redirects or inspect a nested iframe if it did
-                        // not actually emit a playable link.
-                        withTimeoutOrNull(STANDARD_EXTRACTOR_TIMEOUT_MS) {
-                            loadExtractor(
-                                mirror.url,
-                                pageUrl,
-                                subtitleCallback
-                            ) { link ->
-                                emitted.set(true)
-                                foundStream.set(true)
-                                Log.i(TAG, "MSM21_EXTRACT_OK label=${mirror.label} link=${urlForLog(link.url)}")
-                                if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
-                            }
-                        }
-
-                        val finalUrl = if (!emitted.get()) {
-                            followRedirect(
-                                mirror.url,
-                                maxHops = 4
-                            ).ifBlank { mirror.url }
-                        } else {
-                            mirror.url
-                        }
-
-                        if (!emitted.get() && finalUrl != mirror.url) {
+                        val native = MsmNativeHlsDiscovery.discover(mirror.url, pageUrl)
+                        native.masters.forEach(collect)
+                        native.media.forEach(collect)
+                        if (native.masters.isEmpty()) {
                             withTimeoutOrNull(STANDARD_EXTRACTOR_TIMEOUT_MS) {
-                                loadExtractor(
-                                    finalUrl,
-                                    pageUrl,
-                                    subtitleCallback
-                                ) { link ->
-                                    emitted.set(true)
-                                    foundStream.set(true)
-                                    Log.i(TAG, "MSM21_EXTRACT_OK label=${mirror.label} link=${urlForLog(link.url)}")
-                                    if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
-                                }
+                                loadExtractor(mirror.url, pageUrl, subtitleCallback, collect)
                             }
-                        }
-
-                        if (!emitted.get()) {
-                            val nestedUrl = findNestedEmbed(
-                                finalUrl,
-                                pageUrl
-                            )
-                            if (!nestedUrl.isNullOrBlank() &&
-                                nestedUrl != finalUrl
-                            ) {
-                                val nestedFinal = followRedirect(
-                                    nestedUrl,
-                                    maxHops = 3
-                                ).ifBlank { nestedUrl }
-
-                                withTimeoutOrNull(STANDARD_EXTRACTOR_TIMEOUT_MS) {
-                                    loadExtractor(
-                                        nestedFinal,
-                                        finalUrl,
-                                        subtitleCallback
-                                    ) { link ->
-                                        emitted.set(true)
-                                        foundStream.set(true)
-                                        Log.i(TAG, "MSM21_EXTRACT_OK label=${mirror.label} link=${urlForLog(link.url)}")
-                                        if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
+                            if (candidates.isEmpty()) {
+                                val finalUrl = followRedirect(mirror.url, maxHops = 4).ifBlank { mirror.url }
+                                if (finalUrl != mirror.url) {
+                                    withTimeoutOrNull(STANDARD_EXTRACTOR_TIMEOUT_MS) {
+                                        loadExtractor(finalUrl, pageUrl, subtitleCallback, collect)
+                                    }
+                                }
+                                if (candidates.isEmpty()) {
+                                    val nested = findNestedEmbed(finalUrl, pageUrl)
+                                    if (!nested.isNullOrBlank() && nested != finalUrl) {
+                                        val nestedFinal = followRedirect(nested, maxHops = 3).ifBlank { nested }
+                                        withTimeoutOrNull(STANDARD_EXTRACTOR_TIMEOUT_MS) {
+                                            loadExtractor(nestedFinal, finalUrl, subtitleCallback, collect)
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    false
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (error: Exception) {
+                    Log.w(TAG, "MSM21_V12_EXTRACT_FAILED label=${mirror.label} error=${error.javaClass.simpleName}")
                 }
-
-                if (!emitted.get()) {
-                    Log.i(TAG, "MSM21_EXTRACT_EMPTY label=${mirror.label} mirror=${urlForLog(mirror.url)}")
+                val selected = MsmMediaPolicy.select(candidates.toList(), mirror.label)
+                selected.forEach { link ->
+                    if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
                 }
-                mirror.takeUnless { emitted.get() }
+                if (selected.isNotEmpty()) foundStream.set(true)
+                mirror.takeIf { selected.isEmpty() }
             }
         }.awaitAll().filterNotNull()
-
-        ExtractionBatchResult(
-            foundStream = foundStream.get(),
-            unresolved = unresolved
-        )
+        ExtractionBatchResult(foundStream.get(), unresolved)
     }
 
     private suspend fun probeWithWebView(
@@ -620,105 +506,62 @@ class msm21 : MainAPI() {
         pageUrl: String,
         callback: (ExtractorLink) -> Unit,
         emittedUrls: MutableSet<String>,
-        maxMirrors: Int
+        maxMirrors: Int,
+        semaphore: Semaphore = Semaphore(WEBVIEW_CONCURRENCY)
     ): Boolean = coroutineScope {
         val candidates = mirrors
             .distinctBy { it.url }
-            .filterNot { it.isDisabledMirror() }
-            .sortedBy { it.webViewPriority() }
             .take(maxMirrors)
 
         if (candidates.isEmpty()) return@coroutineScope false
 
-        // MSM currently exposes more than five player choices. Probe unresolved
-        // JavaScript players in parallel so all mirrors can be attempted without
-        // making loadLinks exceed Cloudstream's timeout.
-        val semaphore = Semaphore(WEBVIEW_CONCURRENCY)
+        // Bound live WebViews while trying every unresolved mirror. Each completed
+        // mirror publishes its result without waiting for the rest of this batch.
         Log.i(TAG, "MSM21_WEBVIEW_BATCH count=${candidates.size} labels=${candidates.joinToString { it.label }}")
-        val results = candidates.map { mirror ->
+        val foundAny = AtomicBoolean(false)
+        candidates.map { mirror ->
             async {
                 Log.i(TAG, "MSM21_WEBVIEW_START label=${mirror.label} mirror=${urlForLog(mirror.url)}")
                 val streams = try {
                     semaphore.withPermit {
-                        MsmWebViewProbe.extractFast(
-                            url = mirror.url,
-                            referer = pageUrl
-                        )
+                        MsmWebViewProbe.extractFast(url = mirror.url, referer = pageUrl)
                     }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (error: Exception) {
+                    Log.w(TAG, "MSM21_V12_WEBVIEW_FAILED label=${mirror.label} error=${error.javaClass.simpleName}")
                     emptyList()
                 }
-                Log.i(TAG, "MSM21_WEBVIEW_DONE label=${mirror.label} streams=${streams.size}")
-                mirror to streams
-            }
-        }.awaitAll()
-
-        var foundAny = false
-
-        results.forEach { (mirror, streams) ->
-            streams.forEach { stream ->
-                val emitKey = "${mirror.label}\u0000${stream.url}"
-                if (!emittedUrls.add(emitKey)) return@forEach
-
-                val headers = stream.headers
-                    .filterKeys { key ->
-                        key.lowercase() !in BLOCKED_VIDEO_HEADERS
+                val links = streams.filterNot { MsmMediaPolicy.isRejected(it.url) }.map { stream ->
+                    val headers = stream.headers.filterKeys { it.lowercase() !in BLOCKED_VIDEO_HEADERS }
+                        .toMutableMap().apply {
+                            put("User-Agent", get("User-Agent") ?: USER_AGENT)
+                            put("Accept", get("Accept") ?: "*/*")
+                            put("Referer", get("Referer") ?: mirror.url)
+                        }
+                    val mime = stream.mimeType.orEmpty().lowercase()
+                    val path = runCatching { URI(stream.url).path }.getOrNull().orEmpty()
+                    val type = when {
+                        path.endsWith(".m3u8", true) || mime.contains("mpegurl") -> ExtractorLinkType.M3U8
+                        path.endsWith(".mpd", true) || mime.contains("dash+xml") -> ExtractorLinkType.DASH
+                        else -> ExtractorLinkType.VIDEO
                     }
-                    .toMutableMap()
-                    .apply {
-                        put("User-Agent", get("User-Agent") ?: USER_AGENT)
-                        put("Accept", get("Accept") ?: "*/*")
-                        put("Referer", get("Referer") ?: mirror.url)
-                    }
-
-                val mimeType = stream.mimeType.orEmpty().lowercase()
-                val linkType = when {
-                    stream.url.contains(".m3u8", true) ||
-                        mimeType.contains("mpegurl") -> ExtractorLinkType.M3U8
-                    stream.url.contains(".mpd", true) ||
-                        mimeType.contains("dash+xml") -> ExtractorLinkType.DASH
-                    else -> ExtractorLinkType.VIDEO
-                }
-
-                callback(
-                    newExtractorLink(
-                        source = mirror.label,
-                        name = "${mirror.label} ${stream.label}".trim(),
-                        url = stream.url,
-                        type = linkType
-                    ) {
-                        referer = headers.entries
-                            .firstOrNull { it.key.equals("Referer", ignoreCase = true) }
-                            ?.value
-                            .orEmpty()
-                            .ifBlank { mirror.url }
+                    newExtractorLink(source = mirror.label, name = stream.label,
+                        url = stream.url, type = type) {
+                        referer = headers.entries.firstOrNull { it.key.equals("Referer", true) }
+                            ?.value.orEmpty().ifBlank { mirror.url }
                         quality = getQualityFromName(stream.label)
                         this.headers = headers
                     }
-                )
+                }
+                val selected = MsmMediaPolicy.select(links, mirror.label)
+                selected.forEach { link ->
+                    if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
+                }
+                if (selected.isNotEmpty()) foundAny.set(true)
+                Log.i(TAG, "MSM21_WEBVIEW_DONE label=${mirror.label} captures=${streams.size} emitted=${selected.size}")
             }
-
-            if (streams.isNotEmpty()) foundAny = true
-        }
-
-        foundAny
-    }
-
-    private suspend fun fetchMirrors(
-        options: List<PlayerOption>,
-        pageUrl: String
-    ): List<EmbedMirror> = coroutineScope {
-        val result = mutableListOf<EmbedMirror>()
-
-        options.chunked(AJAX_BATCH_SIZE).forEach { batch ->
-            result += batch.map { option ->
-                async { fetchMirror(option, pageUrl) }
-            }.awaitAll().flatten()
-        }
-
-        result
+        }.awaitAll()
+        foundAny.get()
     }
 
     private suspend fun fetchMirror(
@@ -1019,70 +862,8 @@ class msm21 : MainAPI() {
         return resolved
     }
 
-    private fun PlayerOption.isDisabledOption(): Boolean {
-        val value = label.lowercase()
-        return DISABLED_SERVER_HINTS.any(value::contains)
-    }
-
-    private fun EmbedMirror.isDisabledMirror(): Boolean {
-        val value = "${label.lowercase()} ${url.lowercase()}"
-        return DISABLED_SERVER_HINTS.any(value::contains)
-    }
-
-    private fun EmbedMirror.webViewPriority(): Int {
-        val value = "${label.lowercase()} ${url.lowercase()}"
-        return when {
-            value.contains("abyss") -> 0
-            value.contains("playe") || value.contains("playerx") -> 1
-            value.contains("rpmpl") -> 2
-            value.contains("seekp") -> 3
-            value.contains("p2pst") -> 4
-            value.contains("upns") -> 5
-            value.contains("byse") -> 6
-            value.contains("mixdr") || value.contains("mixdrop") -> 7
-            value.contains("dsvpl") || value.contains("dood") -> 8
-            value.contains("playm") -> 9
-            value.contains("full hd") -> 10
-            value.contains("veev") -> 11
-            else -> 12
-        }
-    }
-
     private fun PlayerOption.optionKey(): String {
         return "$post\u0000$nume\u0000$type"
-    }
-
-    private fun PlayerOption.isFastNativeOption(): Boolean {
-        val value = label.lowercase()
-        return FAST_NATIVE_SERVER_HINTS.any(value::contains)
-    }
-
-    private fun PlayerOption.fastPriority(): Int {
-        val value = label.lowercase()
-        return when {
-            value.contains("mixdr") || value.contains("mixdrop") -> 0
-            value.contains("dsvpl") || value.contains("dood") -> 1
-            value.contains("playm") -> 2
-            value.contains("byse") -> 3
-            value.contains("upns") -> 4
-            value.contains("rpmpl") -> 5
-            value.contains("gomsm") -> 6
-            value.contains("netu") -> 7
-            value.contains("full hd") -> 8
-            value.contains("fire") || value.contains("wish") -> 9
-            value.contains("voe") -> 10
-            else -> 11
-        }
-    }
-
-    private fun PlayerOption.fallbackPriority(): Int {
-        val value = label.lowercase()
-        return when {
-            value.contains("abyss") -> 0
-            value.contains("veev") -> 1
-            value.contains("player") || value.contains("ezpla") -> 2
-            else -> 3
-        }
     }
 
     private fun Document.hasNextPage(currentPage: Int): Boolean {
@@ -1217,42 +998,15 @@ class msm21 : MainAPI() {
     companion object {
         private const val TAG = "MSM21_TRACE"
         private const val AJAX_BATCH_SIZE = 8
-        private const val FALLBACK_BATCH_SIZE = 6
-        private const val MAX_WEBVIEW_MIRRORS = 3
+        private const val MAX_WEBVIEW_MIRRORS = Int.MAX_VALUE
+        private const val NATIVE_CONCURRENCY = 4
         private const val WEBVIEW_CONCURRENCY = 2
         private const val STANDARD_EXTRACTOR_TIMEOUT_MS = 5_000L
-        private const val MIRROR_PIPELINE_TIMEOUT_MS = 11_000L
+        private const val MIRROR_PIPELINE_TIMEOUT_MS = 18_000L
         private const val MIRROR_CACHE_TTL_MS = 90_000L
         private const val MAX_MIRROR_CACHE_ENTRIES = 80
 
         private val MIRROR_CACHE = ConcurrentHashMap<String, CachedMirrors>()
-
-        private val DISABLED_SERVER_HINTS = listOf(
-            "abyss"
-        )
-
-        private val FAST_NATIVE_SERVER_HINTS = listOf(
-            "fire",
-            "wish",
-            "byse",
-            "mix",
-            "dsv",
-            "dood",
-            "hgl",
-            "playm",
-            "playe",
-            "voe",
-            "gomsm",
-            "netu",
-            "upns",
-            "rpmpl",
-            "seekp",
-            "p2pst",
-            "abyss",
-            "mixdr",
-            "dsvpl",
-            "full hd"
-        )
 
         private val YEAR_AT_END = Regex("\\s*\\(((?:19|20)\\d{2})\\)\\s*$")
         private val EPISODE_BADGE = Regex("(?i)EP\\s*(\\d+)")

@@ -152,12 +152,22 @@ object MsmWebViewProbe {
                 confidence: Int = 0,
                 finishSoon: Boolean = false
             ) {
+                // WebView request interception runs off the main thread; bridge,
+                // timeout and map snapshots must all use the same owner thread.
+                if (Looper.myLooper() != Looper.getMainLooper()) {
+                    handler.post {
+                        if (continuation.isActive) addStream(label, rawUrl, headers, mimeType,
+                            forcePlayable, captureSource, confidence, finishSoon)
+                    }
+                    return
+                }
+                if (!continuation.isActive) return
                 val playerUrl = activePlayerUrl.get()
                 val fixedUrl = rawUrl
                     ?.trim()
                     ?.toAbsoluteUrl(playerUrl)
                     ?.normaliseCapturedMediaUrl()
-                    ?.takeIf { forcePlayable || isStreamUrl(it) }
+                    ?.takeIf { !MsmMediaPolicy.isRejected(it) && (forcePlayable || isStreamUrl(it)) }
                     ?: return
 
                 val fixedHeaders = headers.toMutableMap().apply {
@@ -539,13 +549,14 @@ object MsmWebViewProbe {
         } else {
             "<base href=\"${htmlEscape(finalPageUrl)}\">"
         }
+        val hook = HOOK_JS.replace("__MSM_BLOCKED_HOSTS__", MsmMediaPolicy.blockedHostsJson())
         val injected = if (html.contains("<head>", true)) {
             html.replaceFirst(
                 Regex("<head>", RegexOption.IGNORE_CASE),
-                "<head>$baseTag$HOOK_JS"
+                "<head>$baseTag$hook"
             )
         } else {
-            "$baseTag$HOOK_JS$html"
+            "$baseTag$hook$html"
         }
 
         return WebResourceResponse(
@@ -608,18 +619,12 @@ object MsmWebViewProbe {
     }
 
     private fun isStreamUrl(rawUrl: String?): Boolean {
-        val value = rawUrl?.lowercase().orEmpty()
-        if (value.isBlank()) return false
-        if (BLOCKED_MEDIA_PARTS.any(value::contains)) return false
-
-        return value.contains("/sora/") ||
-            value.contains(".m3u8") ||
-            value.contains(".mpd") ||
-            value.contains(".mp4") ||
-            value.contains(".m4v") ||
-            value.contains("/manifest/") ||
-            value.contains("/master.m3u") ||
-            value.contains("playlist.m3u")
+        val url = rawUrl.orEmpty()
+        if (url.isBlank() || MsmMediaPolicy.isRejected(url)) return false
+        val hostPath = runCatching { URI(url).let { "${it.host}${it.path}".lowercase() } }
+            .getOrDefault("")
+        if (BLOCKED_MEDIA_PARTS.any(hostPath::contains)) return false
+        return MsmMediaPolicy.isMediaPath(url)
     }
 
     private fun guessLabel(url: String): String {
@@ -704,8 +709,17 @@ object MsmWebViewProbe {
 
   function cap(value) {
     try {
+      value = String(value);
+      var rawUrl = value.substring(value.lastIndexOf("|") + 1);
+      var parsed = new URL(rawUrl, document.baseURI);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+      var blocked = __MSM_BLOCKED_HOSTS__;
+      var host = parsed.hostname.toLowerCase();
+      for (var b = 0; b < blocked.length; b++) {
+        if (host === blocked[b] || host.endsWith("." + blocked[b])) return;
+      }
       if (window.msmBridge && window.msmBridge.capture) {
-        window.msmBridge.capture(String(value));
+        window.msmBridge.capture(value);
       }
     } catch(e) {}
   }
