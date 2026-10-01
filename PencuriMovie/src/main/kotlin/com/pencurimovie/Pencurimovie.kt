@@ -397,8 +397,17 @@ class Pencurimovie : MainAPI() {
     }
 
     private suspend fun withServerName(link: ExtractorLink, player: PlayerOption, master: Boolean): ExtractorLink {
-        val serverName = player.label.ifBlank { URI(player.url).host.orEmpty() }
-        val displayName = listOf(serverName, link.name, if (master) "HLS Auto" else "")
+        val label = player.label.trim()
+        val serverNumber = Regex("""(?i)^server\s*(\d+)$""")
+            .matchEntire(label)?.groupValues?.get(1)
+        val extractorName = link.name.ifBlank { URI(player.url).host.orEmpty() }
+        val baseName = if (serverNumber != null) {
+            "$extractorName $serverNumber"
+        } else {
+            listOf(label.takeUnless { it.equals("Server", true) }.orEmpty(), extractorName)
+                .filter { it.isNotBlank() }.distinct().joinToString(" • ")
+        }
+        val displayName = listOf(baseName, if (master) "Auto" else "")
             .filter { it.isNotBlank() }.distinct().joinToString(" • ")
         return newExtractorLink(source = displayName, name = displayName, url = link.url, type = link.type) {
             this.referer = link.referer
