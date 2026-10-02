@@ -92,6 +92,7 @@ object MsmWebViewProbe {
             val streams = linkedMapOf<String, CapturedStream>()
             val activePlayerUrl = AtomicReference(url)
             var finishScheduled = false
+            var humanVerification = false
 
             fun safeDestroy() {
                 runCatching {
@@ -162,6 +163,12 @@ object MsmWebViewProbe {
                     return
                 }
                 if (!continuation.isActive) return
+                // Abyss virtual sources carry player-only fragment metadata.
+                // They require the site's transport and are not direct MP4 URLs.
+                if (rawUrl?.substringAfter('#', "")?.startsWith("mp4/") == true) {
+                    Log.i(TAG, "MSM21_V14_VIRTUAL_SOURCE_REJECT source=$captureSource")
+                    return
+                }
                 val playerUrl = activePlayerUrl.get()
                 val fixedUrl = rawUrl
                     ?.trim()
@@ -228,6 +235,11 @@ object MsmWebViewProbe {
                 if (clean.isBlank()) return
 
                 when {
+                    clean.startsWith("MSM_VERIFY|") -> {
+                        humanVerification = true
+                        Log.w(TAG, "MSM21_V14_VERIFY_REQUIRED host=${runCatching { URI(activePlayerUrl.get()).host }.getOrNull()}")
+                        finish()
+                    }
                     clean.startsWith("MSM_SOURCE|") -> {
                         val parts = clean.split("|", limit = 4)
                         if (parts.size >= 4) {
@@ -294,6 +306,7 @@ object MsmWebViewProbe {
             }
 
             fun clickWebView() {
+                if (humanVerification || !continuation.isActive) return
                 // A JWPlayer config entry is not proof that the browser has actually
                 // requested the media. Keep clicking until we capture a real network
                 // request or response.
@@ -748,6 +761,12 @@ object MsmWebViewProbe {
 
   function inspectPlayer() {
     try {
+      var bodyText = document.body ? (document.body.innerText || "").toLowerCase() : "";
+      if (/verify (?:you are |that you are )?human|human verification|checking your browser|complete the captcha/.test(bodyText) ||
+          document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="hcaptcha.com"], iframe[src*="recaptcha"]')) {
+        if (window.msmBridge && window.msmBridge.capture) window.msmBridge.capture("MSM_VERIFY|human_check");
+        return;
+      }
       if (typeof window.jwplayer === "function") {
         var player = window.jwplayer();
         if (player) {

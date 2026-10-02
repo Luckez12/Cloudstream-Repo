@@ -13,7 +13,11 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
 import java.net.URI
+import java.net.URL
 
 /** Apply the same rules to native extractors, WebView requests and JS bridge captures. */
 internal object MsmMediaPolicy {
@@ -44,6 +48,7 @@ internal object MsmMediaPolicy {
 
     private suspend fun check(link: ExtractorLink): Checked {
         if (isRejected(link.url)) return Checked(link, "rejected")
+        if (link.type == ExtractorLinkType.VIDEO) return checkVideo(link)
         if (link.type != ExtractorLinkType.M3U8) return Checked(link, "other")
         return try {
             withTimeoutOrNull(3_500L) {
@@ -52,7 +57,7 @@ internal object MsmMediaPolicy {
                 val lines = response.text.trim().trimStart('\uFEFF').lineSequence()
                     .map { it.trim() }.filter { it.isNotEmpty() }.toList()
                 val state = when {
-                    response.code == 404 || response.code == 410 || isRejected(response.url) -> "rejected"
+                    response.code in listOf(400, 401, 403, 404, 410) || isRejected(response.url) -> "rejected"
                     response.code !in 200..299 -> "unverified"
                     lines.firstOrNull() != "#EXTM3U" -> "rejected"
                     lines.indices.any { i ->
@@ -68,6 +73,45 @@ internal object MsmMediaPolicy {
             } ?: Checked(link, "unverified")
         } catch (e: CancellationException) { throw e }
         catch (_: Exception) { Checked(link, "unverified") }
+    }
+
+    private suspend fun checkVideo(link: ExtractorLink): Checked = withContext(Dispatchers.IO) {
+        var connection: HttpURLConnection? = null
+        try {
+            val conn = URL(link.url).openConnection() as HttpURLConnection
+            connection = conn
+            conn.instanceFollowRedirects = true
+            conn.connectTimeout = 3_000
+            conn.readTimeout = 3_000
+            link.headers.filterKeys { !it.equals("Range", true) }.forEach { (key, value) ->
+                conn.setRequestProperty(key, value)
+            }
+            if (link.referer.isNotBlank()) conn.setRequestProperty("Referer", link.referer)
+            conn.setRequestProperty("Range", "bytes=0-511")
+            val status = conn.responseCode
+            if (isRejected(conn.url.toString()) || status in listOf(400, 401, 403, 404, 410)) {
+                Log.w("MSM21", "MSM21_V14_VIDEO_REJECT host=${URI(link.url).host} status=$status")
+                return@withContext Checked(link, "rejected")
+            }
+            if (status !in 200..299) return@withContext Checked(link, "unverified")
+            val bytes = ByteArray(512)
+            var count = 0
+            conn.inputStream.use { input ->
+                while (count < bytes.size) {
+                    val read = input.read(bytes, count, bytes.size - count)
+                    if (read <= 0) break
+                    count += read
+                }
+            }
+            val box = if (count >= 8) String(bytes, 4, 4, Charsets.US_ASCII) else ""
+            val video = box in listOf("ftyp", "moov", "mdat", "moof", "styp", "sidx", "free", "wide") ||
+                (count >= 4 && bytes[0] == 0x1A.toByte() && bytes[1] == 0x45.toByte() &&
+                    bytes[2] == 0xDF.toByte() && bytes[3] == 0xA3.toByte()) ||
+                (count > 188 && bytes[0] == 0x47.toByte() && bytes[188] == 0x47.toByte())
+            Checked(link, if (video) "video" else "rejected")
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { Checked(link, "unverified") }
+        finally { connection?.disconnect() }
     }
 
     suspend fun select(links: List<ExtractorLink>, label: String): List<ExtractorLink> = coroutineScope {

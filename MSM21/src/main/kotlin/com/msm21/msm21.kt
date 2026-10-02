@@ -451,6 +451,7 @@ class msm21 : MainAPI() {
         val unresolved = mirrors.distinctBy { it.url }.map { mirror ->
             async {
                 val candidates = java.util.Collections.synchronizedList(mutableListOf<ExtractorLink>())
+                var apiSelected = emptyList<ExtractorLink>()
                 val collect: (ExtractorLink) -> Unit = { link ->
                     if (MsmMediaPolicy.isRejected(link.url)) {
                         Log.w(TAG, "MSM21_V12_REJECT label=${mirror.label} target=${urlForLog(link.url)}")
@@ -460,10 +461,15 @@ class msm21 : MainAPI() {
                 }
                 try {
                     withTimeoutOrNull(MIRROR_PIPELINE_TIMEOUT_MS) {
-                        val native = MsmNativeHlsDiscovery.discover(mirror.url, pageUrl)
-                        native.masters.forEach(collect)
-                        native.media.forEach(collect)
-                        if (native.masters.isEmpty()) {
+                        val apiLinks = MsmPlayerApi.extract(mirror.url, pageUrl)
+                        if (apiLinks.isNotEmpty()) apiSelected = MsmMediaPolicy.select(apiLinks, mirror.label)
+                        val native = if (apiSelected.isEmpty())
+                            MsmNativeHlsDiscovery.discover(mirror.url, pageUrl) else null
+                        if (native != null) {
+                            native.masters.forEach(collect)
+                            native.media.forEach(collect)
+                        }
+                        if (apiSelected.isEmpty() && native?.masters?.isEmpty() != false) {
                             withTimeoutOrNull(STANDARD_EXTRACTOR_TIMEOUT_MS) {
                                 loadExtractor(mirror.url, pageUrl, subtitleCallback, collect)
                             }
@@ -490,7 +496,7 @@ class msm21 : MainAPI() {
                 catch (error: Exception) {
                     Log.w(TAG, "MSM21_V12_EXTRACT_FAILED label=${mirror.label} error=${error.javaClass.simpleName}")
                 }
-                val selected = MsmMediaPolicy.select(candidates.toList(), mirror.label)
+                val selected = apiSelected.ifEmpty { MsmMediaPolicy.select(candidates.toList(), mirror.label) }
                 selected.forEach { link ->
                     if (emittedUrls.add("${mirror.label}\u0000${link.url}")) callback(link)
                 }
