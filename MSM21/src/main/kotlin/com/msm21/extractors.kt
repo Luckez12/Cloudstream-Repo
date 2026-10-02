@@ -10,7 +10,6 @@ import android.view.MotionEvent
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -95,11 +94,6 @@ object MsmWebViewProbe {
             val activePlayerUrl = AtomicReference(url)
             var finishScheduled = false
             var humanVerification = false
-            val abyssProbe = runCatching { URI(url).host == "abyss.msmbot.club" }.getOrDefault(false)
-            val probeStarted = SystemClock.uptimeMillis()
-            var hookReady = false
-            var terminalLogged = false
-            var readyTimeout: Runnable? = null
 
             fun safeDestroy() {
                 runCatching {
@@ -130,14 +124,9 @@ object MsmWebViewProbe {
                     )
             }
 
-            fun finish(reason: String = "timeout") {
+            fun finish() {
                 handler.post {
                     if (continuation.isActive) {
-                        if (abyssProbe && !terminalLogged) {
-                            terminalLogged = true
-                            Log.i(TAG, "MSM21_V18_ABYSS_END reason=$reason hook_ready=$hookReady " +
-                                "captures=${streams.size} elapsed_ms=${SystemClock.uptimeMillis() - probeStarted}")
-                        }
                         val result = sortedResult()
                         Log.i(TAG, "MSM21_WEBVIEW_FINISH target=${safeUrl(url)} streams=${result.size}")
                         safeDestroy()
@@ -150,7 +139,7 @@ object MsmWebViewProbe {
                 if (finishScheduled) return
                 finishScheduled = true
                 handler.postDelayed(
-                    { finish("stream_observed") },
+                    { finish() },
                     FINISH_AFTER_FIRST_STREAM_MS
                 )
             }
@@ -254,29 +243,6 @@ object MsmWebViewProbe {
                 if (clean.isBlank()) return
 
                 when {
-                    abyssProbe && clean == "MSM_ABYSS_READY" -> {
-                        if (!hookReady) {
-                            hookReady = true
-                            Log.i(TAG, "MSM21_V18_ABYSS_HOOK ready=true elapsed_ms=${SystemClock.uptimeMillis() - probeStarted}")
-                            readyTimeout?.let { handler.removeCallbacks(it) }
-                            val remaining = (20_000L - (SystemClock.uptimeMillis() - probeStarted)).coerceAtLeast(0L)
-                            val timeout = Runnable { finish("ready_timeout") }
-                            readyTimeout = timeout
-                            handler.postDelayed(timeout, minOf(10_000L, remaining))
-                        }
-                    }
-                    abyssProbe && clean.startsWith("MSM_ABYSS_VIDEO|") -> {
-                        val fields = clean.split('|')
-                        if (fields.size == 6 && fields.drop(1).all { it.matches(Regex("[0-9]{1,2}|none|direct|virtual|blob")) }) {
-                            Log.i(TAG, "MSM21_V18_ABYSS_VIDEO ready_state=${fields[1]} network_state=${fields[2]} " +
-                                "error_code=${fields[3]} source_kind=${fields[4]} paused=${fields[5]}")
-                        }
-                    }
-                    abyssProbe && clean.startsWith("MSM_ABYSS_ERROR|") -> {
-                        val kind = clean.substringAfter('|')
-                        if (kind in setOf("script_resource", "script_runtime", "promise_rejection"))
-                            Log.w(TAG, "MSM21_V18_ABYSS_ERROR kind=$kind")
-                    }
                     clean.startsWith("MSM_PAGE_STATE|") -> {
                         val reason = clean.substringAfter('|')
                         if (reason in setOf("not_found", "video_unavailable")) {
@@ -286,7 +252,7 @@ object MsmWebViewProbe {
                     clean.startsWith("MSM_VERIFY|") -> {
                         humanVerification = true
                         Log.w(TAG, "MSM21_V14_VERIFY_REQUIRED host=${runCatching { URI(activePlayerUrl.get()).host }.getOrNull()}")
-                        finish("verification_required")
+                        finish()
                     }
                     clean.startsWith("MSM_SOURCE|") -> {
                         val parts = clean.split("|", limit = 4)
@@ -415,14 +381,7 @@ object MsmWebViewProbe {
             }
 
             continuation.invokeOnCancellation {
-                handler.post {
-                    if (abyssProbe && !terminalLogged) {
-                        terminalLogged = true
-                        Log.i(TAG, "MSM21_V18_ABYSS_END reason=cancelled hook_ready=$hookReady " +
-                            "captures=${streams.size} elapsed_ms=${SystemClock.uptimeMillis() - probeStarted}")
-                    }
-                    safeDestroy()
-                }
+                handler.post { safeDestroy() }
             }
 
             @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
@@ -464,15 +423,6 @@ object MsmWebViewProbe {
                         view: WebView?,
                         pageUrl: String?
                     ) = Unit
-
-                    override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                        val target = request?.url?.toString().orEmpty()
-                        if (abyssProbe && !MsmMediaPolicy.isRejected(target) &&
-                            (shouldInjectPlayerPage(target, url) || runCatching { URI(target).path.orEmpty().endsWith(".js") }.getOrDefault(false))) {
-                            Log.w(TAG, "MSM21_V18_ABYSS_LOAD_ERROR code=${error?.errorCode} host=${runCatching { URI(target).host }.getOrNull()}")
-                        }
-                        super.onReceivedError(view, request, error)
-                    }
 
                     override fun shouldInterceptRequest(
                         view: WebView?,
@@ -569,19 +519,13 @@ object MsmWebViewProbe {
                     handler.postDelayed({ clickWebView() }, delay)
                 }
 
-                if (abyssProbe) {
-                    // Initial no-hook deadline can move once, but never beyond the hard cap.
-                    val timeout = Runnable { finish("hook_not_ready_timeout") }
-                    readyTimeout = timeout
-                    handler.postDelayed(timeout, 12_000L)
-                    handler.postDelayed({ finish("hard_timeout") }, 20_000L)
-                } else handler.postDelayed({ finish() }, MAX_WAIT_MS)
+                handler.postDelayed({ finish() }, MAX_WAIT_MS)
             }
 
             runCatching { setup() }
                 .onFailure { error ->
                     Log.e(TAG, "MSM21_WEBVIEW_SETUP_ERROR error=${error.javaClass.simpleName}:${error.message}")
-                    finish("setup_error")
+                    finish()
                 }
         }
     }
@@ -636,7 +580,6 @@ object MsmWebViewProbe {
             "<base href=\"${htmlEscape(finalPageUrl)}\">"
         }
         val hook = HOOK_JS.replace("__MSM_BLOCKED_HOSTS__", MsmMediaPolicy.blockedHostsJson())
-            .replace("__MSM_ABYSS_DIAGNOSTICS__", (runCatching { URI(pageUrl).host == "abyss.msmbot.club" }.getOrDefault(false)).toString())
         val injected = if (html.contains("<head>", true)) {
             html.replaceFirst(
                 Regex("<head>", RegexOption.IGNORE_CASE),
@@ -794,23 +737,6 @@ object MsmWebViewProbe {
 (function() {
   if (window.__msmHooked) return;
   window.__msmHooked = true;
-  var abyssDiagnostics = __MSM_ABYSS_DIAGNOSTICS__;
-  var lastAbyssVideoState = "";
-  var abyssErrorsSeen = {};
-  function abyssSignal(value) {
-    if (abyssDiagnostics && window.msmBridge && window.msmBridge.capture) window.msmBridge.capture(value);
-  }
-  if (abyssDiagnostics) {
-    window.addEventListener("error", function(event) {
-      var target = event.target;
-      var kind = target && target.tagName === "SCRIPT" ? "script_resource" : target === window ? "script_runtime" : "";
-      if (kind && !abyssErrorsSeen[kind]) { abyssErrorsSeen[kind] = true; abyssSignal("MSM_ABYSS_ERROR|" + kind); }
-    }, true);
-    window.addEventListener("unhandledrejection", function() {
-      if (!abyssErrorsSeen.promise_rejection) { abyssErrorsSeen.promise_rejection = true; abyssSignal("MSM_ABYSS_ERROR|promise_rejection"); }
-    });
-    abyssSignal("MSM_ABYSS_READY");
-  }
 
   function cap(value) {
     try {
@@ -914,14 +840,6 @@ object MsmWebViewProbe {
       }
 
       var videos = document.querySelectorAll("video");
-      if (abyssDiagnostics) {
-        var video = videos[0];
-        var raw = video ? (video.currentSrc || video.src || "") : "";
-        var kind = !raw ? "none" : raw.indexOf("blob:") === 0 ? "blob" : raw.indexOf("#mp4/") >= 0 ? "virtual" : "direct";
-        var state = "MSM_ABYSS_VIDEO|" + (video ? video.readyState : 0) + "|" + (video ? video.networkState : 0) +
-          "|" + (video && video.error ? video.error.code : 0) + "|" + kind + "|" + (video && !video.paused ? 0 : 1);
-        if (state !== lastAbyssVideoState) { lastAbyssVideoState = state; abyssSignal(state); }
-      }
       for (var v = 0; v < videos.length; v++) {
         var src = videos[v].currentSrc || videos[v].src || "";
         if (src) cap("MSM_VIDEO|" + abs(src));

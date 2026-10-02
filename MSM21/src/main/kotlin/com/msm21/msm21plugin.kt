@@ -38,7 +38,7 @@ object MsmRuntime {
 class msm21plugin : BasePlugin() {
     override fun load() {
         val context = MsmRuntime.resolveContext()
-        Log.i("MSM21", "MSM21_PLUGIN_LOADED version=18 context=${context != null}")
+        Log.i("MSM21", "MSM21_PLUGIN_LOADED version=17 context=${context != null}")
         registerMainAPI(msm21())
         registerExtractorAPI(Dsvplay())
         registerExtractorAPI(Hglink())
