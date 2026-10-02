@@ -557,6 +557,9 @@ class msm21 : MainAPI() {
                             ?.value.orEmpty().ifBlank { mirror.url }
                         quality = getQualityFromName(stream.label)
                         this.headers = headers
+                        stream.abyssExpectedSize?.let { size ->
+                            extractorData = MsmAbyssDirectSource.marker(size)
+                        }
                     }
                 }
                 val selected = MsmMediaPolicy.select(links, mirror.label)

@@ -63,7 +63,8 @@ object MsmWebViewProbe {
         val headers: Map<String, String>,
         val mimeType: String? = null,
         val captureSource: String = "unknown",
-        val confidence: Int = 0
+        val confidence: Int = 0,
+        val abyssExpectedSize: Long? = null
     )
 
     private class Bridge(
@@ -163,12 +164,14 @@ object MsmWebViewProbe {
                     return
                 }
                 if (!continuation.isActive) return
-                // Abyss virtual sources carry player-only fragment metadata.
-                // They require the site's transport and are not direct MP4 URLs.
-                if (rawUrl?.substringAfter('#', "")?.startsWith("mp4/") == true) {
-                    Log.i(TAG, "MSM21_V14_VIRTUAL_SOURCE_REJECT source=$captureSource")
+                val virtual = rawUrl?.substringAfter('#', "")?.startsWith("mp4/") == true
+                val abyssDirect = if (virtual) MsmAbyssDirectSource.parse(rawUrl.orEmpty()) else null
+                if (virtual && abyssDirect == null) {
+                    Log.i(TAG, "MSM21_V16_ABYSS_SOURCE reason=unsupported_virtual_source source=$captureSource")
                     return
                 }
+                // This is only a candidate. Strict range checks below must prove
+                // that the underlying object works without the site's transport.
                 val playerUrl = activePlayerUrl.get()
                 val fixedUrl = rawUrl
                     ?.trim()
@@ -203,12 +206,13 @@ object MsmWebViewProbe {
 
                 val key = canonicalMediaKey(fixedUrl)
                 val candidate = CapturedStream(
-                    label = label.trim().ifBlank { guessLabel(fixedUrl) },
+                    label = abyssDirect?.label ?: label.trim().ifBlank { guessLabel(fixedUrl) },
                     url = fixedUrl,
                     headers = fixedHeaders,
                     mimeType = mimeType,
                     captureSource = captureSource,
-                    confidence = confidence
+                    confidence = confidence,
+                    abyssExpectedSize = abyssDirect?.size ?: streams[key]?.abyssExpectedSize
                 )
                 val existing = streams[key]
 
@@ -219,8 +223,12 @@ object MsmWebViewProbe {
                             "label=${candidate.label} url=${safeUrl(fixedUrl)} mime=${mimeType.orEmpty()}"
                     )
                     streams[key] = candidate
-                } else if (existing.mimeType.isNullOrBlank() && !mimeType.isNullOrBlank()) {
-                    streams[key] = existing.copy(mimeType = mimeType)
+                } else if ((existing.mimeType.isNullOrBlank() && !mimeType.isNullOrBlank()) ||
+                    (existing.abyssExpectedSize == null && candidate.abyssExpectedSize != null)) {
+                    streams[key] = existing.copy(
+                        mimeType = existing.mimeType?.takeIf { it.isNotBlank() } ?: mimeType,
+                        abyssExpectedSize = existing.abyssExpectedSize ?: candidate.abyssExpectedSize
+                    )
                 }
 
                 // JWPlayer config URLs may be placeholders containing fragment metadata.
@@ -235,6 +243,12 @@ object MsmWebViewProbe {
                 if (clean.isBlank()) return
 
                 when {
+                    clean.startsWith("MSM_PAGE_STATE|") -> {
+                        val reason = clean.substringAfter('|')
+                        if (reason in setOf("not_found", "video_unavailable")) {
+                            Log.w(TAG, "MSM21_V16_PAGE_STATE host=${runCatching { URI(activePlayerUrl.get()).host }.getOrNull()} reason=$reason")
+                        }
+                    }
                     clean.startsWith("MSM_VERIFY|") -> {
                         humanVerification = true
                         Log.w(TAG, "MSM21_V14_VERIFY_REQUIRED host=${runCatching { URI(activePlayerUrl.get()).host }.getOrNull()}")
@@ -781,6 +795,15 @@ object MsmWebViewProbe {
   function inspectPlayer() {
     try {
       var bodyText = document.body ? (document.body.innerText || "").toLowerCase() : "";
+      var notFoundHeading = document.querySelector("h1, h2");
+      if (notFoundHeading && /^page not found$/i.test((notFoundHeading.innerText || "").trim())) {
+        if (window.msmBridge && window.msmBridge.capture) window.msmBridge.capture("MSM_PAGE_STATE|not_found");
+        return;
+      }
+      if (/we can.t find the video|video (?:has been |was )?(?:removed|deleted|not found)/.test(bodyText)) {
+        if (window.msmBridge && window.msmBridge.capture) window.msmBridge.capture("MSM_PAGE_STATE|video_unavailable");
+        return;
+      }
       if (/verify (?:you are |that you are )?human|human verification|checking your browser|complete the captcha/.test(bodyText) ||
           document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="hcaptcha.com"], iframe[src*="recaptcha"]')) {
         if (window.msmBridge && window.msmBridge.capture) window.msmBridge.capture("MSM_VERIFY|human_check");

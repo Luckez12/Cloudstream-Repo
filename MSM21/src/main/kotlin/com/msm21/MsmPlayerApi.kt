@@ -60,12 +60,18 @@ internal object MsmPlayerApi {
 
     private suspend fun playerX(uri: URI, pageUrl: String): List<ExtractorLink> {
         val id = uri.fragment.orEmpty().substringBefore('&')
-        if (!id.matches(Regex("[A-Za-z0-9_-]{2,100}")) || uri.scheme != "https") return emptyList()
+        if (!id.matches(Regex("[A-Za-z0-9_-]{2,100}")) || uri.scheme != "https") {
+            Log.w("MSM21", "MSM21_V16_PLAYERX host=${uri.host} reason=invalid_video_id")
+            return emptyList()
+        }
         val base = origin(uri)
         val parent = URI(pageUrl).host.orEmpty().removePrefix("www.")
         val response = app.get("$base/api/v1/video?id=${enc(id)}&w=1080&h=1080&r=${enc(parent)}",
             headers = headers(base), timeout = 8L)
-        if (response.code !in 200..299) return emptyList()
+        if (response.code !in 200..299) {
+            Log.w("MSM21", "MSM21_V16_PLAYERX host=${uri.host} status=${response.code} reason=api_http_error")
+            return emptyList()
+        }
         val hex = response.text.trim()
         if (hex.length !in 32..2_000_000 || hex.length % 32 != 0 ||
             !hex.matches(Regex("[0-9a-fA-F]+"))) {
@@ -103,6 +109,10 @@ internal object MsmPlayerApi {
                 }
                 options.add(kind to raw)
             }
+        Log.i("MSM21", "MSM21_V16_PLAYERX host=${uri.host} " +
+            "source_fields=${listOf("cfNative", "source", "hlsVideoTiktok", "hlsVideoGoogle").count { data.optString(it).isNotBlank() }} " +
+            "enabled_candidates=${options.count { it.second.isNotBlank() }} " +
+            "reason=${if (options.none { it.second.isNotBlank() }) "no_enabled_source" else "sources_available"}")
         return options.filter { it.second.isNotBlank() }.distinctBy { it.second }.mapNotNull { (kind, raw) ->
             val media = uri.resolve(raw).toString()
             if (MsmMediaPolicy.isRejected(media)) return@mapNotNull null
@@ -120,12 +130,16 @@ internal object MsmPlayerApi {
     }
 
     private suspend fun byse(uri: URI, pageUrl: String): List<ExtractorLink> {
+        byseFrames.remove(uri.toString())
         val base = origin(uri)
         val code = uri.path.trimEnd('/').substringAfterLast('/')
         if (!code.matches(Regex("[A-Za-z0-9_-]{2,100}"))) return emptyList()
         val detailsResponse = app.get("$base/api/videos/$code/embed/details",
             referer = pageUrl, headers = headers(base), timeout = 6L)
-        if (detailsResponse.code !in 200..299) return emptyList()
+        if (detailsResponse.code !in 200..299) {
+            Log.w("MSM21", "MSM21_V16_BYSE stage=details status=${detailsResponse.code} reason=${if (detailsResponse.code == 404) "not_found" else "api_http_error"}")
+            return emptyList()
+        }
         val details = JSONObject(detailsResponse.text)
         val frame = URI(details.getString("embed_frame_url"))
         if (MsmMediaPolicy.isRejected(frame.toString())) return emptyList()
@@ -139,6 +153,10 @@ internal object MsmPlayerApi {
             "X-Embed-Origin" to URI(pageUrl).host.orEmpty(), "X-Embed-Referer" to pageUrl)
         val settingsResponse = app.get("$frameBase/api/videos/$frameCode/embed/settings",
             headers = embedHeaders, timeout = 6L)
+        if (settingsResponse.code !in 200..299) {
+            Log.w("MSM21", "MSM21_V16_BYSE stage=settings status=${settingsResponse.code} reason=${if (settingsResponse.code == 404) "not_found" else "api_http_error"}")
+            return emptyList()
+        }
         if (settingsResponse.code in 200..299 &&
             JSONObject(settingsResponse.text).optBoolean("captcha_required", false)) {
             Log.w("MSM21", "MSM21_V15_BYSE_BLOCKED reason=human_verification_required")
@@ -150,7 +168,7 @@ internal object MsmPlayerApi {
             headers = embedHeaders,
             timeout = 6L)
         if (response.code !in 200..299) {
-            Log.w("MSM21", "MSM21_V15_BYSE_PLAYBACK status=${response.code} reason=${if (response.code == 405) "browser_attestation_required" else "api_unavailable"}")
+            Log.w("MSM21", "MSM21_V15_BYSE_PLAYBACK status=${response.code} reason=${if (response.code == 405) "method_not_allowed" else if (response.code == 404) "not_found" else "api_unavailable"}")
             return emptyList()
         }
         val data = JSONObject(response.text).getJSONObject("playback")

@@ -1,45 +1,54 @@
-MSM21 v15 — Abyss / Byse extraction corrections
+MSM21 v16 — Guarded Abyss Direct Candidate + PlayerX/Byse Diagnostics
 
 INSTALL
-Extract at the ROOT of Cloudstream-Repo-main; merge/replace MSM21/.
-ZIP paths start with MSM21/, not Cloudstream-Repo-main/MSM21/.
-Build through the repository GitHub workflow and update the MSM21 extension.
+Extract at ROOT of Cloudstream-Repo-main; merge/replace MSM21/.
+Build through the repository workflow and update the MSM21 extension.
+Complete MSM21 folder from v15 is included, plus one new helper.
 
 CHANGES
-- Preserve the actual JSON number/string type when deriving Abyss native tokens.
-  The bundled player MD5 hashes Number inputs differently from UTF-8 strings.
-- Read Byse embed settings and report human verification explicitly.
-- Supply X-Embed-Origin, X-Embed-Referer and X-Embed-Parent context.
-- Inject the media-capture hook into the exact nested frame advertised by Byse
-  details, rather than only the outer SPA page.
-- Observe already-decrypted browser source data, preserve HLS MIME types,
-  and keep tracking rejection and HTTP media validation.
-- Extension version and loaded-version marker are 15.
-- Five PlayerX API flows from v14 are preserved.
+- Accept only the observed HTTPS storage.googleapis.com/mediastorage/...mp4
+  source with #mp4/r2/1/.../size/quality/h264 metadata as a direct candidate.
+  Strip the fragment from HTTP URLs; retain expected object size.
+- This candidate must pass HTTP 206 + exact Content-Range + 512 bytes at both
+  start and end, matching advertised size, with a media signature at the start.
+  Errors/timeouts/incorrect ranges are rejected, never emitted as unverified.
+  Other virtual formats remain unsupported. Capture alone is not success.
+- PlayerX logs invalid ID, API HTTP failure, populated source-field count and
+  enabled-candidate count. No API bodies, signed URLs or keys are logged.
+  Existing source extraction for servers 3–6 is preserved.
+- Byse logs details/settings failures; distinguishes 404 from verification.
+  405 is labelled method_not_allowed instead of assuming its cause. Clear
+  stale frame entries before each details refresh. Keep existing CAPTCHA logic.
+- Browser diagnostics distinguish Page not found/video unavailable from human
+  verification. These observations do not bypass verification or repair files.
+- Extension version and loaded-version marker are 16.
 
-VERIFICATION
-- Numeric-size MD5 parity against actual Abyss player implementation: PASS
-  for the four sizes advertised by the test title.
-- Hook tests: tracking rejected, HLS/MP4 preserved, human check detected: PASS.
-- Decryption hook: original result preserved, HLS MIME captured, tracking rejected: PASS.
-- Android build: NOT VERIFIED. Gradle 8.12 download failed (network unreachable).
-- Android playback: NOT VERIFIED; requires installed-extension testing.
+LIMITS — THIS IS NOT FULL ABYSS TRANSPORT SUPPORT
+The site's custom segmented transport is NOT implemented. This is a guarded
+fallback ONLY when the browser-advertised object independently works through
+ordinary HTTP ranges. If custom transport is required, Abyss can still fail.
+No working Android Abyss playback is claimed. Playe 2 is diagnosed, not claimed
+repaired. Byse still fails when unavailable or verification is required.
+No CAPTCHA solving, fabricated attestation, proxy server or app modification.
+Mixdr 8/Full HD are excluded from testing as requested. Existing provider paths
+are not removed. data-nume=fake remains excluded.
 
-IMPORTANT LIMITS — THIS IS NOT COMPLETE ABYSS/BYSE SUPPORT
-Title: Crazy Rich, Incredibly Broke (2026).
-Fresh native range probes, including corrected numeric-size keys, still returned
-404 for all four Abyss qualities. The player also advertises segmented/custom
-transport. That transport is not implemented by this patch. Invalid native
-URLs remain rejected and fallback extraction is still attempted.
-Byse settings returned captcha_required=true. An unattested GET playback
-request returned method-not-allowed. The player uses POST when a real browser
-attestation is available. This patch does not fabricate that attestation, solve
-CAPTCHAs, or add a visible verification dialog. The hidden fallback may still
-finish without a source when verification blocks the player.
-No successful playback for server 1 or 7 is claimed.
+VALIDATION
+PASS: actual JS capture hook tested with Node VM for Byse not-found, human
+verification, Abyss virtual capture, HLS preservation, tracker/blob rejection
+and avoiding not-found classification for FAQ text without an error heading.
+Android compilation: NOT VERIFIED — no Gradle/Kotlin toolchain or full repo
+available in this workspace. Android playback/range probes: NOT VERIFIED.
+Browser readyState=4 from review is not proof of Cloudstream native playback.
 
-TEST AFTER INSTALL
-Fresh-load the same title, then Save Full Timeline. Check plugin version=15,
-MSM21_V15_BYSE_BLOCKED, WebView frame/capture records, and actual PLAYER_READY
-or playback errors. Confirm servers 2–6 still play. PASS LINKS alone is not
-proof that a source plays.
+TEST AFTER BUILD
+Fresh-load Crazy Rich, Incredibly Broke (2026); verify installed version 16.
+Test Abyss, Playe 2 and Byse 7; export Full Timeline.
+Look for MSM21_V16_ABYSS_DIRECT, MSM21_V16_PLAYERX, MSM21_V16_BYSE/PAGE_STATE.
+If Abyss emits a source, test first frame and seek near the end.
+PASS LINKS/range_media_verified does not prove uninterrupted playback.
+Do one regression check of RPM, Seek, P2P and Upns.
+Do not test Mixdr 8/Full HD for this patch.
+
+REPRODUCE HOOK CHECK
+From extracted patch root: node validation/test_hook.cjs
