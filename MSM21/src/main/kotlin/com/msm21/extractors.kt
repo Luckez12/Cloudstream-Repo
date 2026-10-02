@@ -416,11 +416,14 @@ object MsmWebViewProbe {
                     ): WebResourceResponse? {
                         val requestUrl = request?.url?.toString().orEmpty()
 
-                        if (shouldInjectPlayerPage(requestUrl, url)) {
+                        val nestedFrame = MsmPlayerApi.nestedFrame(url)
+                        if (shouldInjectPlayerPage(requestUrl, url) ||
+                            (nestedFrame != null && shouldInjectPlayerPage(requestUrl, nestedFrame))) {
                             return runCatching {
                                 injectIntoPlayerPage(
                                     pageUrl = requestUrl,
-                                    referer = referer,
+                                    referer = if (nestedFrame != null &&
+                                        shouldInjectPlayerPage(requestUrl, nestedFrame)) url else referer,
                                     onFinalUrl = { finalUrl ->
                                         activePlayerUrl.set(finalUrl)
                                         Log.i(TAG, "MSM21_WEBVIEW_PLAYER_URL ${safeUrl(finalUrl)}")
@@ -750,7 +753,7 @@ object MsmWebViewProbe {
       for (var i = 0; i < list.length; i++) {
         var source = list[i] || {};
         var label = source.label || source.name || source.height || "Auto";
-        var type = source.type || "";
+        var type = source.type || source.mime_type || "";
         var file = source.file || source.url || "";
         if (file) {
           cap("MSM_SOURCE|" + label + "|" + type + "|" + abs(file));
@@ -758,6 +761,22 @@ object MsmWebViewProbe {
       }
     } catch(e) {}
   }
+
+  try {
+    var subtle = window.crypto && window.crypto.subtle;
+    if (subtle && subtle.decrypt) {
+      var originalDecrypt = subtle.decrypt;
+      subtle.decrypt = function() {
+        return originalDecrypt.apply(this, arguments).then(function(bytes) {
+          try {
+            var decoded = JSON.parse(new TextDecoder().decode(bytes));
+            if (decoded && Array.isArray(decoded.sources)) sendSources(decoded.sources);
+          } catch(e) {}
+          return bytes;
+        });
+      };
+    }
+  } catch(e) {}
 
   function inspectPlayer() {
     try {

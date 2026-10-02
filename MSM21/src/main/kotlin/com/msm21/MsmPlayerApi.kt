@@ -22,6 +22,10 @@ import javax.crypto.spec.SecretKeySpec
  * Do not turn telemetry/config strings into movie sources.
  */
 internal object MsmPlayerApi {
+    private val byseFrames = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    fun nestedFrame(url: String): String? = byseFrames[url]
+
     private val playerXHosts = setOf("playerx.player4me.online", "playerx.rpmplay.online",
         "playerx.seekplays.online", "playerx.p2pstream.online", "playerx.upns.live")
 
@@ -38,12 +42,12 @@ internal object MsmPlayerApi {
                 "abyss.msmbot.club" -> abyss(uri, pageUrl)
                 else -> byse(uri, pageUrl)
             }
-            Log.i("MSM21", "MSM21_V14_API host=${uri.host} candidates=${links.size}")
+            Log.i("MSM21", "MSM21_V15_API host=${uri.host} candidates=${links.size}")
             links
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
             // Never log response bodies, API credentials, playback keys or signed URLs.
-            Log.w("MSM21", "MSM21_V14_API_FAILED host=${runCatching { URI(url).host }.getOrNull()} " +
+            Log.w("MSM21", "MSM21_V15_API_FAILED host=${runCatching { URI(url).host }.getOrNull()} " +
                 "error=${error.javaClass.simpleName}")
             emptyList()
         }
@@ -65,7 +69,7 @@ internal object MsmPlayerApi {
         val hex = response.text.trim()
         if (hex.length !in 32..2_000_000 || hex.length % 32 != 0 ||
             !hex.matches(Regex("[0-9a-fA-F]+"))) {
-            Log.w("MSM21", "MSM21_V14_API_RESPONSE host=${uri.host} reason=non_encrypted_response")
+            Log.w("MSM21", "MSM21_V15_API_RESPONSE host=${uri.host} reason=non_encrypted_response")
             return emptyList()
         }
         // Derived from the published PlayerX Z()/J() functions for https + #videoId.
@@ -127,12 +131,26 @@ internal object MsmPlayerApi {
         if (MsmMediaPolicy.isRejected(frame.toString())) return emptyList()
         val frameCode = frame.path.trimEnd('/').substringAfterLast('/')
         if (!frameCode.matches(Regex("[A-Za-z0-9_-]{2,100}"))) return emptyList()
+        if (frame.scheme != "https" || frame.host.isNullOrBlank()) return emptyList()
+        byseFrames[uri.toString()] = frame.toString()
         val frameBase = origin(frame)
+        val embedHeaders = headers(frameBase) + mapOf(
+            "Referer" to frame.toString(), "X-Embed-Parent" to uri.toString(),
+            "X-Embed-Origin" to URI(pageUrl).host.orEmpty(), "X-Embed-Referer" to pageUrl)
+        val settingsResponse = app.get("$frameBase/api/videos/$frameCode/embed/settings",
+            headers = embedHeaders, timeout = 6L)
+        if (settingsResponse.code in 200..299 &&
+            JSONObject(settingsResponse.text).optBoolean("captcha_required", false)) {
+            Log.w("MSM21", "MSM21_V15_BYSE_BLOCKED reason=human_verification_required")
+            // Keep the actual frame for the browser fallback. Do not fabricate an
+            // attestation or submit a CAPTCHA response on the user's behalf.
+            return emptyList()
+        }
         val response = app.get("$frameBase/api/videos/$frameCode/embed/playback",
-            headers = headers(frameBase) + mapOf("Referer" to frame.toString(), "x-embed-parent" to uri.toString()),
+            headers = embedHeaders,
             timeout = 6L)
         if (response.code !in 200..299) {
-            Log.w("MSM21", "MSM21_V14_BYSE_PLAYBACK status=${response.code} reason=api_unavailable")
+            Log.w("MSM21", "MSM21_V15_BYSE_PLAYBACK status=${response.code} reason=${if (response.code == 405) "browser_attestation_required" else "api_unavailable"}")
             return emptyList()
         }
         val data = JSONObject(response.text).getJSONObject("playback")
@@ -165,12 +183,16 @@ internal object MsmPlayerApi {
 
     private fun b64(raw: String): ByteArray = Base64.decode(raw, Base64.URL_SAFE or Base64.NO_WRAP)
 
-    private fun md5Key(value: String): ByteArray = MessageDigest.getInstance("MD5")
-        .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it.toInt() and 255) }
+    private fun md5Key(value: String, numeric: Boolean = false): ByteArray = MessageDigest.getInstance("MD5")
+        // The player's bundled md5 library coerces Number to decimal text AFTER
+        // its UTF-8 conversion branch. bytesToWords then coerces each digit to
+        // its numeric byte (0..9). String seeds still use ordinary UTF-8 bytes.
+        .digest(if (numeric) value.map { it.digitToInt().toByte() }.toByteArray()
+            else value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it.toInt() and 255) }
         .toByteArray(Charsets.UTF_8)
 
-    private fun ctr(value: ByteArray, seed: String, mode: Int): ByteArray {
-        val key = md5Key(seed)
+    private fun ctr(value: ByteArray, seed: String, mode: Int, numeric: Boolean = false): ByteArray {
+        val key = md5Key(seed, numeric)
         return Cipher.getInstance("AES/CTR/NoPadding").apply {
             init(mode, SecretKeySpec(key, "AES"), IvParameterSpec(key.copyOfRange(0, 16)))
         }.doFinal(value)
@@ -204,7 +226,8 @@ internal object MsmPlayerApi {
                 .firstOrNull { it.contains(sub) && it.matches(Regex("[A-Za-z0-9.-]+")) }
                 ?: return@mapNotNull null
             val path = "/mp4/$id/$res/$size?v=$slug"
-            val encrypted = ctr(path.toByteArray(Charsets.UTF_8), size, Cipher.ENCRYPT_MODE)
+            val encrypted = ctr(path.toByteArray(Charsets.UTF_8), size, Cipher.ENCRYPT_MODE,
+                numeric = source.opt("size") is Number)
             val first = Base64.encodeToString(encrypted, Base64.NO_WRAP or Base64.NO_PADDING)
             val token = Base64.encodeToString(first.toByteArray(Charsets.US_ASCII), Base64.NO_WRAP or Base64.NO_PADDING)
             newExtractorLink(source = "Abyss", name = "Abyss ${source.optString("label")}",
