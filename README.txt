@@ -1,82 +1,53 @@
-MSM21 v17 — Literal WebView HTML Injection Fix
-
-V17 CHANGE
-Fix IllegalArgumentException: Illegal group reference during HTML injection.
-Escape the full replacement payload using Regex.escapeReplacement before
-Regex.replaceFirst, preserving all JavaScript dollar signs and backslashes.
-Only this injection fix and extension version markers changed in production
-relative to v16. The v16 hook/extraction behavior is retained.
-
-V17 VALIDATION
-PASS: JVM regression reproduces the original failure using the actual hook.
-PASS: quoted replacement preserves the actual hook bytes exactly.
-PASS: uppercase head, no-head fallback, dollar/backslash payload and replacing
-only the first head.
-PASS: execute the hook extracted from the JVM-produced HTML in Node VM:
-not-found/verification detection, Abyss capture, HLS and tracker/blob rejection.
-Run from patch root: sh validation/run_checks.sh (requires JDK 17+ and Node).
-These are JVM replacement + JS integration checks, not an Android build.
-Full Android build and phone playback remain unverified here.
-
-PHONE TEST
-Install built version 17. Fresh-load the title, test Abyss and Byse 7, then
-export Full Timeline. Check that MSM21_WEBVIEW_INJECT_ERROR with Illegal group
-reference is gone. A successful injection does not prove working playback.
-Playe 2, Mixdr 8 and Full HD are excluded from the test plan as requested.
-Abyss custom segmented transport is still NOT implemented. Byse may still
-require verification or have unavailable content. No successful playback claim.
-
-V16 FUNCTIONALITY RETAINED — Guarded Abyss Direct Candidate + PlayerX/Byse Diagnostics
+MSM21 v18 — Abyss Hook Readiness and Bounded Probe Diagnostics
 
 INSTALL
 Extract at ROOT of Cloudstream-Repo-main; merge/replace MSM21/.
-Build through the repository workflow and update the MSM21 extension.
-Complete MSM21 folder from v15 is included, plus one new helper.
+Build using the repository workflow, update extension, verify version 18.
+Full MSM21 folder is included. The v17 literal HTML injection fix is retained.
 
-CHANGES
-- Accept only the observed HTTPS storage.googleapis.com/mediastorage/...mp4
-  source with #mp4/r2/1/.../size/quality/h264 metadata as a direct candidate.
-  Strip the fragment from HTTP URLs; retain expected object size.
-- This candidate must pass HTTP 206 + exact Content-Range + 512 bytes at both
-  start and end, matching advertised size, with a media signature at the start.
-  Errors/timeouts/incorrect ranges are rejected, never emitted as unverified.
-  Other virtual formats remain unsupported. Capture alone is not success.
-- PlayerX logs invalid ID, API HTTP failure, populated source-field count and
-  enabled-candidate count. No API bodies, signed URLs or keys are logged.
-  Existing source extraction for servers 3–6 is preserved.
-- Byse logs details/settings failures; distinguishes 404 from verification.
-  405 is labelled method_not_allowed instead of assuming its cause. Clear
-  stale frame entries before each details refresh. Keep existing CAPTCHA logic.
-- Browser diagnostics distinguish Page not found/video unavailable from human
-  verification. These observations do not bypass verification or repair files.
-- Extension version and loaded-version marker are now 17.
+SCOPE
+Abyss only: new diagnostics and readiness-aware wait budget. Existing extraction,
+media validation and source selection are carried forward. This is not full
+support for Abyss's custom segmented transport, and does not claim playback.
+Byse's successful WebView path and other servers' wait budgets are retained.
+Playe 2, Mixdr 8 and Full HD remain excluded from the test plan.
 
-LIMITS — THIS IS NOT FULL ABYSS TRANSPORT SUPPORT
-The site's custom segmented transport is NOT implemented. This is a guarded
-fallback ONLY when the browser-advertised object independently works through
-ordinary HTTP ranges. If custom transport is required, Abyss can still fail.
-No working Android Abyss playback is claimed. Playe 2 is diagnosed, not claimed
-repaired. Byse still fails when unavailable or verification is required.
-No CAPTCHA solving, fabricated attestation, proxy server or app modification.
-Mixdr 8/Full HD are excluded from testing as requested. Existing provider paths
-are not removed. data-nume=fake remains excluded.
+NEW SIGNALS
+MSM21_V18_ABYSS_HOOK: hook execution acknowledged by the JS bridge, elapsed time.
+MSM21_V18_ABYSS_VIDEO: ready/network states, numeric media error, paused flag,
+source kind (none/direct/virtual/blob). State changes only; no video URLs/tokens.
+MSM21_V18_ABYSS_ERROR: script resource/runtime error or rejected promise, once
+per category. Error details and rejected promise values are not logged.
+MSM21_V18_ABYSS_LOAD_ERROR: WebView loading failure for player page or JS file,
+error code and host only. Does not classify all loading failures as bot blocks.
+MSM21_V18_ABYSS_END: reason, hook_ready, capture count and elapsed time.
+Reasons: hook_not_ready_timeout, ready_timeout, hard_timeout, stream_observed,
+verification_required, setup_error, cancelled. stream_observed means a captured
+candidate; subsequent independent media validation can still reject it.
+
+WAIT BUDGET
+Abyss: initial no-hook timeout 12 seconds; first hook-ready signal schedules up
+to 10 seconds more, capped at 20 seconds from probe creation. Later ready signals
+do not reset it. Hard timer and cancellation cleanup remain active.
+Other servers retain their existing 8-second probe timeout.
+Timing runs on Android main Handler and is subject to main-thread scheduling.
 
 VALIDATION
-PASS: actual JS capture hook tested with Node VM for Byse not-found, human
-verification, Abyss virtual capture, HLS preservation, tracker/blob rejection
-and avoiding not-found classification for FAQ text without an error heading.
-Android compilation: NOT VERIFIED — no Gradle/Kotlin toolchain or full repo
-available in this workspace. Android playback/range probes: NOT VERIFIED.
-Browser readyState=4 from review is not proof of Cloudstream native playback.
+PASS: actual hook reproduces v16 JVM regex error; escaped replacement preserves
+its bytes. Uppercase/no-head/metacharacter/first-head cases pass.
+PASS: execute hook from JVM-injected HTML: prior HLS, tracker rejection,
+verification, not-found and virtual source captures pass.
+PASS: Abyss ready/video/error signals, absent/blob/media-error states, redacted
+payloads, error deduplication and diagnostics disabled for other-player fixtures.
+Run: sh validation/run_checks.sh (JDK 17+ and Node).
+Android build, Handler lifecycle/timing and device playback are NOT VERIFIED in
+this workspace. JVM+JS checks do not constitute a compiled Android test.
 
-TEST AFTER BUILD
-Fresh-load Crazy Rich, Incredibly Broke (2026); verify installed version 17.
-Test Abyss and Byse 7; export Full Timeline.
-Look for MSM21_V16_ABYSS_DIRECT, MSM21_V16_PLAYERX, MSM21_V16_BYSE/PAGE_STATE.
-If Abyss emits a source, test first frame and seek near the end.
-PASS LINKS/range_media_verified does not prove uninterrupted playback.
-Do one regression check of RPM, Seek, P2P and Upns.
-Do not test Playe 2, Mixdr 8 or Full HD for this patch.
-
-REPRODUCE HOOK CHECK
-From extracted patch root: node validation/test_hook.cjs
+PHONE TEST
+Fresh-load Crazy Rich, Incredibly Broke (2026), wait for link loading to complete,
+then export Full Timeline. Focus on Abyss and MSM21_V18_ABYSS_* signals.
+Do not treat inject/hook_ready as proof the media player is ready or playable.
+Briefly confirm Byse and the working four servers still start when available.
+If export again says plugin_log_collector=unavailable, provider messages may be
+missing. This extension patch does not repair Android's Logcat permission or
+CS Diagnose collection; use original Logcat if signals are absent.
