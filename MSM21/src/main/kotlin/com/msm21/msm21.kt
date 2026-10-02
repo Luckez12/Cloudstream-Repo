@@ -404,8 +404,8 @@ class msm21 : MainAPI() {
             return standard.foundStream || webViewFound
         }
 
-        // Every real website option gets its own pipeline. No host is excluded
-        // and a successful native mirror does not suppress JavaScript mirrors.
+        // Each enabled option retains its own pipeline. Successful native mirrors
+        // do not suppress unresolved JavaScript mirrors.
         val uniqueOptions = options.distinctBy { it.optionKey() }
         val ajaxSemaphore = Semaphore(AJAX_BATCH_SIZE)
         val nativeSemaphore = Semaphore(NATIVE_CONCURRENCY)
@@ -557,9 +557,6 @@ class msm21 : MainAPI() {
                             ?.value.orEmpty().ifBlank { mirror.url }
                         quality = getQualityFromName(stream.label)
                         this.headers = headers
-                        stream.abyssExpectedSize?.let { size ->
-                            extractorData = MsmAbyssDirectSource.marker(size)
-                        }
                     }
                 }
                 val selected = MsmMediaPolicy.select(links, mirror.label)

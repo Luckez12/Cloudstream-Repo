@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 19
+version = 21
 cloudstream {
     // All of these properties are optional, you can safely remove them
 

@@ -1,52 +1,54 @@
-MSM21 v19 — Abyss Player Lifecycle and Bounded Startup Patch
+MSM21 v21 — All Servers, Standard Budgets and Clean Source Names
 
 INSTALL
-Extract at Cloudstream-Repo-main ROOT; merge/replace MSM21/.
-Build with your repository workflow and update the extension. Confirm version 19.
-This ZIP includes the full MSM21 folder based on v18, not CS Diagnose.
+Replace the repository MSM21/ folder with MSM21/ from this ZIP.
+If merging, delete the obsolete file from earlier experiment patches:
+MSM21/src/main/kotlin/com/msm21/MsmAbyssDirectSource.kt
+ZIP extraction cannot delete an existing repository file.
+Build using your workflow, update extension and verify installed version 21.
+Use this instead of v20. No CS Diagnose change is included.
 
 SCOPE
-Abyss only. Byse and all other server wait/click paths retain their existing
-behavior (8-second WebView timeout). No transport rewrite is included.
-Mixdr 8, Playe 2 and Full HD remain excluded from the test plan.
-The v17 literal injection fix and strict Abyss media validation are retained.
+All real website options participate in ordinary discovery and extraction,
+including Abyss. There is no server-name/host exclusion list.
+The website's fake Full HD advertising option is still ignored as before.
+Existing bounded concurrency is retained: options are processed in one request,
+with queues limiting simultaneous network/WebView work.
+A successful native path does not suppress unresolved options' WebView fallback.
 
-BEHAVIOR
-Hook-ready acknowledgment no longer starts an early 10-second finish timer.
-Abyss gets at most 20 seconds from probe creation, subject to Android main
-thread scheduling. Captures, verification, cancellation and setup failures
-can end earlier. The budget never resets with a page/player readiness signal.
-Clicks are scheduled after document load or first video element discovery.
-A shared queue replaces old pending clicks at the next milestone, spaces
-clicks at least 650ms apart and does not click at/after the hard deadline.
-No script initialization functions, anti-bot checks or ad scripts are rewritten.
+No special Abyss timer, lifecycle diagnostics, direct-object/range experiment
+or custom transport is included. Abyss uses the ordinary native/extractor and
+WebView fallback paths. Its experimental native /sora generator is not restored.
+Valid ordinary media links can be emitted; custom #mp4/ metadata is not treated
+as proof that a direct video object exists. The common validation policy applies.
 
-DIAGNOSTICS (MSM21_V19_ABYSS_*)
-HOOK: injected JS executed; does not imply website/player readiness.
-PAGE: dom (DOMContentLoaded) or loaded (window.load), once per stage/document.
-PLAYER: assets_ready (SoTrym function exists), player_present (video element
-exists), source_present (playlist or video exposes a source). These are
-observations, not proof of playable media. Changes only, URL/token-free fields.
-VIDEO: media ready/network/error states, source kind and paused flag.
-ERROR / LOAD_ERROR: JS failure categories or WebView loading error/host.
-END: reason, hook_ready, page_loaded, player_present, source_present, captures,
-elapsed_ms. Player/source flags mean observed at least once during the probe.
-Timeout reasons: hook_not_ready_timeout, page_not_loaded_timeout,
-player_not_ready_timeout, source_not_ready_timeout, capture_timeout.
-Other reasons: stream_observed, verification_required, setup_error, cancelled.
-Captured candidates still undergo independent validation and can be rejected.
+BUDGETS
+Every mirror retains the standard native pipeline budget of 18 seconds,
+standard extractor attempt budget of 5 seconds and WebView budget of 8 seconds.
+These cover different stages; they are not an 8-second total loading guarantee.
+No server receives an extra/extended timeout. Existing first-capture finish,
+cancellation, verification handling and media validation are retained.
+Network, semaphore queueing and remaining fallback options affect total time.
+
+SOURCE NAMES
+RPM • MalaySub / Seek • MalaySub / Upns • MalaySub /
+P2P • MalaySub / Byse • MalaySub.
+HLS masters omit redundant Auto and don't claim a specific rendition height.
+Known rendition resolutions are retained, e.g. Byse • MalaySub • 720p.
+Website option labels remain raw in discovery/diagnostics for attribution.
+Unmapped server names keep their original label.
 
 VALIDATION
-Run sh validation/run_checks.sh with JDK 17+ and Node.
-PASS: real hook survives JVM literal injection; prior HLS/verification/error/
-virtual captures; lifecycle stages and deduplication; late player/source
-appearance; empty-video distinction; diagnostics disabled for other players.
-Android compilation, touch timing, device lifecycle and playback are unverified
-in this workspace. Tests do not prove full Abyss transport support.
+PASS: server exclusion/helper references and Abyss diagnostic timers removed.
+PASS: PlayerX/Byse API and native discovery retained from the cleaned v20 source.
+PASS: JVM literal injection and JS Byse verification/error/HLS/tracker fixtures.
+Run: sh validation/run_checks.sh (JDK 17+ and Node).
+Android build and device playback have not been performed in this workspace.
 
-DEVICE TEST
-Keep CS Diagnose latest. Fresh-load Crazy Rich, Incredibly Broke (2026), let
-link loading finish, export Full Timeline. Check version 19 and PAGE/PLAYER/END.
-If Abyss appears, attempt playback and record first frame; a captured link alone
-is not success. Briefly check working RPM/Seek/P2P/Upns as regression checks.
-Byse can be checked on a title known to work; no timeout increase is needed.
+DEVICE CHECK
+Fresh-load a title; confirm version 21 and cleaned source names.
+Abyss should participate in the ordinary pipeline, with no V20_OPTION_SKIP and
+no V19_ABYSS readiness/20-second timeout logs. If it returns no valid media,
+ignore it; there is no special retry or additional waiting for that server.
+Test the available working sources and export Full Timeline to compare timing.
+Playe 2, Mixdr 8 and Full HD remain outside the playback test plan.

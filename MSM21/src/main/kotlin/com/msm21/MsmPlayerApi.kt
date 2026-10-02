@@ -11,7 +11,6 @@ import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import java.net.URI
 import java.net.URLEncoder
-import java.security.MessageDigest
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
@@ -30,7 +29,7 @@ internal object MsmPlayerApi {
         "playerx.seekplays.online", "playerx.p2pstream.online", "playerx.upns.live")
 
     fun supports(url: String): Boolean = runCatching {
-        URI(url).host?.lowercase().let { it in playerXHosts || it == "bysesukior.com" || it == "abyss.msmbot.club" }
+        URI(url).host?.lowercase().let { it in playerXHosts || it == "bysesukior.com" }
     }.getOrDefault(false)
 
     suspend fun extract(url: String, pageUrl: String): List<ExtractorLink> {
@@ -39,7 +38,6 @@ internal object MsmPlayerApi {
             val uri = URI(url)
             val links = when (uri.host.lowercase()) {
                 in playerXHosts -> playerX(uri, pageUrl)
-                "abyss.msmbot.club" -> abyss(uri, pageUrl)
                 else -> byse(uri, pageUrl)
             }
             Log.i("MSM21", "MSM21_V15_API host=${uri.host} candidates=${links.size}")
@@ -201,61 +199,4 @@ internal object MsmPlayerApi {
 
     private fun b64(raw: String): ByteArray = Base64.decode(raw, Base64.URL_SAFE or Base64.NO_WRAP)
 
-    private fun md5Key(value: String, numeric: Boolean = false): ByteArray = MessageDigest.getInstance("MD5")
-        // The player's bundled md5 library coerces Number to decimal text AFTER
-        // its UTF-8 conversion branch. bytesToWords then coerces each digit to
-        // its numeric byte (0..9). String seeds still use ordinary UTF-8 bytes.
-        .digest(if (numeric) value.map { it.digitToInt().toByte() }.toByteArray()
-            else value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it.toInt() and 255) }
-        .toByteArray(Charsets.UTF_8)
-
-    private fun ctr(value: ByteArray, seed: String, mode: Int, numeric: Boolean = false): ByteArray {
-        val key = md5Key(seed, numeric)
-        return Cipher.getInstance("AES/CTR/NoPadding").apply {
-            init(mode, SecretKeySpec(key, "AES"), IvParameterSpec(key.copyOfRange(0, 16)))
-        }.doFinal(value)
-    }
-
-    private suspend fun abyss(uri: URI, pageUrl: String): List<ExtractorLink> {
-        val base = origin(uri)
-        val response = app.get(uri.toString(), referer = pageUrl, headers = headers(base), timeout = 6L)
-        if (response.code !in 200..299) return emptyList()
-        val encoded = Regex("(?:const|let|var)\\s+datas\\s*=\\s*[\"']([A-Za-z0-9+/=]+)[\"']")
-            .find(response.text)?.groupValues?.get(1) ?: return emptyList()
-        // atob() returns a binary string. Preserve its Latin-1 bytes before AES-CTR.
-        val data = JSONObject(String(Base64.decode(encoded, Base64.DEFAULT), Charsets.ISO_8859_1))
-        val slug = data.getString("slug")
-        val id = data.getString("md5_id")
-        if (!slug.matches(Regex("[A-Za-z0-9_-]{2,100}")) || !id.matches(Regex("[0-9]+"))) return emptyList()
-        val media = data.optJSONObject("media") ?: JSONObject(String(ctr(
-            data.getString("media").toByteArray(Charsets.ISO_8859_1),
-            "${data.getString("user_id")}:$slug:$id", Cipher.DECRYPT_MODE), Charsets.UTF_8))
-        val mp4 = media.optJSONObject("mp4") ?: return emptyList()
-        val domains = mp4.optJSONArray("domains") ?: return emptyList()
-        val sources = mp4.optJSONArray("sources") ?: return emptyList()
-        val links = (0 until sources.length()).mapNotNull { index ->
-            val source = sources.getJSONObject(index)
-            if (source.optString("codec") == "av1") return@mapNotNull null
-            val size = source.optString("size")
-            val res = source.optString("res_id")
-            val sub = source.optString("sub")
-            if (!size.matches(Regex("[0-9]+")) || !res.matches(Regex("[0-9]+")) || sub.isBlank()) return@mapNotNull null
-            val domain = (0 until domains.length()).map { domains.optString(it) }
-                .firstOrNull { it.contains(sub) && it.matches(Regex("[A-Za-z0-9.-]+")) }
-                ?: return@mapNotNull null
-            val path = "/mp4/$id/$res/$size?v=$slug"
-            val encrypted = ctr(path.toByteArray(Charsets.UTF_8), size, Cipher.ENCRYPT_MODE,
-                numeric = source.opt("size") is Number)
-            val first = Base64.encodeToString(encrypted, Base64.NO_WRAP or Base64.NO_PADDING)
-            val token = Base64.encodeToString(first.toByteArray(Charsets.US_ASCII), Base64.NO_WRAP or Base64.NO_PADDING)
-            newExtractorLink(source = "Abyss", name = "Abyss ${source.optString("label")}",
-                url = "https://$domain/sora/$size/$token", type = ExtractorLinkType.VIDEO) {
-                referer = "$base/"; this.headers = headers(base)
-                quality = source.optString("label").filter { it.isDigit() }.toIntOrNull() ?: 400
-            }
-        }
-        // Native /sora/ links still need range validation. A URL in the player
-        // script is not proof that this title's native transport is available.
-        return links.distinctBy { it.url }
-    }
 }

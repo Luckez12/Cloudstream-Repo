@@ -40,7 +40,7 @@ internal object MsmMediaPolicy {
         // A tracker query may contain the entire movie URL. Only inspect the path.
         val path = runCatching { URI(raw).path }.getOrNull().orEmpty().lowercase()
         return listOf(".m3u8", ".mpd", ".mp4", ".m4v", ".webm").any(path::endsWith) ||
-            path.contains("/sora/") || path.contains("/manifest/") ||
+            path.contains("/manifest/") ||
             path.endsWith("/master.m3u") || path.endsWith("/playlist.m3u")
     }
 
@@ -77,7 +77,6 @@ internal object MsmMediaPolicy {
 
     private suspend fun checkVideo(link: ExtractorLink): Checked = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
-        val expectedSize = MsmAbyssDirectSource.expectedSize(link.extractorData)
         try {
             val conn = URL(link.url).openConnection() as HttpURLConnection
             connection = conn
@@ -92,11 +91,6 @@ internal object MsmMediaPolicy {
             val status = conn.responseCode
             if (isRejected(conn.url.toString()) || status in listOf(400, 401, 403, 404, 410)) {
                 Log.w("MSM21", "MSM21_V14_VIDEO_REJECT host=${URI(link.url).host} status=$status")
-                return@withContext Checked(link, "rejected")
-            }
-            if (expectedSize != null && (status != 206 ||
-                !MsmAbyssDirectSource.matchesRange(conn.getHeaderField("Content-Range"), 0, 511, expectedSize))) {
-                Log.w("MSM21", "MSM21_V16_ABYSS_DIRECT reason=invalid_start_range status=$status")
                 return@withContext Checked(link, "rejected")
             }
             if (status !in 200..299) return@withContext Checked(link, "unverified")
@@ -114,48 +108,9 @@ internal object MsmMediaPolicy {
                 (count >= 4 && bytes[0] == 0x1A.toByte() && bytes[1] == 0x45.toByte() &&
                     bytes[2] == 0xDF.toByte() && bytes[3] == 0xA3.toByte()) ||
                 (count > 188 && bytes[0] == 0x47.toByte() && bytes[188] == 0x47.toByte())
-            if (expectedSize != null) {
-                if (!video || count != 512) {
-                    Log.w("MSM21", "MSM21_V16_ABYSS_DIRECT reason=invalid_media_bytes")
-                    return@withContext Checked(link, "rejected")
-                }
-                conn.disconnect()
-                val tail = URL(link.url).openConnection() as HttpURLConnection
-                connection = tail
-                tail.instanceFollowRedirects = true
-                tail.connectTimeout = 3_000
-                tail.readTimeout = 3_000
-                link.headers.filterKeys { !it.equals("Range", true) }.forEach { (key, value) ->
-                    tail.setRequestProperty(key, value)
-                }
-                if (link.referer.isNotBlank()) tail.setRequestProperty("Referer", link.referer)
-                val start = expectedSize - 512
-                tail.setRequestProperty("Range", "bytes=$start-${expectedSize - 1}")
-                val tailStatus = tail.responseCode
-                if (isRejected(tail.url.toString()) || tailStatus != 206 ||
-                    !MsmAbyssDirectSource.matchesRange(tail.getHeaderField("Content-Range"), start, expectedSize - 1, expectedSize)) {
-                    Log.w("MSM21", "MSM21_V16_ABYSS_DIRECT reason=invalid_end_range status=$tailStatus")
-                    return@withContext Checked(link, "rejected")
-                }
-                var tailCount = 0
-                tail.inputStream.use { input ->
-                    while (tailCount < bytes.size) {
-                        val read = input.read(bytes, tailCount, bytes.size - tailCount)
-                        if (read <= 0) break
-                        tailCount += read
-                    }
-                }
-                if (tailCount != 512) return@withContext Checked(link, "rejected")
-                Log.i("MSM21", "MSM21_V16_ABYSS_DIRECT reason=range_media_verified")
-            }
             Checked(link, if (video) "video" else "rejected")
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) {
-            if (expectedSize != null) {
-                Log.w("MSM21", "MSM21_V16_ABYSS_DIRECT reason=probe_failed")
-                Checked(link, "rejected")
-            } else Checked(link, "unverified")
-        }
+        catch (_: Exception) { Checked(link, "unverified") }
         finally { connection?.disconnect() }
     }
 
@@ -171,8 +126,9 @@ internal object MsmMediaPolicy {
             "masters=${masters.size} rejected=${checked.count { it.state == "rejected" }} emitted=${selected.size}")
         selected.map { result ->
             val link = result.link
-            newExtractorLink(source = label, name = if (result.state == "master") "$label Auto"
-                else "$label ${link.name}".trim(), url = link.url, type = link.type) {
+            newExtractorLink(source = MsmServerLabels.display(label),
+                name = MsmServerLabels.linkName(label, link.name, result.state == "master", link.quality),
+                url = link.url, type = link.type) {
                 referer = link.referer
                 headers = link.headers
                 quality = if (result.state == "master") Qualities.Unknown.value else link.quality
