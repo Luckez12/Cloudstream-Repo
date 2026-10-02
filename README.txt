@@ -1,4 +1,32 @@
-MSM21 v16 — Guarded Abyss Direct Candidate + PlayerX/Byse Diagnostics
+MSM21 v17 — Literal WebView HTML Injection Fix
+
+V17 CHANGE
+Fix IllegalArgumentException: Illegal group reference during HTML injection.
+Escape the full replacement payload using Regex.escapeReplacement before
+Regex.replaceFirst, preserving all JavaScript dollar signs and backslashes.
+Only this injection fix and extension version markers changed in production
+relative to v16. The v16 hook/extraction behavior is retained.
+
+V17 VALIDATION
+PASS: JVM regression reproduces the original failure using the actual hook.
+PASS: quoted replacement preserves the actual hook bytes exactly.
+PASS: uppercase head, no-head fallback, dollar/backslash payload and replacing
+only the first head.
+PASS: execute the hook extracted from the JVM-produced HTML in Node VM:
+not-found/verification detection, Abyss capture, HLS and tracker/blob rejection.
+Run from patch root: sh validation/run_checks.sh (requires JDK 17+ and Node).
+These are JVM replacement + JS integration checks, not an Android build.
+Full Android build and phone playback remain unverified here.
+
+PHONE TEST
+Install built version 17. Fresh-load the title, test Abyss and Byse 7, then
+export Full Timeline. Check that MSM21_WEBVIEW_INJECT_ERROR with Illegal group
+reference is gone. A successful injection does not prove working playback.
+Playe 2, Mixdr 8 and Full HD are excluded from the test plan as requested.
+Abyss custom segmented transport is still NOT implemented. Byse may still
+require verification or have unavailable content. No successful playback claim.
+
+V16 FUNCTIONALITY RETAINED — Guarded Abyss Direct Candidate + PlayerX/Byse Diagnostics
 
 INSTALL
 Extract at ROOT of Cloudstream-Repo-main; merge/replace MSM21/.
@@ -21,7 +49,7 @@ CHANGES
   stale frame entries before each details refresh. Keep existing CAPTCHA logic.
 - Browser diagnostics distinguish Page not found/video unavailable from human
   verification. These observations do not bypass verification or repair files.
-- Extension version and loaded-version marker are 16.
+- Extension version and loaded-version marker are now 17.
 
 LIMITS — THIS IS NOT FULL ABYSS TRANSPORT SUPPORT
 The site's custom segmented transport is NOT implemented. This is a guarded
@@ -42,13 +70,13 @@ available in this workspace. Android playback/range probes: NOT VERIFIED.
 Browser readyState=4 from review is not proof of Cloudstream native playback.
 
 TEST AFTER BUILD
-Fresh-load Crazy Rich, Incredibly Broke (2026); verify installed version 16.
-Test Abyss, Playe 2 and Byse 7; export Full Timeline.
+Fresh-load Crazy Rich, Incredibly Broke (2026); verify installed version 17.
+Test Abyss and Byse 7; export Full Timeline.
 Look for MSM21_V16_ABYSS_DIRECT, MSM21_V16_PLAYERX, MSM21_V16_BYSE/PAGE_STATE.
 If Abyss emits a source, test first frame and seek near the end.
 PASS LINKS/range_media_verified does not prove uninterrupted playback.
 Do one regression check of RPM, Seek, P2P and Upns.
-Do not test Mixdr 8/Full HD for this patch.
+Do not test Playe 2, Mixdr 8 or Full HD for this patch.
 
 REPRODUCE HOOK CHECK
 From extracted patch root: node validation/test_hook.cjs

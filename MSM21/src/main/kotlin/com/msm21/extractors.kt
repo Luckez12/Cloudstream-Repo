@@ -583,7 +583,8 @@ object MsmWebViewProbe {
         val injected = if (html.contains("<head>", true)) {
             html.replaceFirst(
                 Regex("<head>", RegexOption.IGNORE_CASE),
-                "<head>$baseTag$hook"
+                // Escape JVM replacement syntax to preserve JS dollar signs and backslashes.
+                Regex.escapeReplacement("<head>$baseTag$hook")
             )
         } else {
             "$baseTag$hook$html"

@@ -1,6 +1,9 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const source=fs.readFileSync('MSM21/src/main/kotlin/com/msm21/extractors.kt','utf8');
-const hook=source.split('private const val HOOK_JS = """')[1].split('"""')[0].replace(/<\/?script>/g,'').replace('__MSM_BLOCKED_HOSTS__','["mc.yandex.ru","pixel.morphify.com"]');
+const rawHook = process.env.INJECTED_HTML
+ ? fs.readFileSync(process.env.INJECTED_HTML,'utf8').split('<script>')[1].split('</script>')[0]
+ : source.split('private const val HOOK_JS = """')[1].split('"""')[0].replace(/<\/?script>/g,'');
+const hook=rawHook.replace('__MSM_BLOCKED_HOSTS__','["mc.yandex.ru","pixel.morphify.com"]');
 function run({body='',heading='',videos=[],sources=[]}={}){
  const out=[];const context={URL,TextDecoder,window:{msmBridge:{capture:v=>out.push(v)},jwplayer:()=>({getPlaylist:()=>[{sources}]})},document:{baseURI:'https://abyss.msmbot.club/',body:{innerText:body},querySelector:q=>q==='h1, h2'&&heading?{innerText:heading}:null,querySelectorAll:q=>q==='video'?videos:[]},setTimeout:()=>{},setInterval:()=>{}};
  vm.runInNewContext(hook,context);return out;
