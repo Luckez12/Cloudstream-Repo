@@ -4,9 +4,11 @@ const rawHook = process.env.INJECTED_HTML
  ? fs.readFileSync(process.env.INJECTED_HTML,'utf8').split('<script>')[1].split('</script>')[0]
  : source.split('private const val HOOK_JS = """')[1].split('"""')[0].replace(/<\/?script>/g,'');
 const hook=rawHook.replace('__MSM_BLOCKED_HOSTS__','["mc.yandex.ru","pixel.morphify.com"]');
-function run({body='',heading='',videos=[],sources=[],diagnostics=false,errors=[]}={}){
- const out=[];const handlers={};const context={URL,TextDecoder,window:{addEventListener:(name,fn)=>handlers[name]=fn,msmBridge:{capture:v=>out.push(v)},jwplayer:()=>({getPlaylist:()=>[{sources}]})},document:{baseURI:'https://abyss.msmbot.club/',body:{innerText:body},querySelector:q=>q==='h1, h2'&&heading?{innerText:heading}:null,querySelectorAll:q=>q==='video'?videos:[]},setTimeout:()=>{},setInterval:()=>{}};
+function run({body='',heading='',videos=[],sources=[],diagnostics=false,errors=[],readyState='loading',events=[],transition=null}={}){
+ const out=[];const handlers={};const docHandlers={};const intervals=[];const context={URL,TextDecoder,window:{addEventListener:(name,fn)=>handlers[name]=fn,msmBridge:{capture:v=>out.push(v)},jwplayer:()=>({getPlaylist:()=>[{sources}]})},document:{readyState,addEventListener:(name,fn)=>docHandlers[name]=fn,baseURI:'https://abyss.msmbot.club/',body:{innerText:body},querySelector:q=>q==='h1, h2'&&heading?{innerText:heading}:null,querySelectorAll:q=>q==='video'?videos:[]},setTimeout:()=>{},setInterval:fn=>intervals.push(fn)};
  vm.runInNewContext(hook.replace('__MSM_ABYSS_DIAGNOSTICS__',String(diagnostics)),context);
+ for(const event of events) { if(docHandlers[event]) docHandlers[event](); if(handlers[event]) handlers[event](); }
+ if(transition) { transition(context); for(const fn of intervals) fn(); }
  for(const event of errors) if(handlers[event.type]) handlers[event.type](event);
  return out;
 }
@@ -30,3 +32,26 @@ const errs=run({diagnostics:true,errors:[{type:'error',target:{tagName:'SCRIPT'}
 assert.strictEqual(errs.filter(v=>v==='MSM_ABYSS_ERROR|script_resource').length,1);
 assert(errs.includes('MSM_ABYSS_ERROR|promise_rejection'));
 console.log('PASS: Abyss-only ready/video/error telemetry, absent/blob/error states, redacted payloads and error deduplication');
+
+// A hook acknowledgment must not imply document load or a ready player.
+const beforeLoad=run({diagnostics:true});
+assert(beforeLoad.includes('MSM_ABYSS_READY'));
+assert(!beforeLoad.includes('MSM_ABYSS_PAGE|loaded'));
+assert(beforeLoad.includes('MSM_ABYSS_PLAYER|0|0|0'));
+const loaded=run({diagnostics:true,events:['DOMContentLoaded','DOMContentLoaded','load','load']});
+assert.strictEqual(loaded.filter(x=>x==='MSM_ABYSS_PAGE|dom').length,1);
+assert.strictEqual(loaded.filter(x=>x==='MSM_ABYSS_PAGE|loaded').length,1);
+assert(loaded.includes('MSM_ABYSS_PLAYER|0|0|0'));
+const alreadyLoaded=run({diagnostics:true,readyState:'complete',events:['DOMContentLoaded','load']});
+assert.strictEqual(alreadyLoaded.filter(x=>x==='MSM_ABYSS_PAGE|loaded').length,1);
+const delayedVideos=[];
+const delayed=run({diagnostics:true,videos:delayedVideos,events:['load'],transition:c=>{
+ c.window.SoTrym=()=>{};
+ delayedVideos.push({currentSrc:virtual,readyState:4,networkState:1,paused:false});
+}});
+assert(delayed.includes('MSM_ABYSS_PLAYER|1|1|1'));
+assert(delayed.includes('MSM_VIDEO|'+virtual));
+const emptyVideo=run({diagnostics:true,videos:[{currentSrc:'',src:'',readyState:0,networkState:0,paused:true}]});
+assert(emptyVideo.includes('MSM_ABYSS_PLAYER|0|1|0'));
+assert(!run({readyState:'complete',events:['load','DOMContentLoaded']}).some(x=>x.startsWith('MSM_ABYSS_')));
+console.log('PASS: load lifecycle versus hook readiness, late player/source discovery, empty-video distinction, stage deduplication and non-Abyss isolation');

@@ -99,7 +99,10 @@ object MsmWebViewProbe {
             val probeStarted = SystemClock.uptimeMillis()
             var hookReady = false
             var terminalLogged = false
-            var readyTimeout: Runnable? = null
+            var pageLoaded = false
+            var playerPresent = false
+            var sourcePresent = false
+            var abyssReadyAction: (() -> Unit)? = null
 
             fun safeDestroy() {
                 runCatching {
@@ -135,7 +138,8 @@ object MsmWebViewProbe {
                     if (continuation.isActive) {
                         if (abyssProbe && !terminalLogged) {
                             terminalLogged = true
-                            Log.i(TAG, "MSM21_V18_ABYSS_END reason=$reason hook_ready=$hookReady " +
+                            Log.i(TAG, "MSM21_V19_ABYSS_END reason=$reason hook_ready=$hookReady " +
+                                "page_loaded=$pageLoaded player_present=$playerPresent source_present=$sourcePresent " +
                                 "captures=${streams.size} elapsed_ms=${SystemClock.uptimeMillis() - probeStarted}")
                         }
                         val result = sortedResult()
@@ -257,25 +261,41 @@ object MsmWebViewProbe {
                     abyssProbe && clean == "MSM_ABYSS_READY" -> {
                         if (!hookReady) {
                             hookReady = true
-                            Log.i(TAG, "MSM21_V18_ABYSS_HOOK ready=true elapsed_ms=${SystemClock.uptimeMillis() - probeStarted}")
-                            readyTimeout?.let { handler.removeCallbacks(it) }
-                            val remaining = (20_000L - (SystemClock.uptimeMillis() - probeStarted)).coerceAtLeast(0L)
-                            val timeout = Runnable { finish("ready_timeout") }
-                            readyTimeout = timeout
-                            handler.postDelayed(timeout, minOf(10_000L, remaining))
+                            Log.i(TAG, "MSM21_V19_ABYSS_HOOK ready=true elapsed_ms=${SystemClock.uptimeMillis() - probeStarted}")
+                        }
+                    }
+                    abyssProbe && clean.startsWith("MSM_ABYSS_PAGE|") -> {
+                        val stage = clean.substringAfter('|')
+                        if (stage in setOf("dom", "loaded")) {
+                            Log.i(TAG, "MSM21_V19_ABYSS_PAGE stage=$stage elapsed_ms=${SystemClock.uptimeMillis() - probeStarted}")
+                            if (stage == "loaded" && !pageLoaded) {
+                                pageLoaded = true
+                                abyssReadyAction?.invoke()
+                            }
+                        }
+                    }
+                    abyssProbe && clean.startsWith("MSM_ABYSS_PLAYER|") -> {
+                        val fields = clean.split('|')
+                        if (fields.size == 4 && fields.drop(1).all { it == "0" || it == "1" }) {
+                            val firstPlayer = !playerPresent && fields[2] == "1"
+                            playerPresent = playerPresent || fields[2] == "1"
+                            sourcePresent = sourcePresent || fields[3] == "1"
+                            Log.i(TAG, "MSM21_V19_ABYSS_PLAYER assets_ready=${fields[1]} player_present=${fields[2]} " +
+                                "source_present=${fields[3]} elapsed_ms=${SystemClock.uptimeMillis() - probeStarted}")
+                            if (firstPlayer) abyssReadyAction?.invoke()
                         }
                     }
                     abyssProbe && clean.startsWith("MSM_ABYSS_VIDEO|") -> {
                         val fields = clean.split('|')
                         if (fields.size == 6 && fields.drop(1).all { it.matches(Regex("[0-9]{1,2}|none|direct|virtual|blob")) }) {
-                            Log.i(TAG, "MSM21_V18_ABYSS_VIDEO ready_state=${fields[1]} network_state=${fields[2]} " +
+                            Log.i(TAG, "MSM21_V19_ABYSS_VIDEO ready_state=${fields[1]} network_state=${fields[2]} " +
                                 "error_code=${fields[3]} source_kind=${fields[4]} paused=${fields[5]}")
                         }
                     }
                     abyssProbe && clean.startsWith("MSM_ABYSS_ERROR|") -> {
                         val kind = clean.substringAfter('|')
                         if (kind in setOf("script_resource", "script_runtime", "promise_rejection"))
-                            Log.w(TAG, "MSM21_V18_ABYSS_ERROR kind=$kind")
+                            Log.w(TAG, "MSM21_V19_ABYSS_ERROR kind=$kind")
                     }
                     clean.startsWith("MSM_PAGE_STATE|") -> {
                         val reason = clean.substringAfter('|')
@@ -418,8 +438,9 @@ object MsmWebViewProbe {
                 handler.post {
                     if (abyssProbe && !terminalLogged) {
                         terminalLogged = true
-                        Log.i(TAG, "MSM21_V18_ABYSS_END reason=cancelled hook_ready=$hookReady " +
-                            "captures=${streams.size} elapsed_ms=${SystemClock.uptimeMillis() - probeStarted}")
+                        Log.i(TAG, "MSM21_V19_ABYSS_END reason=cancelled hook_ready=$hookReady " +
+                            "page_loaded=$pageLoaded player_present=$playerPresent source_present=$sourcePresent " +
+                                "captures=${streams.size} elapsed_ms=${SystemClock.uptimeMillis() - probeStarted}")
                     }
                     safeDestroy()
                 }
@@ -469,7 +490,7 @@ object MsmWebViewProbe {
                         val target = request?.url?.toString().orEmpty()
                         if (abyssProbe && !MsmMediaPolicy.isRejected(target) &&
                             (shouldInjectPlayerPage(target, url) || runCatching { URI(target).path.orEmpty().endsWith(".js") }.getOrDefault(false))) {
-                            Log.w(TAG, "MSM21_V18_ABYSS_LOAD_ERROR code=${error?.errorCode} host=${runCatching { URI(target).host }.getOrNull()}")
+                            Log.w(TAG, "MSM21_V19_ABYSS_LOAD_ERROR code=${error?.errorCode} host=${runCatching { URI(target).host }.getOrNull()}")
                         }
                         super.onReceivedError(view, request, error)
                     }
@@ -558,24 +579,47 @@ object MsmWebViewProbe {
                     null
                 )
 
-                listOf(
-                    650L,
-                    1_300L,
-                    2_200L,
-                    3_400L,
-                    5_000L,
-                    7_000L
-                ).forEach { delay ->
-                    handler.postDelayed({ clickWebView() }, delay)
-                }
-
                 if (abyssProbe) {
-                    // Initial no-hook deadline can move once, but never beyond the hard cap.
-                    val timeout = Runnable { finish("hook_not_ready_timeout") }
-                    readyTimeout = timeout
-                    handler.postDelayed(timeout, 12_000L)
-                    handler.postDelayed({ finish("hard_timeout") }, 20_000L)
-                } else handler.postDelayed({ finish() }, MAX_WAIT_MS)
+                    // Use actual document/player milestones; hook injection alone is too early.
+                    // One shared queue avoids overlapping clicks when both milestones arrive.
+                    val pendingClicks = mutableListOf<Runnable>()
+                    var lastClickAt = -1L
+                    abyssReadyAction = {
+                        pendingClicks.forEach { handler.removeCallbacks(it) }
+                        pendingClicks.clear()
+                        val elapsed = SystemClock.uptimeMillis() - probeStarted
+                        val firstDelay = if (lastClickAt < 0L) 0L else
+                            (650L - (SystemClock.uptimeMillis() - lastClickAt)).coerceAtLeast(0L)
+                        listOf(0L, 650L, 1_300L, 2_200L, 3_400L).forEach { offset ->
+                            val delay = firstDelay + offset
+                            if (elapsed + delay < 20_000L) {
+                                val click = Runnable {
+                                    if (continuation.isActive && !humanVerification &&
+                                        SystemClock.uptimeMillis() - probeStarted < 20_000L) {
+                                        lastClickAt = SystemClock.uptimeMillis()
+                                        clickWebView()
+                                    }
+                                }
+                                pendingClicks.add(click)
+                                handler.postDelayed(click, delay)
+                            }
+                        }
+                    }
+                    handler.postDelayed({
+                        finish(when {
+                            !hookReady -> "hook_not_ready_timeout"
+                            !pageLoaded && !playerPresent -> "page_not_loaded_timeout"
+                            !playerPresent -> "player_not_ready_timeout"
+                            !sourcePresent -> "source_not_ready_timeout"
+                            else -> "capture_timeout"
+                        })
+                    }, (20_000L - (SystemClock.uptimeMillis() - probeStarted)).coerceAtLeast(0L))
+                } else {
+                    listOf(650L, 1_300L, 2_200L, 3_400L, 5_000L, 7_000L).forEach { delay ->
+                        handler.postDelayed({ clickWebView() }, delay)
+                    }
+                    handler.postDelayed({ finish() }, MAX_WAIT_MS)
+                }
             }
 
             runCatching { setup() }
@@ -796,6 +840,19 @@ object MsmWebViewProbe {
   window.__msmHooked = true;
   var abyssDiagnostics = __MSM_ABYSS_DIAGNOSTICS__;
   var lastAbyssVideoState = "";
+  var lastAbyssPlayerState = "";
+  var abyssDomSeen = false;
+  var abyssLoadSeen = false;
+  function abyssPage(stage) {
+    if (stage === "dom") {
+      if (abyssDomSeen) return;
+      abyssDomSeen = true;
+    } else {
+      if (abyssLoadSeen) return;
+      abyssLoadSeen = true;
+    }
+    abyssSignal("MSM_ABYSS_PAGE|" + stage);
+  }
   var abyssErrorsSeen = {};
   function abyssSignal(value) {
     if (abyssDiagnostics && window.msmBridge && window.msmBridge.capture) window.msmBridge.capture(value);
@@ -810,6 +867,10 @@ object MsmWebViewProbe {
       if (!abyssErrorsSeen.promise_rejection) { abyssErrorsSeen.promise_rejection = true; abyssSignal("MSM_ABYSS_ERROR|promise_rejection"); }
     });
     abyssSignal("MSM_ABYSS_READY");
+    document.addEventListener("DOMContentLoaded", function() { abyssPage("dom"); });
+    window.addEventListener("load", function() { abyssPage("loaded"); inspectPlayer(); });
+    if (document.readyState !== "loading") abyssPage("dom");
+    if (document.readyState === "complete") abyssPage("loaded");
   }
 
   function cap(value) {
@@ -884,6 +945,8 @@ object MsmWebViewProbe {
         if (window.msmBridge && window.msmBridge.capture) window.msmBridge.capture("MSM_VERIFY|human_check");
         return;
       }
+      var abyssHasSource = false;
+      var abyssHasPlayer = false;
       if (typeof window.jwplayer === "function") {
         var player = window.jwplayer();
         if (player) {
@@ -891,6 +954,7 @@ object MsmWebViewProbe {
             var playlist = player.getPlaylist() || [];
             for (var i = 0; i < playlist.length; i++) {
               var item = playlist[i] || {};
+              if (abyssDiagnostics && (item.file || (Array.isArray(item.sources) && item.sources.some(function(s) { return s && (s.file || s.url); })))) abyssHasSource = true;
               sendSources(item.sources);
               sendSources(item.allSources);
             }
@@ -916,6 +980,11 @@ object MsmWebViewProbe {
       var videos = document.querySelectorAll("video");
       if (abyssDiagnostics) {
         var video = videos[0];
+        abyssHasPlayer = !!video;
+        abyssHasSource = abyssHasSource || !!(video && (video.currentSrc || video.src));
+        var playerState = "MSM_ABYSS_PLAYER|" + (typeof window.SoTrym === "function" ? 1 : 0) + "|" +
+          (abyssHasPlayer ? 1 : 0) + "|" + (abyssHasSource ? 1 : 0);
+        if (playerState !== lastAbyssPlayerState) { lastAbyssPlayerState = playerState; abyssSignal(playerState); }
         var raw = video ? (video.currentSrc || video.src || "") : "";
         var kind = !raw ? "none" : raw.indexOf("blob:") === 0 ? "blob" : raw.indexOf("#mp4/") >= 0 ? "virtual" : "direct";
         var state = "MSM_ABYSS_VIDEO|" + (video ? video.readyState : 0) + "|" + (video ? video.networkState : 0) +
