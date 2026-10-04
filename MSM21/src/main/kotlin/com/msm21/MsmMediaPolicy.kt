@@ -72,7 +72,11 @@ internal object MsmMediaPolicy {
                 Checked(link, state)
             } ?: Checked(link, "unverified")
         } catch (e: CancellationException) { throw e }
-        catch (_: Exception) { Checked(link, "unverified") }
+        catch (error: Exception) {
+            val dnsFailed = generateSequence<Throwable>(error) { it.cause }.any { it is java.net.UnknownHostException }
+            Log.w("MSM21", "MSM21_V23_PROBE_FAILED host=${runCatching { URI(link.url).host }.getOrNull()} error=${error.javaClass.simpleName} rejected=$dnsFailed")
+            Checked(link, if (dnsFailed) "rejected" else "unverified")
+        }
     }
 
     private suspend fun checkVideo(link: ExtractorLink): Checked = withContext(Dispatchers.IO) {
@@ -110,22 +114,51 @@ internal object MsmMediaPolicy {
                 (count > 188 && bytes[0] == 0x47.toByte() && bytes[188] == 0x47.toByte())
             Checked(link, if (video) "video" else "rejected")
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { Checked(link, "unverified") }
+        catch (error: Exception) {
+            val dnsFailed = generateSequence<Throwable>(error) { it.cause }.any { it is java.net.UnknownHostException }
+            Log.w("MSM21", "MSM21_V23_PROBE_FAILED host=${runCatching { URI(link.url).host }.getOrNull()} error=${error.javaClass.simpleName} rejected=$dnsFailed")
+            Checked(link, if (dnsFailed) "rejected" else "unverified")
+        }
         finally { connection?.disconnect() }
     }
 
     suspend fun select(links: List<ExtractorLink>, label: String,
-        requireVerified: Boolean = false): List<ExtractorLink> = coroutineScope {
+        requireVerified: Boolean = true): List<ExtractorLink> = coroutineScope {
         val probes = Semaphore(3)
-        val checked = links.distinctBy { it.url }.map { link ->
-            async { probes.withPermit { check(link) } }
-        }.awaitAll()
-        val masters = checked.filter { it.state == "master" }
-        val selected = if (masters.isNotEmpty()) listOf(masters.maxBy { it.link.quality })
-            else checked.filter { it.state != "rejected" &&
-                (!requireVerified || it.state in listOf("media", "video")) }
-        Log.i("MSM21", "MSM21_V12_SELECT label=$label candidates=${checked.size} " +
-            "masters=${masters.size} rejected=${checked.count { it.state == "rejected" }} emitted=${selected.size}")
+        val unique = links.distinctBy { it.url }
+        val completed = kotlinx.coroutines.channels.Channel<Checked>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        val jobs = unique.map { link ->
+            async {
+                val result = probes.withPermit { check(link) }
+                completed.send(result)
+            }
+        }
+        val observed = mutableListOf<Checked>()
+        var selected = emptyList<Checked>()
+        try {
+            while (selected.isEmpty() && observed.size < unique.size) {
+                if (selected.isEmpty()) {
+                    observed.add(completed.receive())
+                    // Drain already completed checks so a ready master wins over a rendition.
+                    while (true) {
+                        val ready = completed.tryReceive().getOrNull() ?: break
+                        observed.add(ready)
+                    }
+                    val valid = observed.filter { it.state in listOf("master", "media", "video") }
+                    val winner = valid.firstOrNull { it.state == "master" } ?: valid.firstOrNull()
+                    if (winner != null) selected = listOf(winner)
+                    else if (observed.size == unique.size && !requireVerified) {
+                        selected = observed.firstOrNull { it.state != "rejected" }?.let { listOf(it) }.orEmpty()
+                    }
+                }
+            }
+        } finally {
+            jobs.forEach { it.cancel() }
+            jobs.forEach { it.join() }
+            completed.close()
+        }
+        Log.i("MSM21", "MSM21_V23_SELECT label=$label candidates=${unique.size} " +
+            "checked=${observed.size} rejected=${observed.count { it.state == "rejected" }} emitted=${selected.size}")
         selected.map { result ->
             val link = result.link
             newExtractorLink(source = MsmServerLabels.display(label),

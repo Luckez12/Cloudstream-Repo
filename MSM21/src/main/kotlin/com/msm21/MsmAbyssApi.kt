@@ -15,7 +15,7 @@ import java.net.URI
  * Returned URLs are candidates, never proof that a video is playable.
  */
 internal object MsmAbyssApi {
-    private val hosts = setOf("abyss.to", "abyssplayer.com", "playhydrax.com")
+    private val hosts = setOf("abyss.to", "abyssplayer.com", "playhydrax.com", "abyss.msmbot.club")
     private val datasPatterns = listOf(
         Regex("""const\s+datas\s*=\s*"([^"]+)""", RegexOption.IGNORE_CASE),
         Regex("""datas\s*[:=]\s*'([^']+)'""", RegexOption.IGNORE_CASE)
@@ -59,17 +59,18 @@ internal object MsmAbyssApi {
     suspend fun extract(url: String, label: String = "Abyss"): List<ExtractorLink> {
         if (!supports(url)) return emptyList()
         val host = URI(url).host
+        Log.i("MSM21", "MSM21_V23_ABYSS_START host=$host")
         try {
             val uri = URI(url)
             val origin = "${uri.scheme}://${uri.rawAuthority}"
             val page = app.get(url, headers = mapOf("Accept" to "text/html,*/*",
                 "Origin" to origin, "Referer" to "$origin/", "User-Agent" to USER_AGENT), timeout = 3L)
             if (page.code !in 200..299) {
-                Log.i("MSM21", "MSM21_V22_ABYSS host=$host stage=page status=${page.code}")
+                Log.i("MSM21", "MSM21_V23_ABYSS host=$host stage=page status=${page.code}")
                 return emptyList()
             }
             val payload = datas(page.text) ?: run {
-                Log.i("MSM21", "MSM21_V22_ABYSS host=$host reason=no_datas")
+                Log.i("MSM21", "MSM21_V23_ABYSS host=$host reason=no_datas")
                 return emptyList()
             }
             val response = app.post("https://enc-dec.app/api/dec-abyss",
@@ -77,13 +78,13 @@ internal object MsmAbyssApi {
                     "User-Agent" to USER_AGENT),
                 json = mapOf("text" to payload), timeout = 3L)
             if (response.code !in 200..299) {
-                Log.i("MSM21", "MSM21_V22_ABYSS host=$host stage=decrypt status=${response.code}")
+                Log.i("MSM21", "MSM21_V23_ABYSS host=$host stage=decrypt status=${response.code}")
                 return emptyList()
             }
             val data = JSONObject(response.text)
             if (data.optInt("status") != 200) return emptyList()
             val urls = mediaUrls(data.opt("result"))
-            Log.i("MSM21", "MSM21_V22_ABYSS host=$host candidates=${urls.size}")
+            Log.i("MSM21", "MSM21_V23_ABYSS host=$host candidates=${urls.size}")
             return urls.map { media ->
                 val path = runCatching { URI(media).path }.getOrNull().orEmpty()
                 val type = if (path.endsWith(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
@@ -95,7 +96,7 @@ internal object MsmAbyssApi {
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
             // Do not expose encrypted payloads, signed URLs, or API response bodies.
-            Log.w("MSM21", "MSM21_V22_ABYSS_FAILED host=$host error=${error.javaClass.simpleName}")
+            Log.w("MSM21", "MSM21_V23_ABYSS_FAILED host=$host error=${error.javaClass.simpleName}")
             return emptyList()
         }
     }

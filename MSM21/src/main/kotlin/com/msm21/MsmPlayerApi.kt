@@ -65,9 +65,9 @@ internal object MsmPlayerApi {
         val base = origin(uri)
         val parent = URI(pageUrl).host.orEmpty().removePrefix("www.")
         val response = app.get("$base/api/v1/video?id=${enc(id)}&w=1080&h=1080&r=${enc(parent)}",
-            headers = headers(base), timeout = 8L)
+            headers = headers(base), timeout = 3L)
         if (response.code !in 200..299) {
-            Log.w("MSM21", "MSM21_V16_PLAYERX host=${uri.host} status=${response.code} reason=api_http_error")
+            Log.w("MSM21", "MSM21_V16_PLAYERX host=${uri.host} status=${response.code} reason=${if (response.code == 404) "not_found" else "api_http_error"}")
             return emptyList()
         }
         val hex = response.text.trim()
@@ -133,7 +133,7 @@ internal object MsmPlayerApi {
         val code = uri.path.trimEnd('/').substringAfterLast('/')
         if (!code.matches(Regex("[A-Za-z0-9_-]{2,100}"))) return emptyList()
         val detailsResponse = app.get("$base/api/videos/$code/embed/details",
-            referer = pageUrl, headers = headers(base), timeout = 6L)
+            referer = pageUrl, headers = headers(base), timeout = 3L)
         if (detailsResponse.code !in 200..299) {
             Log.w("MSM21", "MSM21_V16_BYSE stage=details status=${detailsResponse.code} reason=${if (detailsResponse.code == 404) "not_found" else "api_http_error"}")
             return emptyList()
@@ -150,7 +150,7 @@ internal object MsmPlayerApi {
             "Referer" to frame.toString(), "X-Embed-Parent" to uri.toString(),
             "X-Embed-Origin" to URI(pageUrl).host.orEmpty(), "X-Embed-Referer" to pageUrl)
         val settingsResponse = app.get("$frameBase/api/videos/$frameCode/embed/settings",
-            headers = embedHeaders, timeout = 6L)
+            headers = embedHeaders, timeout = 3L)
         if (settingsResponse.code !in 200..299) {
             Log.w("MSM21", "MSM21_V16_BYSE stage=settings status=${settingsResponse.code} reason=${if (settingsResponse.code == 404) "not_found" else "api_http_error"}")
             return emptyList()
@@ -164,7 +164,7 @@ internal object MsmPlayerApi {
         }
         val response = app.get("$frameBase/api/videos/$frameCode/embed/playback",
             headers = embedHeaders,
-            timeout = 6L)
+            timeout = 3L)
         if (response.code !in 200..299) {
             Log.w("MSM21", "MSM21_V15_BYSE_PLAYBACK status=${response.code} reason=${if (response.code == 405) "method_not_allowed" else if (response.code == 404) "not_found" else "api_unavailable"}")
             return emptyList()

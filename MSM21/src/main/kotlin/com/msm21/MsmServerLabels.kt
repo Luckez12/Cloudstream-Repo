@@ -6,9 +6,12 @@ internal object MsmServerLabels {
         "rpmpl" to "RPM", "rpm" to "RPM",
         "seekp" to "Seek", "seek" to "Seek",
         "upns" to "Upns", "p2pst" to "P2P", "p2p" to "P2P",
-        "byses" to "Byse", "byse" to "Byse"
+        "byses" to "Byse", "byse" to "Byse",
+        "playm" to "Playmate", "playmate" to "Playmate",
+        "abyss" to "Abyss", "larhu" to "Larhu", "ezpla" to "Ezplayer",
+        "playe" to "Player", "mixdr" to "MixDrop"
     )
-    private val prefix = Regex("^(rpmpl|rpm|seekp|seek|upns|p2pst|p2p|byses|byse)(?=malaysub|\\b)", RegexOption.IGNORE_CASE)
+    private val prefix = Regex("^(rpmpl|rpm|seekp|seek|upns|p2pst|p2p|byses|byse|playmate|playm|abyss|larhu|ezpla|playe|mixdr)(?=malaysub|\\b)", RegexOption.IGNORE_CASE)
     private val resolution = Regex("(?<![0-9])(2160|1440|1080|720|480|360|240|144)p?(?![0-9])", RegexOption.IGNORE_CASE)
 
     fun display(label: String): String {

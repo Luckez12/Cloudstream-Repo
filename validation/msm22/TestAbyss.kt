@@ -13,8 +13,8 @@ fun main() = runBlocking {
     val signed = "https://cdn.example/master.m3u8?sig=a%2Fb%2Bz&dup=1&dup=2"
     val master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=10000\nchild.m3u8?sig=a%2Fb\n"
     test("Supported hosts and rejected lookalikes") {
-        listOf(page,"https://abyssplayer.com/?v=x","https://playhydrax.com/?v=x").forEach { check(MsmAbyssApi.supports(it)) }
-        listOf("https://abyss.to.evil/?v=x","https://evilabyss.to/?v=x","https://user@abyss.to/?v=x","javascript:abyss.to").forEach { check(!MsmAbyssApi.supports(it)) }
+        listOf(page,"https://abyssplayer.com/?v=x","https://playhydrax.com/?v=x", "https://abyss.msmbot.club/#fixture").forEach { check(MsmAbyssApi.supports(it)) }
+        listOf("https://abyss.to.evil/?v=x","https://evilabyss.to/?v=x", "https://abyss.msmbot.club.evil/#fixture","https://user@abyss.to/?v=x","javascript:abyss.to").forEach { check(!MsmAbyssApi.supports(it)) }
     }
     test("Both working JS datas formats") {
         check(MsmAbyssApi.datas("const datas = \"enc-payload\";") == "enc-payload")
@@ -60,7 +60,7 @@ fun main() = runBlocking {
         check(selected.size == 1 && selected[0].url.contains("master"))
         check(selected[0].referer == page)
         check(MsmMediaPolicy.select(links.take(2),"Abyss",requireVerified=true).isEmpty())
-        check(MsmMediaPolicy.select(links.take(2),"Other").size == 1) // original unverified fallback unchanged
+        check(MsmMediaPolicy.select(links.take(2),"Other",requireVerified=false).size == 1) // original unverified fallback unchanged
     }
     test("Common direct-video probe filters the bad candidate") {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1",0),0)
@@ -76,6 +76,27 @@ fun main() = runBlocking {
             val selected = MsmMediaPolicy.select(links,"Abyss",requireVerified=true).take(1)
             check(selected.size == 1 && selected[0].url.endsWith("good.mp4"))
         } finally { server.stop(0) }
+    }
+    test("Playmate and known labels use consistent names") {
+        check(MsmServerLabels.display("playmMalaySub 10") == "Playmate • MalaySub")
+        check(MsmServerLabels.linkName("playmMalaySub 10", "Playmate", false, 400) == "Playmate • MalaySub")
+        check(MsmServerLabels.display("abyssMalaySub 2") == "Abyss • MalaySub")
+    }
+    test("A fast verified master does not wait for a stalled candidate") {
+        app.handler = { call ->
+            if (call.url.contains("slow")) delay(2000)
+            Reply(call.url,200,master)
+        }
+        val links = listOf("slow", "fast").map { ExtractorLink("Seek","Seek","https://cdn.example/$it.m3u8",ExtractorLinkType.M3U8) }
+        val start = System.nanoTime()
+        val selected = MsmMediaPolicy.select(links,"seekpMalaySub 7")
+        check(selected.single().url.contains("fast"))
+        check((System.nanoTime()-start)/1_000_000 < 1000)
+    }
+    test("DNS failure is rejected even in optional unverified mode") {
+        app.handler = { throw java.net.UnknownHostException("fixture") }
+        val link = ExtractorLink("Larhu","Larhu","https://cdn.example/a.m3u8",ExtractorLinkType.M3U8)
+        check(MsmMediaPolicy.select(listOf(link),"larhuMalaySub",requireVerified=false).isEmpty())
     }
     println("$count Abyss Kotlin regression cases passed")
 }
