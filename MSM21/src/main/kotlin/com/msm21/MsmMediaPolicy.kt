@@ -114,14 +114,16 @@ internal object MsmMediaPolicy {
         finally { connection?.disconnect() }
     }
 
-    suspend fun select(links: List<ExtractorLink>, label: String): List<ExtractorLink> = coroutineScope {
+    suspend fun select(links: List<ExtractorLink>, label: String,
+        requireVerified: Boolean = false): List<ExtractorLink> = coroutineScope {
         val probes = Semaphore(3)
         val checked = links.distinctBy { it.url }.map { link ->
             async { probes.withPermit { check(link) } }
         }.awaitAll()
         val masters = checked.filter { it.state == "master" }
         val selected = if (masters.isNotEmpty()) listOf(masters.maxBy { it.link.quality })
-            else checked.filter { it.state != "rejected" }
+            else checked.filter { it.state != "rejected" &&
+                (!requireVerified || it.state in listOf("media", "video")) }
         Log.i("MSM21", "MSM21_V12_SELECT label=$label candidates=${checked.size} " +
             "masters=${masters.size} rejected=${checked.count { it.state == "rejected" }} emitted=${selected.size}")
         selected.map { result ->

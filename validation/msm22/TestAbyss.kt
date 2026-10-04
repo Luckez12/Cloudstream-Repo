@@ -1,0 +1,81 @@
+package com.msm21
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.*
+import org.json.JSONObject
+import com.sun.net.httpserver.HttpServer
+import java.net.InetSocketAddress
+
+fun main() = runBlocking {
+    var count = 0
+    suspend fun test(name: String, body: suspend () -> Unit) { body();count++;println("PASS $name") }
+    val page = "https://abyss.to/?v=example"
+    val signed = "https://cdn.example/master.m3u8?sig=a%2Fb%2Bz&dup=1&dup=2"
+    val master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=10000\nchild.m3u8?sig=a%2Fb\n"
+    test("Supported hosts and rejected lookalikes") {
+        listOf(page,"https://abyssplayer.com/?v=x","https://playhydrax.com/?v=x").forEach { check(MsmAbyssApi.supports(it)) }
+        listOf("https://abyss.to.evil/?v=x","https://evilabyss.to/?v=x","https://user@abyss.to/?v=x","javascript:abyss.to").forEach { check(!MsmAbyssApi.supports(it)) }
+    }
+    test("Both working JS datas formats") {
+        check(MsmAbyssApi.datas("const datas = \"enc-payload\";") == "enc-payload")
+        check(MsmAbyssApi.datas("datas: 'other'") == "other")
+        check(MsmAbyssApi.datas("<html>No data</html>") == null)
+    }
+    test("Nested media URLs preserve signatures and deduplicate") {
+        val result = JSONObject().put("sources", listOf(JSONObject().put("file",signed),signed,"https://cdn.example/a.mp4"))
+        check(MsmAbyssApi.mediaUrls(result) == listOf(signed,"https://cdn.example/a.mp4"))
+        check(MsmAbyssApi.mediaUrls("<source src=\"https://cdn.example/a.m3u8?sig=x&amp;k=z\">") == listOf("https://cdn.example/a.m3u8?sig=x&k=z"))
+    }
+    test("Reject telemetry, nonmedia strings and nonHTTP schemes") {
+        check(MsmAbyssApi.mediaUrls(JSONObject("""{"x":["https://google-analytics.com/a.m3u8","javascript:video.mp4","https://cdn.example/config.json"]}""")).isEmpty())
+    }
+    test("Decrypt request JSON and playback headers match working JS") {
+        app.calls.clear()
+        app.handler = { call -> Reply(call.url,200,if(call.json == null) "const datas = \"payload\";" else JSONObject().put("status",200).put("result",JSONObject().put("url",signed)).toString()) }
+        val links = MsmAbyssApi.extract(page, "Abyss MalaySub 9")
+        check(links.size == 1 && links[0].url == signed && links[0].type == ExtractorLinkType.M3U8)
+        check(links[0].name == "Abyss MalaySub 9" && links[0].source == "Abyss MalaySub 9")
+        check(links[0].referer == page && links[0].headers["Referer"] == page)
+        check(app.calls[0].headers["Origin"] == "https://abyss.to")
+        check(app.calls[0].headers["Referer"] == "https://abyss.to/")
+        check(app.calls[1].json == mapOf("text" to "payload"))
+        check(app.calls.all { it.timeout == 3L })
+    }
+    test("Missing datas and failed decrypt produce zero candidates") {
+        app.calls.clear();app.handler = { Reply(it.url,200,"<html>missing</html>") }
+        check(MsmAbyssApi.extract(page).isEmpty() && app.calls.size == 1)
+        app.handler = { Reply(it.url,200,if(it.json == null) "datas='enc'" else "{\"status\":500,\"result\":{\"url\":\"$signed\"}}") }
+        check(MsmAbyssApi.extract(page).isEmpty())
+        app.handler = { Reply(it.url,403,"Denied") };check(MsmAbyssApi.extract(page).isEmpty())
+    }
+    test("Cancellation propagates to the provider deadline") {
+        app.handler = { throw CancellationException("fixture") }
+        try { MsmAbyssApi.extract(page);error("Cancellation swallowed") } catch (_: CancellationException) {}
+    }
+    test("Common policy rejects bad/unknown manifests and retains master") {
+        app.handler = { call -> Reply(call.url, if(call.url.contains("unknown")) 500 else 200,
+            if(call.url.contains("master")) master else "<html>denied</html>") }
+        val links = listOf("bad","unknown","master").map { ExtractorLink("Abyss","Abyss","https://cdn.example/$it.m3u8",ExtractorLinkType.M3U8,referer=page) }
+        val selected = MsmMediaPolicy.select(links,"Abyss MalaySub",requireVerified=true).take(1)
+        check(selected.size == 1 && selected[0].url.contains("master"))
+        check(selected[0].referer == page)
+        check(MsmMediaPolicy.select(links.take(2),"Abyss",requireVerified=true).isEmpty())
+        check(MsmMediaPolicy.select(links.take(2),"Other").size == 1) // original unverified fallback unchanged
+    }
+    test("Common direct-video probe filters the bad candidate") {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1",0),0)
+        server.createContext("/") { exchange ->
+            val good = exchange.requestURI.path == "/good.mp4"
+            check(exchange.requestHeaders.getFirst("Range") == "bytes=0-511")
+            val body = if(good) ByteArray(512).apply { "ftyp".toByteArray().copyInto(this,4) } else "<html>not video</html>".toByteArray()
+            exchange.sendResponseHeaders(206,body.size.toLong());exchange.responseBody.use { it.write(body) }
+        }
+        server.start()
+        try {
+            val links = listOf("bad","good").map { ExtractorLink("Abyss","Abyss","http://127.0.0.1:${server.address.port}/$it.mp4",ExtractorLinkType.VIDEO,referer=page) }
+            val selected = MsmMediaPolicy.select(links,"Abyss",requireVerified=true).take(1)
+            check(selected.size == 1 && selected[0].url.endsWith("good.mp4"))
+        } finally { server.stop(0) }
+    }
+    println("$count Abyss Kotlin regression cases passed")
+}
