@@ -98,5 +98,30 @@ fun main() = runBlocking {
         val link = ExtractorLink("Larhu","Larhu","https://cdn.example/a.m3u8",ExtractorLinkType.M3U8)
         check(MsmMediaPolicy.select(listOf(link),"larhuMalaySub",requireVerified=false).isEmpty())
     }
+    test("Malay Dub and arbitrary new servers share the formatter") {
+        check(MsmServerLabels.display("rpmplMalay Dub 3") == "RPM • Malay Dub")
+        check(MsmServerLabels.display("seekpMalay Dub 4") == "Seek • Malay Dub")
+        check(MsmServerLabels.display("p2pstMalay Dub 5") == "P2P • Malay Dub")
+        check(MsmServerLabels.display("upnsMalay Dub 6") == "Upns • Malay Dub")
+        check(MsmServerLabels.display("playmMalay Dub 10") == "Playmate • Malay Dub")
+        check(MsmServerLabels.display("NewServerMalay Dub 12", "NewHost") == "NewHost • Malay Dub")
+        check(MsmServerLabels.display("FutureHostMalaySub 13") == "FutureHost • MalaySub")
+        check(MsmServerLabels.display("futureMalay Dub 14", "PlayerX", "Auto") == "future • Malay Dub")
+        check(MsmServerLabels.display("NewServerEnglish Dub 8", "NewHost") == "NewHost • English Dub")
+        check(MsmServerLabels.display("FutureHost_English_Sub_9") == "FutureHost • English Sub")
+    }
+    test("Names retain meaningful numbers and resolution without duplicate extractor") {
+        check(MsmServerLabels.display("Host2Malay Dub 7") == "Host2 • Malay Dub")
+        check(MsmServerLabels.display("Host2 7") == "Host2 7")
+        check(MsmServerLabels.linkName("futureMalay Dub 8", "NewHost 720p", false, 720, "NewHost") == "NewHost • Malay Dub • 720p")
+        check(MsmServerLabels.linkName("futureMalaySub 8", "NewHost 720p", true, 720, "NewHost") == "NewHost • MalaySub")
+    }
+    test("Selected new server carries extractor identity and audio into both fields") {
+        app.handler = { call -> Reply(call.url,200,master) }
+        val link = ExtractorLink("Future Extractor", "Future Extractor Auto", "https://cdn.example/master.m3u8", ExtractorLinkType.M3U8)
+        val selected = MsmMediaPolicy.select(listOf(link), "brandnewMalay Dub 42").single()
+        check(selected.source == "Future Extractor • Malay Dub")
+        check(selected.name == selected.source)
+    }
     println("$count Abyss Kotlin regression cases passed")
 }
