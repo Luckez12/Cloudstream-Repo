@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 
 class Hglink : StreamWishExtractor() {
-    override val name = "Hglink"
+    override val name get() = URI(mainUrl).host.orEmpty()
     override val mainUrl = "https://hglink.to"
 }
 
@@ -40,7 +40,7 @@ class Dsvplay : DoodLaExtractor() {
 }
 
 class Bysesukior : ByseSX() {
-    override val name = "Bysesukior"
+    override val name get() = URI(mainUrl).host.orEmpty()
     override val mainUrl = "https://bysesukior.com"
 }
 

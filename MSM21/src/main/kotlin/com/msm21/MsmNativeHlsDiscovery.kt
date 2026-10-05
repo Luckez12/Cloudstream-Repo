@@ -42,16 +42,9 @@ internal object MsmNativeHlsDiscovery {
             }?.toString()
         }.distinct().take(8).toList()
 
-    suspend fun discover(url: String, referer: String): MsmNativeHlsResult {
+    suspend fun discover(url: String, referer: String, serverLabel: String = ""): MsmNativeHlsResult {
         val host = runCatching { URI(url).host }.getOrNull().orEmpty()
-        val name = when {
-            host.contains("dood") || host in listOf("dsvplay.com", "vide0.net") -> "DoodStream"
-            host == "voe.sx" -> "Voe"
-            host.contains("hgcloud") || host in listOf("hglink.to", "dhcplay.com", "gradehgplus.com",
-                "hanerix.com", "audinifer.com", "vibuxer.com") -> "HGCloud"
-            host.contains("streamtape") -> "StreamTape"
-            else -> host
-        }
+        val name = serverLabel.ifBlank { host }
         val masters = mutableListOf<ExtractorLink>()
         val media = mutableListOf<ExtractorLink>()
         try {

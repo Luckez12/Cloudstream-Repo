@@ -56,7 +56,7 @@ internal object MsmAbyssApi {
         return found.toList()
     }
 
-    suspend fun extract(url: String, label: String = "Abyss"): List<ExtractorLink> {
+    suspend fun extract(url: String, label: String = ""): List<ExtractorLink> {
         if (!supports(url)) return emptyList()
         val host = URI(url).host
         Log.i("MSM21", "MSM21_V23_ABYSS_START host=$host")
@@ -88,7 +88,7 @@ internal object MsmAbyssApi {
             return urls.map { media ->
                 val path = runCatching { URI(media).path }.getOrNull().orEmpty()
                 val type = if (path.endsWith(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                newExtractorLink(source = label, name = label, url = media, type = type) {
+                newExtractorLink(source = label.ifBlank { URI(url).host.orEmpty() }, name = label.ifBlank { URI(url).host.orEmpty() }, url = media, type = type) {
                     referer = url
                     headers = mapOf("User-Agent" to USER_AGENT, "Accept" to "*/*", "Referer" to url)
                 }

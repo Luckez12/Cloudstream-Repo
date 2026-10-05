@@ -462,7 +462,7 @@ class msm21 : MainAPI() {
                 try {
                     withTimeoutOrNull(MIRROR_PIPELINE_TIMEOUT_MS) {
                         Log.i(TAG, "MSM21_V23_ROUTE host=${runCatching { URI(mirror.url).host }.getOrNull()} abyss=${MsmAbyssApi.supports(mirror.url)}")
-                        val apiLinks = MsmPlayerApi.extract(mirror.url, pageUrl)
+                        val apiLinks = MsmPlayerApi.extract(mirror.url, pageUrl, mirror.label)
                         if (apiLinks.isNotEmpty()) apiSelected = MsmMediaPolicy.select(apiLinks, mirror.label)
                         if (apiSelected.isEmpty() && MsmAbyssApi.supports(mirror.url)) {
                             // Use the existing standard extractor budget, not an Abyss extension.
@@ -475,7 +475,7 @@ class msm21 : MainAPI() {
                                 "reason=${if (abyssSelected == null) "standard_budget_exhausted" else if (apiSelected.isEmpty()) "no_verified_source" else "verified_source"}")
                         }
                         val native = if (apiSelected.isEmpty())
-                            MsmNativeHlsDiscovery.discover(mirror.url, pageUrl) else null
+                            MsmNativeHlsDiscovery.discover(mirror.url, pageUrl, mirror.label) else null
                         if (native != null) {
                             native.masters.forEach(collect)
                             native.media.forEach(collect)

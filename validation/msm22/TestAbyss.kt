@@ -176,10 +176,12 @@ fun main() = runBlocking {
     test("Parent cancellation returns promptly while direct-video socket is blocked") {
         stalledVideoRace(stallBody=true,cancelOnly=true)
     }
-    test("Playmate and known labels use consistent names") {
-        check(MsmServerLabels.display("playmMalaySub 10") == "Playmate • MalaySub")
-        check(MsmServerLabels.linkName("playmMalaySub 10", "Playmate", false, 400) == "Playmate • MalaySub")
-        check(MsmServerLabels.display("abyssMalaySub 2") == "Abyss • MalaySub")
+    test("Website names are preserved without legacy server aliases") {
+        check(MsmServerLabels.display("playmMalaySub 10") == "playm • MalaySub")
+        check(MsmServerLabels.display("rpmplMalay Dub 3") == "rpmpl • Malay Dub")
+        check(MsmServerLabels.display("seekpMalaySub 4") == "seekp • MalaySub")
+        check(MsmServerLabels.display("playmMalaySub 10", "Playmate") == "Playmate • MalaySub")
+        check(MsmServerLabels.linkName("playmMalaySub 10", "Auto", true, 400) == "playm • MalaySub • Auto")
     }
     test("A fast verified master does not wait for a stalled candidate") {
         app.handler = { call ->
@@ -197,15 +199,12 @@ fun main() = runBlocking {
         val link = ExtractorLink("Larhu","Larhu","https://cdn.example/a.m3u8",ExtractorLinkType.M3U8)
         check(MsmMediaPolicy.select(listOf(link),"larhuMalaySub",requireVerified=false).isEmpty())
     }
-    test("Malay Dub and arbitrary new servers share the formatter") {
-        check(MsmServerLabels.display("rpmplMalay Dub 3") == "RPM • Malay Dub")
-        check(MsmServerLabels.display("seekpMalay Dub 4") == "Seek • Malay Dub")
-        check(MsmServerLabels.display("p2pstMalay Dub 5") == "P2P • Malay Dub")
-        check(MsmServerLabels.display("upnsMalay Dub 6") == "Upns • Malay Dub")
-        check(MsmServerLabels.display("playmMalay Dub 10") == "Playmate • Malay Dub")
+    test("Arbitrary servers and languages share the formatter without a name table") {
+        check(MsmServerLabels.display("p2pstMalay Dub 5") == "p2pst • Malay Dub")
+        check(MsmServerLabels.display("upnsMalay Dub 6") == "upns • Malay Dub")
         check(MsmServerLabels.display("NewServerMalay Dub 12", "NewHost") == "NewHost • Malay Dub")
         check(MsmServerLabels.display("FutureHostMalaySub 13") == "FutureHost • MalaySub")
-        check(MsmServerLabels.display("futureMalay Dub 14", "PlayerX", "Auto") == "future • Malay Dub")
+        check(MsmServerLabels.display("futureMalay Dub 14", "futureMalay Dub 14", "Auto") == "future • Malay Dub")
         check(MsmServerLabels.display("NewServerEnglish Dub 8", "NewHost") == "NewHost • English Dub")
         check(MsmServerLabels.display("FutureHost_English_Sub_9") == "FutureHost • English Sub")
     }
@@ -213,14 +212,46 @@ fun main() = runBlocking {
         check(MsmServerLabels.display("Host2Malay Dub 7") == "Host2 • Malay Dub")
         check(MsmServerLabels.display("Host2 7") == "Host2 7")
         check(MsmServerLabels.linkName("futureMalay Dub 8", "NewHost 720p", false, 720, "NewHost") == "NewHost • Malay Dub • 720p")
-        check(MsmServerLabels.linkName("futureMalaySub 8", "NewHost 720p", true, 720, "NewHost") == "NewHost • MalaySub")
+        check(MsmServerLabels.linkName("futureMalaySub 8", "NewHost 720p", true, 720, "NewHost") == "NewHost • MalaySub • Auto")
     }
     test("Selected new server carries extractor identity and audio into both fields") {
         app.handler = { call -> Reply(call.url,200,master) }
         val link = ExtractorLink("Future Extractor", "Future Extractor Auto", "https://cdn.example/master.m3u8", ExtractorLinkType.M3U8)
         val selected = MsmMediaPolicy.select(listOf(link), "brandnewMalay Dub 42").single()
-        check(selected.source == "Future Extractor • Malay Dub")
+        check(selected.source == "Future Extractor • Malay Dub • Auto")
         check(selected.name == selected.source)
+    }
+    test("Resolution suffix distinguishes verified master, rendition and unknown") {
+        check(MsmServerLabels.linkName("HostMalaySub 4", "Host 1080p", true,1080,"Host") == "Host • MalaySub • Auto")
+        check(MsmServerLabels.linkName("HostMalay Dub 4", "Host 720p", false,400,"Host") == "Host • Malay Dub • 720p")
+        check(MsmServerLabels.linkName("HostMalaySub 4", "Host Auto", false,1080,"Host") == "Host • MalaySub • 1080p")
+        check(MsmServerLabels.linkName("HostMalaySub 4", "Auto", false,400) == "Host • MalaySub • Unknown")
+        check(MsmServerLabels.linkName("HostMalaySub 4", "Auto", false,0) == "Host • MalaySub • Unknown")
+        check(MsmServerLabels.linkName("Host720MalaySub 4", "Host720", false,400) == "Host720 • MalaySub • Unknown")
+    }
+    test("Already formatted labels retain one suffix and support no-language sources") {
+        val label = "NewHost • Malay Dub • 720p"
+        check(MsmServerLabels.linkName(label,label,false,720,label) == label)
+        check(MsmServerLabels.linkName(label,label,true,720,label) == "NewHost • Malay Dub • Auto")
+        check(MsmServerLabels.linkName("Host2 7","Auto",false,400) == "Host2 7 • Unknown")
+        check(MsmServerLabels.linkName("","",false,400) == "Unknown • Unknown")
+    }
+    test("An unverified fallback is Unknown, never Auto merely from its old label") {
+        app.handler = { call -> Reply(call.url,500,"busy") }
+        val link = ExtractorLink("Host","Host Auto","https://cdn.example/a.m3u8",ExtractorLinkType.M3U8)
+        val result = MsmMediaPolicy.select(listOf(link),"HostMalaySub",requireVerified=false).single()
+        check(result.source == "Host • MalaySub • Unknown" && result.name == result.source)
+    }
+    test("Player API uses website server identity instead of a hardcoded display name") {
+        val data = JSONObject().put("source","/hls/master.m3u8").toString()
+        val cipher = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE,
+            javax.crypto.spec.SecretKeySpec("kiemtienmua911ca".toByteArray(),"AES"),
+            javax.crypto.spec.IvParameterSpec("1234567890oiuytr".toByteArray()))
+        val hex = cipher.doFinal(data.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }
+        app.handler = { call -> Reply(call.url,200,hex) }
+        val links = MsmPlayerApi.extract("https://playerx.rpmplay.online/#fixture",page,"FutureHostMalaySub 2")
+        check(links.isNotEmpty() && links.all { it.source == "FutureHostMalaySub 2" && it.name == it.source })
     }
     println("$count Abyss Kotlin regression cases passed")
 }

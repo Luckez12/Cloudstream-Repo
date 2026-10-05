@@ -205,8 +205,9 @@ internal object MsmMediaPolicy {
             "checked=${observed.size} rejected=${observed.count { it.state == "rejected" }} emitted=${selected.size}")
         selected.map { result ->
             val link = result.link
-            newExtractorLink(source = MsmServerLabels.display(label, link.source, link.name),
-                name = MsmServerLabels.linkName(label, link.name, result.state == "master", link.quality, link.source),
+            val formatted = MsmServerLabels.linkName(label, link.name,
+                result.state == "master", link.quality, link.source)
+            newExtractorLink(source = formatted, name = formatted,
                 url = result.url, type = link.type) {
                 referer = link.referer
                 headers = link.headers

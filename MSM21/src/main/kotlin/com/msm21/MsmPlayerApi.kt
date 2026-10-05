@@ -32,13 +32,14 @@ internal object MsmPlayerApi {
         URI(url).host?.lowercase().let { it in playerXHosts || it == "bysesukior.com" }
     }.getOrDefault(false)
 
-    suspend fun extract(url: String, pageUrl: String): List<ExtractorLink> {
+    suspend fun extract(url: String, pageUrl: String, serverLabel: String = ""): List<ExtractorLink> {
         if (!supports(url)) return emptyList()
         return try {
             val uri = URI(url)
+            val identity = serverLabel.ifBlank { uri.host.orEmpty() }
             val links = when (uri.host.lowercase()) {
-                in playerXHosts -> playerX(uri, pageUrl)
-                else -> byse(uri, pageUrl)
+                in playerXHosts -> playerX(uri, pageUrl, identity)
+                else -> byse(uri, pageUrl, identity)
             }
             Log.i("MSM21", "MSM21_V15_API host=${uri.host} candidates=${links.size}")
             links
@@ -56,7 +57,7 @@ internal object MsmPlayerApi {
     private fun headers(base: String) = mapOf("User-Agent" to USER_AGENT,
         "Referer" to "$base/", "Origin" to base)
 
-    private suspend fun playerX(uri: URI, pageUrl: String): List<ExtractorLink> {
+    private suspend fun playerX(uri: URI, pageUrl: String, identity: String): List<ExtractorLink> {
         val id = uri.fragment.orEmpty().substringBefore('&')
         if (!id.matches(Regex("[A-Za-z0-9_-]{2,100}")) || uri.scheme != "https") {
             Log.w("MSM21", "MSM21_V16_PLAYERX host=${uri.host} reason=invalid_video_id")
@@ -111,10 +112,10 @@ internal object MsmPlayerApi {
             "source_fields=${listOf("cfNative", "source", "hlsVideoTiktok", "hlsVideoGoogle").count { data.optString(it).isNotBlank() }} " +
             "enabled_candidates=${options.count { it.second.isNotBlank() }} " +
             "reason=${if (options.none { it.second.isNotBlank() }) "no_enabled_source" else "sources_available"}")
-        return options.filter { it.second.isNotBlank() }.distinctBy { it.second }.mapNotNull { (kind, raw) ->
+        return options.filter { it.second.isNotBlank() }.distinctBy { it.second }.mapNotNull { (_, raw) ->
             val media = uri.resolve(raw).toString()
             if (MsmMediaPolicy.isRejected(media)) return@mapNotNull null
-            newExtractorLink(source = "PlayerX", name = "PlayerX $kind", url = media,
+            newExtractorLink(source = identity, name = identity, url = media,
                 type = ExtractorLinkType.M3U8) { referer = "$base/"; this.headers = headers(base) }
         }
     }
@@ -127,7 +128,7 @@ internal object MsmPlayerApi {
         return raw.substringBefore('#').substringBefore('?') + "?" + pairs.joinToString("&")
     }
 
-    private suspend fun byse(uri: URI, pageUrl: String): List<ExtractorLink> {
+    private suspend fun byse(uri: URI, pageUrl: String, identity: String): List<ExtractorLink> {
         byseFrames.remove(uri.toString())
         val base = origin(uri)
         val code = uri.path.trimEnd('/').substringAfterLast('/')
@@ -191,7 +192,7 @@ internal object MsmPlayerApi {
             val mime = source.optString("mime_type")
             val type = if (mime.contains("mpegurl", true) || URI(media).path.endsWith(".m3u8", true))
                 ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            newExtractorLink(source = "Byse", name = source.optString("label", "Byse"), url = media,
+            newExtractorLink(source = identity, name = source.optString("label", identity), url = media,
                 type = type) { referer = "$frameBase/"; this.headers = headers(frameBase)
                 quality = source.optInt("height", 400) }
         }

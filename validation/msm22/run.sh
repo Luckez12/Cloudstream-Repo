@@ -19,5 +19,6 @@ java -cp "$lib/*" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler -no-stdlib -no-refl
   -d "$work/tests.jar" "$root"/validation/msm22/*.kt \
   "$root/MSM21/src/main/kotlin/com/msm21/MsmAbyssApi.kt" \
   "$root/MSM21/src/main/kotlin/com/msm21/MsmMediaPolicy.kt" \
-  "$root/MSM21/src/main/kotlin/com/msm21/MsmServerLabels.kt"
+  "$root/MSM21/src/main/kotlin/com/msm21/MsmServerLabels.kt" \
+  "$root/MSM21/src/main/kotlin/com/msm21/MsmPlayerApi.kt"
 java -cp "$work/tests.jar:$lib/*" com.msm21.TestAbyssKt
