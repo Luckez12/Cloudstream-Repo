@@ -176,12 +176,12 @@ fun main() = runBlocking {
     test("Parent cancellation returns promptly while direct-video socket is blocked") {
         stalledVideoRace(stallBody=true,cancelOnly=true)
     }
-    test("Website names are preserved without legacy server aliases") {
-        check(MsmServerLabels.display("playmMalaySub 10") == "playm • MalaySub")
-        check(MsmServerLabels.display("rpmplMalay Dub 3") == "rpmpl • Malay Dub")
-        check(MsmServerLabels.display("seekpMalaySub 4") == "seekp • MalaySub")
+    test("Known website slugs receive canonical display names") {
+        check(MsmServerLabels.display("playmMalaySub 10") == "Playmate • MalaySub")
+        check(MsmServerLabels.display("rpmplMalay Dub 3") == "RPM • Malay Dub")
+        check(MsmServerLabels.display("seekpMalaySub 4") == "Seek • MalaySub")
         check(MsmServerLabels.display("playmMalaySub 10", "Playmate") == "Playmate • MalaySub")
-        check(MsmServerLabels.linkName("playmMalaySub 10", "Auto", true, 400) == "playm • MalaySub • Auto")
+        check(MsmServerLabels.linkName("playmMalaySub 10", "Auto", true, 400) == "Playmate • MalaySub • Auto")
     }
     test("A fast verified master does not wait for a stalled candidate") {
         app.handler = { call ->
@@ -199,12 +199,12 @@ fun main() = runBlocking {
         val link = ExtractorLink("Larhu","Larhu","https://cdn.example/a.m3u8",ExtractorLinkType.M3U8)
         check(MsmMediaPolicy.select(listOf(link),"larhuMalaySub",requireVerified=false).isEmpty())
     }
-    test("Arbitrary servers and languages share the formatter without a name table") {
-        check(MsmServerLabels.display("p2pstMalay Dub 5") == "p2pst • Malay Dub")
-        check(MsmServerLabels.display("upnsMalay Dub 6") == "upns • Malay Dub")
+    test("Arbitrary servers and languages share the formatter without an alias requirement") {
+        check(MsmServerLabels.display("p2pstMalay Dub 5") == "P2P • Malay Dub")
+        check(MsmServerLabels.display("upnsMalay Dub 6") == "Upns • Malay Dub")
         check(MsmServerLabels.display("NewServerMalay Dub 12", "NewHost") == "NewHost • Malay Dub")
         check(MsmServerLabels.display("FutureHostMalaySub 13") == "FutureHost • MalaySub")
-        check(MsmServerLabels.display("futureMalay Dub 14", "futureMalay Dub 14", "Auto") == "future • Malay Dub")
+        check(MsmServerLabels.display("futureMalay Dub 14", "futureMalay Dub 14", "Auto") == "Future • Malay Dub")
         check(MsmServerLabels.display("NewServerEnglish Dub 8", "NewHost") == "NewHost • English Dub")
         check(MsmServerLabels.display("FutureHost_English_Sub_9") == "FutureHost • English Sub")
     }
@@ -252,6 +252,25 @@ fun main() = runBlocking {
         app.handler = { call -> Reply(call.url,200,hex) }
         val links = MsmPlayerApi.extract("https://playerx.rpmplay.online/#fixture",page,"FutureHostMalaySub 2")
         check(links.isNotEmpty() && links.all { it.source == "FutureHostMalaySub 2" && it.name == it.source })
+    }
+    test("All twelve known MSM server slugs share language and resolution formatting") {
+        val expected = mapOf("rpmpl" to "RPM", "seekp" to "Seek", "p2pst" to "P2P",
+            "upns" to "Upns", "abyss" to "Abyss", "byses" to "Byse", "playm" to "Playmate",
+            "playe" to "Player", "mixdr" to "MixDrop", "dsvpl" to "DoodStream",
+            "ezpla" to "Ezplayer", "larhu" to "Larhu")
+        for ((slug, name) in expected) {
+            check(MsmServerLabels.linkName("${slug}MalaySub 7", "Auto", true,400) == "$name • MalaySub • Auto")
+            check(MsmServerLabels.linkName("${slug}Malay Dub 7", "720p", false,720) == "$name • Malay Dub • 720p")
+            check(MsmServerLabels.linkName("${slug}English Dub 7", "Auto", false,400) == "$name • English Dub • Unknown")
+            check(MsmServerLabels.display("${slug.uppercase()}MalaySub 7") == "$name • MalaySub")
+        }
+    }
+    test("Unmapped future servers remain formatted and need no alias to be emitted") {
+        check(MsmServerLabels.linkName("freshhostMalaySub 11","Auto",true,400) == "Freshhost • MalaySub • Auto")
+        check(MsmServerLabels.linkName("freshhostMalay Dub 11","720p",false,720,"New Brand") == "New Brand • Malay Dub • 720p")
+        app.handler = { call -> Reply(call.url,200,master) }
+        val selected = MsmMediaPolicy.select(listOf(ExtractorLink("RPM","RPM","https://cdn.example/a.m3u8",ExtractorLinkType.M3U8)),"rpmplMalaySub 3").single()
+        check(selected.source == "RPM • MalaySub • Auto" && selected.name == selected.source)
     }
     println("$count Abyss Kotlin regression cases passed")
 }

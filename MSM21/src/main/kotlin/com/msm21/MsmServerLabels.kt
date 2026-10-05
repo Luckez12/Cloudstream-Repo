@@ -2,8 +2,22 @@ package com.msm21
 
 import com.lagradost.cloudstream3.utils.Qualities
 
-/** One formatter for every server; no server-name aliases or eligibility table. */
+/** Name aliases are optional; every server uses the same language/resolution formatter. */
 internal object MsmServerLabels {
+    private val aliases = mapOf(
+        "rpmpl" to "RPM", "rpm" to "RPM",
+        "seekp" to "Seek", "seek" to "Seek",
+        "p2pst" to "P2P", "p2p" to "P2P",
+        "upns" to "Upns",
+        "abyss" to "Abyss",
+        "byses" to "Byse", "byse" to "Byse", "bysesukior" to "Byse",
+        "playm" to "Playmate", "playmate" to "Playmate",
+        "playe" to "Player", "player" to "Player",
+        "mixdr" to "MixDrop", "mixdrop" to "MixDrop",
+        "dsvpl" to "DoodStream", "dsvplay" to "DoodStream", "doodstream" to "DoodStream",
+        "ezpla" to "Ezplayer", "ezplayer" to "Ezplayer",
+        "larhu" to "Larhu"
+    )
     private val language = Regex("(?:Malay\\s*(?:Sub|Dub)|[A-Z][a-z]+\\s*(?:Sub|Dub)|(?<=\\s)[\\p{L}]+\\s+(?:Sub|Dub))")
     private val foldedLanguage = Regex("Malay\\s*(?:Sub|Dub)", RegexOption.IGNORE_CASE)
     private val resolution = Regex("(?<![\\p{L}0-9])([1-9][0-9]{1,3})p\\b", RegexOption.IGNORE_CASE)
@@ -30,13 +44,15 @@ internal object MsmServerLabels {
     private fun extractorServer(value: String, label: String): String? {
         if (value.isBlank() || value.trim().equals(label.trim(), true)) return null
         return parts(value).server.takeUnless { it.isBlank() || descriptor.matches(it) }
+            ?.let { aliases[it.lowercase()] ?: it }
     }
 
     fun display(label: String, extractorSource: String = "", extractorName: String = ""): String {
         val part = parts(label)
-        val server = extractorServer(extractorSource, label)
+        val server = aliases[part.server.lowercase()]
+            ?: extractorServer(extractorSource, label)
             ?: extractorServer(extractorName, label)
-            ?: part.server.takeUnless { it.isBlank() || descriptor.matches(it) }
+            ?: part.server.takeUnless { it.isBlank() || descriptor.matches(it) }?.replaceFirstChar { it.uppercase() }
             ?: "Unknown"
         val audio = part.audio ?: parts(extractorSource).audio ?: parts(extractorName).audio
         return audio?.let { "$server • $it" } ?: server
