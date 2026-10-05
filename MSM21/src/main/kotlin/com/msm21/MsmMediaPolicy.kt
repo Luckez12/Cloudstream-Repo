@@ -8,13 +8,13 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
@@ -44,11 +44,11 @@ internal object MsmMediaPolicy {
             path.endsWith("/master.m3u") || path.endsWith("/playlist.m3u")
     }
 
-    private data class Checked(val link: ExtractorLink, val state: String)
+    private data class Checked(val link: ExtractorLink, val state: String, val url: String = link.url)
 
-    private suspend fun check(link: ExtractorLink): Checked {
+    private suspend fun check(link: ExtractorLink, videoWorkers: ExecutorService): Checked {
         if (isRejected(link.url)) return Checked(link, "rejected")
-        if (link.type == ExtractorLinkType.VIDEO) return checkVideo(link)
+        if (link.type == ExtractorLinkType.VIDEO) return checkVideo(link, videoWorkers)
         if (link.type != ExtractorLinkType.M3U8) return Checked(link, "other")
         return try {
             withTimeoutOrNull(3_500L) {
@@ -79,7 +79,20 @@ internal object MsmMediaPolicy {
         }
     }
 
-    private suspend fun checkVideo(link: ExtractorLink): Checked = withContext(Dispatchers.IO) {
+    private suspend fun checkVideo(link: ExtractorLink, workers: ExecutorService): Checked =
+        suspendCancellableCoroutine { continuation ->
+            // HttpURLConnection reads do not cooperate with coroutine cancellation.
+            // Keep blocking I/O outside the child job so losing probes cannot hold up
+            // its parent deadline. At most three workers belong to this selection.
+            val task = workers.submit {
+                if (continuation.isActive) {
+                    continuation.resumeWith(runCatching { checkVideoBlocking(link) { continuation.isActive } })
+                }
+            }
+            continuation.invokeOnCancellation { task.cancel(true) }
+        }
+
+    private fun checkVideoBlocking(link: ExtractorLink, isActive: () -> Boolean): Checked {
         var connection: HttpURLConnection? = null
         try {
             val conn = URL(link.url).openConnection() as HttpURLConnection
@@ -93,20 +106,23 @@ internal object MsmMediaPolicy {
             if (link.referer.isNotBlank()) conn.setRequestProperty("Referer", link.referer)
             conn.setRequestProperty("Range", "bytes=0-511")
             val status = conn.responseCode
+            if (!isActive()) throw CancellationException("Video probe cancelled")
             if (isRejected(conn.url.toString()) || status in listOf(400, 401, 403, 404, 410)) {
                 Log.w("MSM21", "MSM21_V14_VIDEO_REJECT host=${URI(link.url).host} status=$status")
-                return@withContext Checked(link, "rejected")
+                return Checked(link, "rejected")
             }
-            if (status !in 200..299) return@withContext Checked(link, "unverified")
+            if (status !in 200..299) return Checked(link, "unverified")
             val bytes = ByteArray(512)
             var count = 0
             conn.inputStream.use { input ->
                 while (count < bytes.size) {
+                    if (!isActive()) throw CancellationException("Video probe cancelled")
                     val read = input.read(bytes, count, bytes.size - count)
                     if (read <= 0) break
                     count += read
                 }
             }
+            if (!isActive()) throw CancellationException("Video probe cancelled")
             val box = if (count >= 8) String(bytes, 4, 4, Charsets.US_ASCII) else ""
             val video = box in listOf("ftyp", "moov", "mdat", "moof", "styp", "sidx", "free", "wide") ||
                 (count >= 4 && bytes[0] == 0x1A.toByte() && bytes[1] == 0x45.toByte() &&
@@ -126,33 +142,31 @@ internal object MsmMediaPolicy {
                 original.scheme.equals(final.scheme, true) && original.host.equals(final.host, true) &&
                     original.port == final.port
             } }
-            val resolved = if (video && finalUrl != link.url && (sameOrigin || !sensitiveHeaders)) {
-                newExtractorLink(source = link.source, name = link.name, url = finalUrl, type = link.type) {
-                    referer = link.referer
-                    headers = link.headers
-                    quality = link.quality
-                    extractorData = link.extractorData
-                    audioTracks = link.audioTracks
-                }
-            } else link
-            Checked(resolved, if (video) "video" else "rejected")
+            val resolvedUrl = if (video && finalUrl != link.url && (sameOrigin || !sensitiveHeaders)) {
+                finalUrl
+            } else link.url
+            return Checked(link, if (video) "video" else "rejected", resolvedUrl)
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
+            if (!isActive()) throw CancellationException("Video probe cancelled")
             val dnsFailed = generateSequence<Throwable>(error) { it.cause }.any { it is java.net.UnknownHostException }
             Log.w("MSM21", "MSM21_V23_PROBE_FAILED host=${runCatching { URI(link.url).host }.getOrNull()} error=${error.javaClass.simpleName} rejected=$dnsFailed")
-            Checked(link, if (dnsFailed) "rejected" else "unverified")
+            return Checked(link, if (dnsFailed) "rejected" else "unverified")
         }
         finally { connection?.disconnect() }
     }
 
     suspend fun select(links: List<ExtractorLink>, label: String,
         requireVerified: Boolean = true): List<ExtractorLink> = coroutineScope {
+        val videoWorkers = Executors.newFixedThreadPool(3) { runnable ->
+            Thread(runnable, "MSM21-video-probe").apply { isDaemon = true }
+        }
         val probes = Semaphore(3)
         val unique = links.distinctBy { it.url }
         val completed = kotlinx.coroutines.channels.Channel<Checked>(kotlinx.coroutines.channels.Channel.UNLIMITED)
         val jobs = unique.map { link ->
             async {
-                val result = probes.withPermit { check(link) }
+                val result = probes.withPermit { check(link, videoWorkers) }
                 completed.send(result)
             }
         }
@@ -169,7 +183,11 @@ internal object MsmMediaPolicy {
                     }
                     val valid = observed.filter { it.state in listOf("master", "media", "video") }
                     val winner = valid.firstOrNull { it.state == "master" } ?: valid.firstOrNull()
-                    if (winner != null) selected = listOf(winner)
+                    if (winner != null) {
+                        selected = listOf(winner)
+                        Log.i("MSM21", "MSM21_V26_WINNER label=$label state=${winner.state} " +
+                            "checked=${observed.size} candidates=${unique.size}")
+                    }
                     else if (observed.size == unique.size && !requireVerified) {
                         selected = observed.firstOrNull { it.state != "rejected" }?.let { listOf(it) }.orEmpty()
                     }
@@ -177,6 +195,9 @@ internal object MsmMediaPolicy {
             }
         } finally {
             jobs.forEach { it.cancel() }
+            // Cancelled bridge coroutines finish promptly; worker sockets close in
+            // their own finally blocks, under the unchanged connection/read limits.
+            videoWorkers.shutdownNow()
             jobs.forEach { it.join() }
             completed.close()
         }
@@ -186,7 +207,7 @@ internal object MsmMediaPolicy {
             val link = result.link
             newExtractorLink(source = MsmServerLabels.display(label, link.source, link.name),
                 name = MsmServerLabels.linkName(label, link.name, result.state == "master", link.quality, link.source),
-                url = link.url, type = link.type) {
+                url = result.url, type = link.type) {
                 referer = link.referer
                 headers = link.headers
                 quality = if (result.state == "master") Qualities.Unknown.value else link.quality

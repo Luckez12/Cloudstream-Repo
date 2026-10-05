@@ -120,6 +120,62 @@ fun main() = runBlocking {
             check(MsmMediaPolicy.select(listOf(link),"Host").single().url == link.url)
         } finally { server.stop(0) }
     }
+    suspend fun stalledVideoRace(stallBody: Boolean, cancelOnly: Boolean = false) {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1",0),0)
+        val handlerPool = java.util.concurrent.Executors.newCachedThreadPool()
+        server.executor = handlerPool
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val exited = java.util.concurrent.CountDownLatch(1)
+        val good = ByteArray(512).apply { "ftyp".toByteArray().copyInto(this,4) }
+        server.createContext("/slow.mp4") { exchange ->
+            try {
+                if (stallBody) {
+                    exchange.sendResponseHeaders(206,512)
+                    exchange.responseBody.write(good,0,8); exchange.responseBody.flush()
+                }
+                entered.countDown()
+                release.await(2,java.util.concurrent.TimeUnit.SECONDS)
+                if (!stallBody) exchange.sendResponseHeaders(206,512)
+                exchange.responseBody.use { it.write(good,if(stallBody) 8 else 0,if(stallBody) 504 else 512) }
+            } catch (_: Exception) { exchange.close() }
+            finally { exited.countDown() }
+        }
+        server.createContext("/fast.mp4") { exchange ->
+            check(entered.await(1,java.util.concurrent.TimeUnit.SECONDS))
+            exchange.sendResponseHeaders(206,512);exchange.responseBody.use { it.write(good) }
+        }
+        server.start()
+        try {
+            val base = "http://127.0.0.1:${server.address.port}"
+            val links = (if(cancelOnly) listOf("slow") else listOf("slow","fast")).map {
+                ExtractorLink("Abyss","Abyss","$base/$it.mp4",ExtractorLinkType.VIDEO)
+            }
+            val start = System.nanoTime()
+            val result = withTimeoutOrNull(if(cancelOnly) 200L else 900L) {
+                MsmMediaPolicy.select(links,"AbyssMalaySub")
+            }
+            val elapsed = (System.nanoTime()-start)/1_000_000
+            if (cancelOnly) { check(result == null);check(elapsed < 800) { "Cancellation blocked $elapsed ms" } }
+            else {
+                check(result?.single()?.url == "$base/fast.mp4") { "Verified source lost to cleanup: $result ($elapsed ms)" }
+                check(elapsed < 800) { "Winner waited for losing socket $elapsed ms" }
+            }
+            check(entered.count == 0L)
+        } finally {
+            release.countDown();exited.await(1,java.util.concurrent.TimeUnit.SECONDS)
+            server.stop(0);handlerPool.shutdownNow()
+        }
+    }
+    test("Verified direct winner survives a stalled response-header loser and outer budget") {
+        stalledVideoRace(stallBody=false)
+    }
+    test("Verified direct winner survives a stalled response-body loser and outer budget") {
+        stalledVideoRace(stallBody=true)
+    }
+    test("Parent cancellation returns promptly while direct-video socket is blocked") {
+        stalledVideoRace(stallBody=true,cancelOnly=true)
+    }
     test("Playmate and known labels use consistent names") {
         check(MsmServerLabels.display("playmMalaySub 10") == "Playmate • MalaySub")
         check(MsmServerLabels.linkName("playmMalaySub 10", "Playmate", false, 400) == "Playmate • MalaySub")
