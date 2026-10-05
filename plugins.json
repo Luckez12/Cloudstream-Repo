@@ -129,10 +129,10 @@
     },
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=pencurimoviesubmalay26.site&sz=256",
-        "fileHash": "sha256-ea63adee42e89a3f96bf638fd9c5719a6764732f638f7aaafcf3ac1e28a2761d",
+        "fileHash": "sha256-19c157ad4261040ba2156bbcbc8c3d48732fae81938b979a57c2ed22a055339a",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 125443,
+        "fileSize": 125718,
         "status": 1,
         "language": "ms",
         "authors": [
@@ -142,7 +142,7 @@
             "Movie",
             "TvSeries"
         ],
-        "version": 26,
+        "version": 27,
         "internalName": "MSM21",
         "description": "MSM21 \u2014 Streaming Movie and TV Series",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/MSM21.cs3",
