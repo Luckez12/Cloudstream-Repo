@@ -112,7 +112,30 @@ internal object MsmMediaPolicy {
                 (count >= 4 && bytes[0] == 0x1A.toByte() && bytes[1] == 0x45.toByte() &&
                     bytes[2] == 0xDF.toByte() && bytes[3] == 0xA3.toByte()) ||
                 (count > 188 && bytes[0] == 0x47.toByte() && bytes[188] == 0x47.toByte())
-            Checked(link, if (video) "video" else "rejected")
+            val finalUrl = conn.url.toString()
+            Log.i("MSM21", "MSM21_V25_VIDEO_PROBE host=${URI(link.url).host} " +
+                "final_host=${URI(finalUrl).host} redirected=${finalUrl != link.url} status=$status " +
+                "content_range=${conn.getHeaderField("Content-Range").orEmpty()} " +
+                "accept_ranges=${conn.getHeaderField("Accept-Ranges").orEmpty()} video=$video")
+            // Reuse the exact URL verified by this request, including signed query bytes.
+            // Avoid forwarding a caller-supplied Cookie/Authorization to a different origin.
+            val sensitiveHeaders = link.headers.keys.any {
+                it.equals("Cookie", true) || it.equals("Authorization", true)
+            }
+            val sameOrigin = URI(link.url).let { original -> URI(finalUrl).let { final ->
+                original.scheme.equals(final.scheme, true) && original.host.equals(final.host, true) &&
+                    original.port == final.port
+            } }
+            val resolved = if (video && finalUrl != link.url && (sameOrigin || !sensitiveHeaders)) {
+                newExtractorLink(source = link.source, name = link.name, url = finalUrl, type = link.type) {
+                    referer = link.referer
+                    headers = link.headers
+                    quality = link.quality
+                    extractorData = link.extractorData
+                    audioTracks = link.audioTracks
+                }
+            } else link
+            Checked(resolved, if (video) "video" else "rejected")
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
             val dnsFailed = generateSequence<Throwable>(error) { it.cause }.any { it is java.net.UnknownHostException }

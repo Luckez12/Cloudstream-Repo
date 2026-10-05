@@ -94,15 +94,18 @@ object MsmWebViewProbe {
             var finishScheduled = false
             var humanVerification = false
 
+            var destroyed = false
             fun safeDestroy() {
-                runCatching {
-                    handler.removeCallbacksAndMessages(null)
-                    webView.stopLoading()
-                    webView.loadUrl("about:blank")
-                    webView.removeJavascriptInterface("msmBridge")
-                    webView.removeAllViews()
-                    webView.destroy()
-                }
+                if (destroyed) return
+                destroyed = true
+                handler.removeCallbacksAndMessages(null)
+                // Each operation is independent: a stop failure must not prevent destroy.
+                runCatching { webView.stopLoading() }
+                runCatching { webView.onPause() }
+                runCatching { webView.removeJavascriptInterface("msmBridge") }
+                runCatching { webView.removeAllViews() }
+                runCatching { webView.destroy() }
+                Log.i(TAG, "MSM21_V25_WEBVIEW_DESTROY target=${safeUrl(url)}")
             }
 
             fun sortedResult(): List<CapturedStream> {
@@ -162,7 +165,7 @@ object MsmWebViewProbe {
                     }
                     return
                 }
-                if (!continuation.isActive) return
+                if (!continuation.isActive || destroyed) return
                 // Fragment metadata describes a custom transport, not a direct media URL.
                 if (rawUrl?.substringAfter('#', "")?.startsWith("mp4/") == true) return
                 val playerUrl = activePlayerUrl.get()
@@ -395,24 +398,30 @@ object MsmWebViewProbe {
                     domStorageEnabled = true
                     mediaPlaybackRequiresUserGesture = false
                     loadsImagesAutomatically = true
-                    javaScriptCanOpenWindowsAutomatically = true
-                    setSupportMultipleWindows(false)
+                    javaScriptCanOpenWindowsAutomatically = false
+                    setSupportMultipleWindows(true)
                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     userAgentString = USER_AGENT
                 }
 
-                webView.webChromeClient = WebChromeClient()
+                webView.webChromeClient = object : WebChromeClient() {
+                    override fun onCreateWindow(view: WebView?, isDialog: Boolean,
+                        isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean {
+                        Log.i(TAG, "MSM21_V25_WEBVIEW_POPUP_BLOCKED")
+                        return false
+                    }
+                }
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageStarted(
                         view: WebView?,
                         pageUrl: String?,
                         favicon: Bitmap?
-                    ) = Unit
+                    ) { if (!destroyed) runCatching { view?.evaluateJavascript(QUIET_JS, null) } }
 
                     override fun onPageFinished(
                         view: WebView?,
                         pageUrl: String?
-                    ) = Unit
+                    ) { if (!destroyed) runCatching { view?.evaluateJavascript(QUIET_JS, null) } }
 
                     override fun shouldInterceptRequest(
                         view: WebView?,
@@ -466,6 +475,7 @@ object MsmWebViewProbe {
                     <!DOCTYPE html>
                     <html>
                     <head>
+                        <script>$QUIET_JS</script>
                         <meta name="viewport" content="width=device-width, initial-scale=1.0">
                         <style>
                             html, body, iframe {
@@ -569,13 +579,11 @@ object MsmWebViewProbe {
         } else {
             "<base href=\"${htmlEscape(finalPageUrl)}\">"
         }
-        val hook = HOOK_JS.replace("__MSM_BLOCKED_HOSTS__", MsmMediaPolicy.blockedHostsJson())
-        val injected = if (html.contains("<head>", true)) {
-            html.replaceFirst(
-                Regex("<head>", RegexOption.IGNORE_CASE),
-                // Escape JVM replacement syntax to preserve JS dollar signs and backslashes.
-                Regex.escapeReplacement("<head>$baseTag$hook")
-            )
+        val hook = "<script>$QUIET_JS</script>" + HOOK_JS.replace("__MSM_BLOCKED_HOSTS__", MsmMediaPolicy.blockedHostsJson())
+        val head = Regex("<head(?:\\s[^>]*)?>", RegexOption.IGNORE_CASE).find(html)
+        val injected = if (head != null) {
+            // Preserve attributes and literal JS dollar signs/backslashes.
+            html.replaceRange(head.range, "${head.value}$baseTag$hook")
         } else {
             "$baseTag$hook$html"
         }
@@ -719,6 +727,63 @@ object MsmWebViewProbe {
         "algiersreests",
         "morestamping"
     )
+
+    // Only runs inside this disposable extraction WebView, never the native player.
+    private const val QUIET_JS = """
+(function() {
+  if (window.__msmQuiet) return;
+  window.__msmQuiet = true;
+  window.open = function() { return null; };
+  function quiet(media) {
+    try {
+      if (!media.defaultMuted) media.defaultMuted = true;
+      if (!media.muted) media.muted = true;
+      if (media.volume !== 0) media.volume = 0;
+    } catch(e) {}
+  }
+  function scan() {
+    var list = document.querySelectorAll("video,audio");
+    for (var i = 0; i < list.length; i++) quiet(list[i]);
+  }
+  try {
+    var proto = HTMLMediaElement.prototype;
+    ["muted", "volume"].forEach(function(key) {
+      var descriptor = Object.getOwnPropertyDescriptor(proto, key);
+      if (!descriptor || !descriptor.set || !descriptor.configurable) return;
+      Object.defineProperty(proto, key, {
+        configurable: descriptor.configurable, enumerable: descriptor.enumerable,
+        get: descriptor.get,
+        set: function() { descriptor.set.call(this, key === "muted" ? true : 0); }
+      });
+    });
+    var play = proto.play;
+    proto.play = function() { quiet(this); return play.apply(this, arguments); };
+  } catch(e) {}
+  // Preserve WebAudio processing but silence connections to its output device.
+  try {
+    var connect = AudioNode.prototype.connect;
+    AudioNode.prototype.connect = function(destination) {
+      if (destination === this.context.destination) {
+        var sink = this.context.__msmSilentSink;
+        if (!sink) {
+          sink = this.context.createGain(); sink.gain.value = 0;
+          connect.call(sink, destination);
+          this.context.__msmSilentSink = sink;
+        }
+        var args = Array.prototype.slice.call(arguments); args[0] = sink;
+        connect.apply(this, args);
+        return destination;
+      }
+      return connect.apply(this, arguments);
+    };
+  } catch(e) {}
+  ["play", "playing", "volumechange", "loadedmetadata"].forEach(function(event) {
+    document.addEventListener(event, function(e) { quiet(e.target); }, true);
+  });
+  try { new MutationObserver(scan).observe(document, {childList:true, subtree:true}); } catch(e) {}
+  scan();
+})();
+    """
 
     private const val HOOK_JS = """
 <script>

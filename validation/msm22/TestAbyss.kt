@@ -77,6 +77,49 @@ fun main() = runBlocking {
             check(selected.size == 1 && selected[0].url.endsWith("good.mp4"))
         } finally { server.stop(0) }
     }
+    test("Direct video reuses verified redirect and preserves signed query and metadata") {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1",0),0)
+        val base = "http://127.0.0.1:${server.address.port}"
+        val target = "$base/final.mp4?sig=a%2Fb%2Bz&dup=1&dup=2"
+        server.createContext("/start.mp4") { exchange ->
+            exchange.responseHeaders.add("Location", target)
+            exchange.sendResponseHeaders(302,-1); exchange.close()
+        }
+        server.createContext("/final.mp4") { exchange ->
+            check(exchange.requestURI.rawQuery == "sig=a%2Fb%2Bz&dup=1&dup=2")
+            check(exchange.requestHeaders.getFirst("Referer") == page)
+            val body = ByteArray(512).apply { "ftyp".toByteArray().copyInto(this,4) }
+            exchange.responseHeaders.add("Content-Range", "bytes 0-511/1000000")
+            exchange.sendResponseHeaders(206,512); exchange.responseBody.use { it.write(body) }
+        }
+        server.start()
+        try {
+            val link = ExtractorLink("Abyss", "Abyss", "$base/start.mp4", ExtractorLinkType.VIDEO,
+                referer=page, headers=mapOf("User-Agent" to "fixture"), quality=720,
+                extractorData="fixture", audioTracks=listOf("Malay"))
+            val selected = MsmMediaPolicy.select(listOf(link), "AbyssMalay Dub 3").single()
+            check(selected.url == target && selected.referer == page && selected.headers == link.headers)
+            check(selected.quality == 720 && selected.extractorData == "fixture" && selected.audioTracks == link.audioTracks)
+        } finally { server.stop(0) }
+    }
+    test("Cross-origin redirect does not move credential headers onto emitted URL") {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1",0),0)
+        val base = "http://127.0.0.1:${server.address.port}"
+        server.createContext("/start.mp4") { exchange ->
+            exchange.responseHeaders.add("Location", "http://localhost:${server.address.port}/final.mp4")
+            exchange.sendResponseHeaders(302,-1); exchange.close()
+        }
+        server.createContext("/final.mp4") { exchange ->
+            val body = ByteArray(512).apply { "ftyp".toByteArray().copyInto(this,4) }
+            exchange.sendResponseHeaders(206,512); exchange.responseBody.use { it.write(body) }
+        }
+        server.start()
+        try {
+            val link = ExtractorLink("Host", "Host", "$base/start.mp4", ExtractorLinkType.VIDEO,
+                headers=mapOf("Cookie" to "fixture=1"))
+            check(MsmMediaPolicy.select(listOf(link),"Host").single().url == link.url)
+        } finally { server.stop(0) }
+    }
     test("Playmate and known labels use consistent names") {
         check(MsmServerLabels.display("playmMalaySub 10") == "Playmate • MalaySub")
         check(MsmServerLabels.linkName("playmMalaySub 10", "Playmate", false, 400) == "Playmate • MalaySub")
