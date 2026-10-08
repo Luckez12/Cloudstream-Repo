@@ -105,6 +105,26 @@
         "name": "KissKH"
     },
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=kshow123.tv&sz=128",
+        "fileHash": "sha256-1a7b16a0eb3e29ef38ba8817fe5baf8a146ace1edfa762fbb52bb055ab22e204",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
+        "fileSize": 12368,
+        "status": 3,
+        "language": "en",
+        "authors": [
+            "Luckez"
+        ],
+        "tvTypes": [
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "KShow123",
+        "description": "KShow123 Korean variety shows \u2014 homepage preview. Details and playback coming in the next stage.",
+        "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/KShow123.cs3",
+        "name": "KShow123"
+    },
+    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=movieboxhd.net&sz=256",
         "fileHash": "sha256-bb9463519553699ad14e13d76ba2b9216b7510880cc0f225a430c2ac66634a34",
         "apiVersion": 1,
