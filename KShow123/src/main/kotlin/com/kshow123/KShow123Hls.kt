@@ -16,6 +16,19 @@ internal class KShow123Hls {
     internal data class Candidate(val link: ExtractorLink, val original: Boolean = true)
     private val slots = Semaphore(3)
 
+    private suspend fun rebuild(
+        link: ExtractorLink,
+        url: String = link.url,
+        name: String = link.name,
+        quality: Int = link.quality,
+    ): ExtractorLink = newExtractorLink(link.source, name, url, link.type) {
+        referer = link.referer
+        this.quality = quality
+        headers = link.headers
+        extractorData = link.extractorData
+        audioTracks = link.audioTracks
+    }
+
     private fun isHls(url: String): Boolean =
         Regex("""\.m3u8(?:[?#]|$)""", RegexOption.IGNORE_CASE).containsMatchIn(url)
 
@@ -97,7 +110,7 @@ internal class KShow123Hls {
         // If a source page already exposes a master, don't probe siblings.
         val discovered = if (directMasters.isEmpty()) {
             hls.filter { it.original }.take(2).flatMap { candidate ->
-                siblingUrls(candidate.link.url).map { candidate.link.copy(url = it) }
+                siblingUrls(candidate.link.url).map { rebuild(candidate.link, url = it) }
             }.distinctBy { it.url }.take(4).map { possible ->
                 async { possible.takeIf { confirmedMaster(it) } }
             }.awaitAll().filterNotNull()
@@ -106,7 +119,7 @@ internal class KShow123Hls {
         Log.i("KShow123", "KSHOW123_HLS server=$label originals=${originals.size} masters=${masters.size} fallback=${(masters.size - 1).coerceAtLeast(0)}")
         if (masters.isEmpty()) return@coroutineScope originals
         masters.mapIndexed { index, link ->
-            link.copy(
+            rebuild(link,
                 name = "KShow123 · $label · " + if (index == 0) "Master HLS" else "Fallback Master $index",
                 quality = Qualities.Unknown.value
             )

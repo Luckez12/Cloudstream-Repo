@@ -12,6 +12,9 @@ buildscript {
 
     dependencies {
         classpath("com.android.tools.build:gradle:8.7.3")
+        // Kotlin 2.3 metadata requires R8 8.13.19 or newer.
+        // CompileDexTask uses AGP D8 from this buildscript classpath.
+        classpath("com.android.tools:r8:8.13.19")
         // Pin the published plugin module; the moving -SNAPSHOT artifact is unavailable.
         // Upstream commit: 81b1d424d236a447d9f2e95a229faef79002f761
         classpath("com.github.recloudstream.gradle:gradle:81b1d424d2")
