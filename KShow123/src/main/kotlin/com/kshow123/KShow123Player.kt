@@ -48,7 +48,7 @@ internal class KShow123Player(private val mainUrl: String) {
         linkCount.incrementAndGet()
     }
 
-    private fun subtitle(raw: String?, base: String, callback: (SubtitleFile) -> Unit) {
+    private suspend fun subtitle(raw: String?, base: String, callback: (SubtitleFile) -> Unit) {
         val url = raw?.let { resolve(it, base) } ?: return
         // The JWPlayer response often includes only the site's intro caption,
         // which is not an English translation of the episode.
@@ -188,7 +188,12 @@ internal class KShow123Player(private val mainUrl: String) {
             emit(url, label, referer, callback)
             return
         }
-        loadExtractor(url, referer, { sub -> subtitle(sub.url, url, subtitleCallback) }) { link ->
+        // Extractor callbacks are synchronous. Forward the already-built
+        // subtitle instead of invoking a suspending builder inside them.
+        loadExtractor(url, referer, { sub ->
+            if (!URI(sub.url).path.orEmpty().endsWith("/intro.vtt", ignoreCase = true) &&
+                seenSubtitles.add(sub.url)) subtitleCallback(sub)
+        }) { link ->
             if (seenLinks.add(link.url)) {
                 callback(link)
                 linkCount.incrementAndGet()

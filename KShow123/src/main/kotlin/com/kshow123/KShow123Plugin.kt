@@ -12,6 +12,6 @@ class KShow123Plugin : BasePlugin() {
         registerExtractorAPI(KShowMinochinos())
         registerExtractorAPI(KShowMixdrop())
         registerExtractorAPI(KShowWatchads())
-        Log.i("KShow123", "KSHOW123_PLUGIN_LOADED version=2 stage=full")
+        Log.i("KShow123", "KSHOW123_PLUGIN_LOADED version=3 stage=full")
     }
 }
