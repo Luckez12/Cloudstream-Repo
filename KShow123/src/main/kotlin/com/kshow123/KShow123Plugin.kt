@@ -8,6 +8,10 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 class KShow123Plugin : BasePlugin() {
     override fun load() {
         registerMainAPI(KShow123Provider())
-        Log.i("KShow123", "KSHOW123_PLUGIN_LOADED version=1 stage=homepage")
+        registerExtractorAPI(KShowHglink())
+        registerExtractorAPI(KShowMinochinos())
+        registerExtractorAPI(KShowMixdrop())
+        registerExtractorAPI(KShowWatchads())
+        Log.i("KShow123", "KSHOW123_PLUGIN_LOADED version=2 stage=full")
     }
 }
