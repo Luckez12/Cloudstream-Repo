@@ -64,6 +64,28 @@
         "name": "Animexin"
     },
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=aniwaves.ru&sz=128",
+        "fileHash": "sha256-420086daa2647257b8e4c0254b7717874a74433f05e917b9fe237925dd6c305d",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
+        "fileSize": 28743,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "Luckez"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA"
+        ],
+        "version": 1,
+        "internalName": "AniWaves",
+        "description": "AniWaves anime with Sub/Dub episodes and multiple streaming servers.",
+        "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/AniWaves.cs3",
+        "name": "AniWaves"
+    },
+    {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://fullmatchshows.com&size=%size%",
         "fileHash": "sha256-30592b2f5cc88611ead151350ffa22e22be34306cb50a5b0feb5d4615c745071",
         "apiVersion": 1,
