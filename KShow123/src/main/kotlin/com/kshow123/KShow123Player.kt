@@ -17,6 +17,7 @@ import java.net.URI
 import java.net.URLDecoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CopyOnWriteArrayList
 
 internal class KShow123Player(private val mainUrl: String) {
     private val json = jacksonObjectMapper()
@@ -24,6 +25,9 @@ internal class KShow123Player(private val mainUrl: String) {
     private val seenSubtitles = ConcurrentHashMap.newKeySet<String>()
     private val linkCount = AtomicInteger(0)
     private val extractionSlots = Semaphore(3)
+    private val hls = KShow123Hls()
+    private data class Pending(val label: String, val candidate: KShow123Hls.Candidate)
+    private val pending = CopyOnWriteArrayList<Pending>()
 
     private fun variable(html: String, name: String): String? =
         Regex("""\b(?:var|let|const)\s+${Regex.escape(name)}\s*=\s*(['"])(.*?)\1\s*;""", RegexOption.DOT_MATCHES_ALL)
@@ -38,14 +42,14 @@ internal class KShow123Player(private val mainUrl: String) {
     private fun media(url: String): Boolean =
         Regex("""\.(?:m3u8|mp4)(?:[?#]|$)""", RegexOption.IGNORE_CASE).containsMatchIn(url)
 
-    private suspend fun emit(url: String, label: String, referer: String, callback: (ExtractorLink) -> Unit) {
-        if (!media(url) || !seenLinks.add(url)) return
-        callback(newExtractorLink("KShow123", "KShow123 · $label", url, INFER_TYPE) {
+    private suspend fun queue(url: String, label: String, referer: String) {
+        if (!media(url)) return
+        val link = newExtractorLink("KShow123", "KShow123 · $label", url, INFER_TYPE) {
             this.referer = referer
             quality = Qualities.Unknown.value
             headers = mapOf("Referer" to referer, "User-Agent" to USER_AGENT)
-        })
-        linkCount.incrementAndGet()
+        }
+        pending.add(Pending(label, KShow123Hls.Candidate(link)))
     }
 
     private suspend fun subtitle(raw: String?, base: String, callback: (SubtitleFile) -> Unit) {
@@ -121,7 +125,7 @@ internal class KShow123Player(private val mainUrl: String) {
                             }.toList()
                         decoded.forEach { value ->
                             val url = resolve(value, episodeUrl) ?: return@forEach
-                            if (media(url)) emit(url, label, episodeUrl, callback)
+                            if (media(url)) queue(url, label, episodeUrl)
                             else if (Regex("""\.(?:vtt|srt)(?:[?#]|$)""", RegexOption.IGNORE_CASE).containsMatchIn(url)) {
                                 subtitle(url, episodeUrl, subtitleCallback)
                             }
@@ -134,11 +138,27 @@ internal class KShow123Player(private val mainUrl: String) {
                                 } else external(embed, label, episodeUrl, subtitleCallback, callback)
                             }
                         fragment.select("video source[src], video[src]").forEach {
-                            resolve(it.attr("src"), episodeUrl)?.let { url -> emit(url, label, episodeUrl, callback) }
+                            resolve(it.attr("src"), episodeUrl)?.let { url -> queue(url, label, episodeUrl) }
                         }
                     }
                 }
             }.awaitAll()
+        }
+        val selected = coroutineScope {
+            pending.groupBy { it.label }.map { (label, items) ->
+                async {
+                    withTimeoutOrNull(10_000L) { hls.select(label, items.map { it.candidate }) }
+                        ?: items.filter { it.candidate.original }.map { it.candidate.link }.also {
+                            Log.w("KShow123", "KSHOW123_HLS_TIMEOUT server=$label keepOriginal=${it.size}")
+                        }
+                }
+            }.awaitAll().flatten()
+        }
+        selected.forEach { link ->
+            if (seenLinks.add(link.url)) {
+                callback(link)
+                linkCount.incrementAndGet()
+            }
         }
         Log.i("KShow123", "KSHOW123_LINKS streams=${linkCount.get()} subtitles=${seenSubtitles.size} ms=${SystemClock.elapsedRealtime() - started}")
         if (linkCount.get() == 0) throw ErrorLoadingException("KShow123: tiada sumber video berjaya diekstrak. Semak log KSHOW123_API dan KSHOW123_ERROR.")
@@ -167,7 +187,7 @@ internal class KShow123Player(private val mainUrl: String) {
                             val encrypted = player.selectFirst("script[data-name=crypto]")?.attr("data-value")
                             val decoded = encrypted?.let { KShow123Crypto.decodeStandard(it) }
                             val stream = decoded?.let { resolve(it, url) }
-                            if (stream != null) emit(stream, "$label · $mirror", url, callback)
+                            if (stream != null) queue(stream, "$label · $mirror", url)
                             else Log.w("KShow123", "KSHOW123_DECODE_FAILED server=Standard")
                             URI(url).rawQuery.orEmpty().split('&').firstOrNull { it.startsWith("sub=") }
                                 ?.substringAfter('=')?.let { URLDecoder.decode(it, "UTF-8") }
@@ -185,8 +205,13 @@ internal class KShow123Player(private val mainUrl: String) {
         subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
     ) {
         if (media(url)) {
-            emit(url, label, referer, callback)
+            queue(url, label, referer)
             return
+        }
+        // These hosts expose HLS sources in their player page. Keep the
+        // candidates even if the generic extractor subsequently fails.
+        if (URI(url).host.orEmpty() in setOf("hglink.to", "minochinos.com")) {
+            hls.pageCandidates(url, referer).forEach { pending.add(Pending(label, it)) }
         }
         // Extractor callbacks are synchronous. Forward the already-built
         // subtitle instead of invoking a suspending builder inside them.
@@ -194,10 +219,8 @@ internal class KShow123Player(private val mainUrl: String) {
             if (!URI(sub.url).path.orEmpty().endsWith("/intro.vtt", ignoreCase = true) &&
                 seenSubtitles.add(sub.url)) subtitleCallback(sub)
         }) { link ->
-            if (seenLinks.add(link.url)) {
-                callback(link)
-                linkCount.incrementAndGet()
-            }
+            pending.add(Pending(label, KShow123Hls.Candidate(link)))
         }
+
     }
 }
