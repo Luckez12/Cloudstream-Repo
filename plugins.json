@@ -106,11 +106,11 @@
     },
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=kshow123.tv&sz=128",
-        "fileHash": "sha256-1a7b16a0eb3e29ef38ba8817fe5baf8a146ace1edfa762fbb52bb055ab22e204",
+        "fileHash": "sha256-e739bb3c15a0fc0fa2a1580776c538d7f45b27853e275bd9dbbbd20cec3bc419",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 12368,
-        "status": 3,
+        "fileSize": 41092,
+        "status": 1,
         "language": "en",
         "authors": [
             "Luckez"
@@ -118,9 +118,9 @@
         "tvTypes": [
             "TvSeries"
         ],
-        "version": 1,
+        "version": 3,
         "internalName": "KShow123",
-        "description": "KShow123 Korean variety shows \u2014 homepage preview. Details and playback coming in the next stage.",
+        "description": "KShow123 Korean variety shows with search, show details, episodes and multiple video servers.",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/KShow123.cs3",
         "name": "KShow123"
     },
