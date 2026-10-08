@@ -18,6 +18,51 @@ import java.net.URLEncoder
 internal class AniWavesPlayer(private val mainUrl: String) {
     private val ajaxHeaders = mapOf("X-Requested-With" to "XMLHttpRequest")
 
+    internal fun serverName(raw: String, embedded: String): String {
+        val host = runCatching { URI(embedded).host.orEmpty().lowercase() }.getOrDefault("")
+        return when {
+            host == "playmogo.com" || raw.equals("DGHG", true) -> "DoodStream"
+            host == "mfw09.org" || raw.equals("BYFMS", true) -> "Byse"
+            else -> raw.trim().ifBlank { host.ifBlank { "Server" } }
+        }
+    }
+
+    internal suspend fun namedLink(link: ExtractorLink, server: String, kind: String): ExtractorLink {
+        val known = link.quality.takeIf { it > 0 && it != Qualities.Unknown.value }
+        val resolution = known?.let { "${it}p" } ?: when {
+            link.type == ExtractorLinkType.M3U8 -> masterResolution(link) ?: "Auto (HLS)"
+            else -> Regex("(?:^|[ ·])(?:HD|SD|HQ)(?:$|[ ·])").find(link.name)?.value?.trim(' ', '·') ?: "Unknown"
+        }
+        val language = if (kind == "ssub") "S-Sub" else "Sub"
+        return newExtractorLink("AniWaves · $server", "$server · $language · $resolution", link.url, link.type) {
+            referer = link.referer
+            quality = link.quality
+            headers = link.headers
+            extractorData = link.extractorData
+            audioTracks = link.audioTracks
+        }
+    }
+
+    private suspend fun masterResolution(link: ExtractorLink): String? = try {
+        withTimeoutOrNull(3_000L) {
+            val response = app.get(link.url, referer = link.referer, headers = link.headers)
+            if (response.code !in 200..299 || !response.text.trimStart('\uFEFF', ' ', '\n', '\r').startsWith("#EXTM3U")) {
+                return@withTimeoutOrNull null
+            }
+            val heights = Regex("#EXT-X-STREAM-INF:[^\\r\\n]*RESOLUTION=[0-9]+x([0-9]+)", RegexOption.IGNORE_CASE)
+                .findAll(response.text).mapNotNull { it.groupValues[1].toIntOrNull() }.filter { it > 0 }.distinct().sorted().toList()
+            when {
+                heights.isEmpty() -> null
+                heights.size == 1 -> "Auto (${heights.first()}p)"
+                else -> "Auto (${heights.first()}–${heights.last()}p)"
+            }
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+
     internal fun sourceEndpoint(playerUrl: String, id: String): String =
         URI(playerUrl).resolve("getSources?id=${URLEncoder.encode(id, "UTF-8")}").toString()
 
@@ -46,6 +91,8 @@ internal class AniWavesPlayer(private val mainUrl: String) {
 
     suspend fun load(data: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean = coroutineScope {
         val payload = runCatching { mapper.readTree(data) }.getOrNull() ?: return@coroutineScope false
+        // Reject cached Dub episode payloads as well as new Dub requests.
+        if (payload.path("dub").asBoolean(false)) return@coroutineScope false
         val showUrl = payload.path("showUrl").asText()
         val serverQuery = payload.path("servers").asText()
         val site = runCatching { URI(showUrl) }.getOrNull() ?: return@coroutineScope false
@@ -54,9 +101,8 @@ internal class AniWavesPlayer(private val mainUrl: String) {
         val response = app.get("$mainUrl/ajax/server/list?servers=$serverQuery", referer = showUrl, headers = ajaxHeaders)
         val servers = mapper.readTree(response.text)
         if (servers.path("status").asInt() != 200) return@coroutineScope false
-        val dub = payload.path("dub").asBoolean(false)
         val rows = Jsoup.parse(servers.path("result").asText()).select(".servers .type[data-type]")
-            .filter { if (dub) it.attr("data-type") == "dub" else it.attr("data-type") in setOf("sub", "ssub") }
+            .filter { it.attr("data-type") in setOf("sub", "ssub") }
             .flatMap { group -> group.select("li[data-link-id]").map { group.attr("data-type") to it } }
             .distinctBy { it.second.attr("data-link-id") }.take(12)
         val slots = Semaphore(3)
@@ -79,7 +125,9 @@ internal class AniWavesPlayer(private val mainUrl: String) {
                             val result = root.path("result")
                             emitTracks(result.path("tracks"), showUrl, subtitles)
                             val embedded = result.path("url").asText()
-                            emitSources(result.path("sources"), embedded.ifBlank { showUrl }, label, forward)
+                            val server = serverName(row.text(), embedded)
+                            val namedForward: suspend (ExtractorLink) -> Unit = { link -> forward(namedLink(link, server, kind)) }
+                            emitSources(result.path("sources"), embedded.ifBlank { showUrl }, label, namedForward)
                             if (embedded.isNotBlank()) {
                                 val uri = URI(embedded)
                                 when {
@@ -89,12 +137,19 @@ internal class AniWavesPlayer(private val mainUrl: String) {
                                         if (token.isNotBlank()) {
                                             val sources = mapper.readTree(app.get(sourceEndpoint(embedded, token), referer = embedded).text)
                                             emitTracks(sources.path("tracks"), embedded, subtitles)
-                                            emitSources(sources, embedded, label, forward)
+                                            emitSources(sources, embedded, label, namedForward)
                                         }
                                     }
                                     embedded.contains(".m3u8", true) || embedded.contains(".mp4", true) ->
-                                        emitSources(mapper.valueToTree<JsonNode>(embedded), showUrl, label, forward)
-                                    else -> loadExtractor(embedded, showUrl, subtitles, forward)
+                                        emitSources(mapper.valueToTree<JsonNode>(embedded), showUrl, label, namedForward)
+                                    else -> {
+                                        // Extractor callbacks are synchronous; rebuild their results afterward.
+                                        val extracted = mutableListOf<ExtractorLink>()
+                                        loadExtractor(embedded, showUrl, subtitles) { link ->
+                                            synchronized(extracted) { extracted.add(link) }
+                                        }
+                                        extracted.toList().forEach { namedForward(it) }
+                                    }
                                 }
                             }
                         }
@@ -106,11 +161,11 @@ internal class AniWavesPlayer(private val mainUrl: String) {
                 }
             }
         } }.awaitAll()
-        Log.i("AniWaves", "ANIWAVES_LINKS mode=${if (dub) "dub" else "sub"} servers=${rows.size} links=${emitted.size} subtitles=${subs.size}")
+        Log.i("AniWaves", "ANIWAVES_LINKS mode=sub servers=${rows.size} links=${emitted.size} subtitles=${subs.size}")
         emitted.isNotEmpty()
     }
 
-    private suspend fun emitSources(node: JsonNode, referer: String, server: String, callback: (ExtractorLink) -> Unit) {
+    private suspend fun emitSources(node: JsonNode, referer: String, server: String, callback: suspend (ExtractorLink) -> Unit) {
         videoSources(node).forEach { (label, url) ->
             val hls = url.contains(".m3u8", true)
             callback(newExtractorLink("AniWaves", "AniWaves · $server" + if (label.isBlank()) "" else " · $label", url,

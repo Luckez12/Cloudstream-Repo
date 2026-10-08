@@ -53,9 +53,7 @@ class AniWavesProvider : MainAPI() {
                 posterUrl = image(card.selectFirst(".poster img"))
                 posterHeaders = mapOf("Referer" to "$mainUrl/")
                 val sub = card.selectFirst(".ep-status.sub")?.text()?.trim()?.toIntOrNull()
-                val dub = card.selectFirst(".ep-status.dub")?.text()?.trim()?.toIntOrNull()
                 if (sub != null) addDubStatus(DubStatus.Subbed, sub)
-                if (dub != null) addDubStatus(DubStatus.Dubbed, dub)
             }
         }.distinctBy { it.url }
 
@@ -86,13 +84,12 @@ class AniWavesProvider : MainAPI() {
 
     internal suspend fun episodes(html: String, showUrl: String, poster: String?): Map<DubStatus, List<Episode>> {
         val rows = Jsoup.parse(html).select(".episodes a[data-ids][data-num]")
-        return listOf(DubStatus.Subbed, DubStatus.Dubbed).associateWith { status ->
-            val attr = if (status == DubStatus.Dubbed) "data-dub" else "data-sub"
-            rows.filter { it.attr(attr) == "1" }.map { row ->
+        return listOf(DubStatus.Subbed).associateWith {
+            rows.filter { it.attr("data-sub") == "1" }.map { row ->
                 val number = row.attr("data-num")
                 val payload = mapper.createObjectNode().put("showUrl", showUrl)
                     .put("servers", row.attr("data-ids"))
-                    .put("dub", status == DubStatus.Dubbed).toString()
+                    .put("dub", false).toString()
                 newEpisode(payload) {
                     // Fractional specials keep their real number in the title.
                     episode = number.toIntOrNull()
@@ -116,7 +113,7 @@ class AniWavesProvider : MainAPI() {
         val groups = episodes(result.path("result").asText(), showUrl, poster)
         val meta = document.select("#w-info .bmeta .meta > div")
         fun field(label: String) = meta.firstOrNull { it.text().startsWith("$label:") }?.text()?.substringAfter(':')?.trim().orEmpty()
-        Log.i(name, "ANIWAVES_DETAIL id=$id sub=${groups[DubStatus.Subbed]?.size} dub=${groups[DubStatus.Dubbed]?.size}")
+        Log.i(name, "ANIWAVES_DETAIL id=$id sub=${groups[DubStatus.Subbed]?.size}")
         return newAnimeLoadResponse(title, showUrl, type(field("Type"))) {
             posterUrl = poster
             posterHeaders = mapOf("Referer" to "$mainUrl/")
