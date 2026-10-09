@@ -17,7 +17,7 @@ internal class AnimeXTVPlayer(private val mainUrl: String) {
     internal fun servers(ani: Int, mal: Int, episode: Int): List<Pair<String, String>> {
         val mega = if (mal > 0) "mal/$mal" else "ani/$ani"
         return listOf(
-            "Megaplay" to "https://megaplay.buzz/stream/$mega/$episode/sub",
+            "MegaPlay" to "https://megaplay.buzz/stream/$mega/$episode/sub",
             "Vidnest AnimePahe" to "https://vidnest.fun/animepahe/$ani/$episode/sub",
             "Vidnest" to "https://vidnest.fun/anime/$ani/$episode/sub",
             "TryEmbed" to "https://tryembed.us.cc/embed/anime/$ani/$episode/sub",
@@ -45,38 +45,64 @@ internal class AnimeXTVPlayer(private val mainUrl: String) {
             val raw = track.path("file").asText("")
             if (raw.isNotBlank()) subtitles(newSubtitleFile(track.path("label").asText("English"), URI(url).resolve(raw).toString()))
         }
-        return listOf(newExtractorLink("AnimeXTV · Megaplay", "Megaplay", AnimeXTVCrypto.signed(file), ExtractorLinkType.M3U8) {
+        return listOf(newExtractorLink("AnimeXTV · MegaPlay", "MegaPlay", AnimeXTVCrypto.signed(file), ExtractorLinkType.M3U8) {
             referer = "https://megaplay.buzz/"
             quality = Qualities.Unknown.value
             headers = mapOf("Referer" to referer, "User-Agent" to USER_AGENT)
         })
     }
 
-    internal suspend fun named(link: ExtractorLink, server: String): ExtractorLink {
-        var qualityName = link.quality.takeIf { it > 0 && it != Qualities.Unknown.value }?.let { "${it}p" }
-        if (qualityName == null && link.type == ExtractorLinkType.M3U8) {
-            qualityName = try {
-                withTimeoutOrNull(2_000L) {
-                    val response = app.get(link.url, referer = link.referer, headers = link.headers)
-                    if (response.code !in 200..299 || !response.text.trimStart('\uFEFF', ' ', '\r', '\n').startsWith("#EXTM3U")) return@withTimeoutOrNull null
-                    val heights = Regex("#EXT-X-STREAM-INF:[^\\r\\n]*RESOLUTION=[0-9]+x([0-9]+)", RegexOption.IGNORE_CASE)
-                        .findAll(response.text).mapNotNull { it.groupValues[1].toIntOrNull() }.distinct().sorted().toList()
-                    when {
-                        heights.size > 1 -> "Auto (${heights.first()}–${heights.last()}p)"
-                        heights.size == 1 -> "Auto (${heights.first()}p)"
-                        else -> null
-                    }
+    internal data class Inspected(val link: ExtractorLink, val masterRank: Int, val label: String)
+
+    internal suspend fun inspect(link: ExtractorLink): Inspected {
+        if (link.type != ExtractorLinkType.M3U8) return Inspected(link, 0, resolution(link))
+        val manifest = try {
+            withTimeoutOrNull(2_000L) {
+                val response = app.get(link.url, referer = link.referer, headers = link.headers)
+                response.text.trimStart('\uFEFF', ' ', '\r', '\n').takeIf {
+                    response.code in 200..299 && it.startsWith("#EXTM3U")
                 }
-            } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
-        }
-        val resolution = qualityName ?: if (link.type == ExtractorLinkType.M3U8) "Auto (HLS)" else "Unknown"
-        return newExtractorLink("AnimeXTV · $server", "$server · Sub · $resolution", link.url, link.type) {
+            }
+        } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+        val master = manifest?.contains("#EXT-X-STREAM-INF:") == true || manifest?.contains("#EXT-X-MEDIA:") == true
+        val hint = manifest == null && Regex("(?:^|[/=?&])master(?:\\.m3u8|[/&?])", RegexOption.IGNORE_CASE)
+            .containsMatchIn(runCatching { java.net.URLDecoder.decode(link.url, "UTF-8") }.getOrDefault(link.url))
+        return Inspected(link, if (master) 2 else if (hint) 1 else 0, if (master || hint) "Auto" else resolution(link))
+    }
+    private fun resolution(link: ExtractorLink) = link.quality.takeIf { it > 0 && it != Qualities.Unknown.value }?.let { "${it}p" } ?: "Unknown"
+
+    private suspend fun rename(item: Inspected, server: String, fallback: Int = 0): ExtractorLink {
+        val link = item.link
+        val suffix = if (fallback > 0) " · Fallback $fallback" else ""
+        return newExtractorLink("AnimeXTV · $server", "$server$suffix · Sub · ${item.label}", link.url, link.type) {
             referer = link.referer
-            quality = link.quality
+            quality = if (item.masterRank > 0) Qualities.Unknown.value else link.quality
             headers = link.headers
             extractorData = link.extractorData
             audioTracks = link.audioTracks
         }
+    }
+    internal suspend fun named(link: ExtractorLink, server: String): ExtractorLink = rename(inspect(link), server)
+
+    internal fun identity(link: ExtractorLink): String {
+        val url = runCatching {
+            val uri = URI(link.url)
+            if (!Regex("/[a-f0-9]{32}/[a-f0-9]{32}/", RegexOption.IGNORE_CASE).containsMatchIn(uri.path.orEmpty())) link.url
+            else {
+                // Our MegaPlay HMAC token renews access to the same path, not the content identity.
+                val query = uri.rawQuery.orEmpty().split('&').filter { it.isNotBlank() && !it.startsWith("token=") }.joinToString("&")
+                "${uri.scheme}://${uri.rawAuthority}${uri.rawPath}" + if (query.isBlank()) "" else "?$query"
+            }
+        }.getOrDefault(link.url)
+        return url + "|" + link.referer
+    }
+
+    internal suspend fun select(links: List<ExtractorLink>): List<Inspected> = coroutineScope {
+        val slots = Semaphore(3)
+        val result = links.distinctBy { identity(it) }.take(16).map { async { slots.withPermit { inspect(it) } } }.awaitAll()
+        val masters = result.filter { it.masterRank > 0 }.sortedByDescending { it.masterRank }
+        // Keep complete master playlists; their individual renditions remain in Auto.
+        masters.ifEmpty { result }
     }
 
     suspend fun load(data: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean = coroutineScope {
@@ -91,28 +117,49 @@ internal class AnimeXTVPlayer(private val mainUrl: String) {
         val subtitles: (SubtitleFile) -> Unit = { sub ->
             if (synchronized(subSeen) { subSeen.add(sub.url) }) subtitleCallback(sub)
         }
-        val slots = Semaphore(3)
-        servers(ani, mal, episode).map { (server, url) -> async {
-            slots.withPermit {
-                try {
-                    withTimeoutOrNull(15_000L) {
-                        val links = if (server == "Megaplay") nativeMega(url, subtitles) else {
-                            // The other website mirrors use CloudStream's available extractors.
-                            // Native Megaplay extraction remains independent of those mirrors.
-                            val result = mutableListOf<ExtractorLink>()
-                            loadExtractor(url, "$mainUrl/", subtitles) { synchronized(result) { result.add(it) } }
-                            result.toList()
-                        }
-                        links.forEach { link ->
-                            val result = named(link, server)
-                            if (synchronized(seen) { seen.add(link.url + "|" + link.referer) }) callback(result)
-                        }
+        val mirrors = AnimeXTVMirrors()
+        val jobs = listOf(
+            async { listOf(AnimeXTVBatch("MegaPlay", guarded("MegaPlay") { nativeMega(servers(ani,mal,episode).first().second, subtitles) })) },
+            async { mirrors.vidnest(ani, episode, subtitles) },
+            async { mirrors.frame(ani, episode, subtitles) },
+            async {
+                val native = AnimeXTVTryEmbed(mainUrl).load(ani, episode, subtitles)
+                if (native.any { it.links.isNotEmpty() }) native else {
+                    val links = guarded("TryEmbed") {
+                        val result = mutableListOf<ExtractorLink>()
+                        loadExtractor(servers(ani,mal,episode)[3].second, "$mainUrl/", subtitles) { synchronized(result) { result.add(it) } }
+                        result.toList()
                     }
-                } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { Log.w("AnimeXTV", "ANIMEXTV_SERVER_FAILED server=$server reason=${e.javaClass.simpleName}") }
+                    listOf(AnimeXTVBatch("TryEmbed", links))
+                }
             }
-        } }.awaitAll()
-        Log.i("AnimeXTV", "ANIMEXTV_LINKS audio=sub servers=5 links=${seen.size} subtitles=${subSeen.size}")
+        )
+        // Emit MegaPlay promptly while other servers continue extracting.
+        var batches = 0
+        for (job in jobs) {
+            val group = job.await().groupBy { it.server }.map { (server, list) -> AnimeXTVBatch(server, list.flatMap { it.links }) }
+            for (batch in group) {
+                batches++
+                val links = select(batch.links)
+                var emittedMasters = 0
+                var emitted = 0
+                for (item in links) {
+                    val key = identity(item.link)
+                    if (!seen.add(key)) continue
+                    val fallback = if (item.masterRank > 0) emittedMasters++ else 0
+                    callback(rename(item, batch.server, fallback))
+                    emitted++
+                }
+                Log.i("AnimeXTV", "ANIMEXTV_SERVER server=${batch.server.replace(' ', '_')} candidates=${batch.links.size} selected=${links.size} emitted=$emitted masters=${links.count { it.masterRank > 0 }} verified_masters=${links.count { it.masterRank == 2 }}")
+            }
+        }
+        Log.i("AnimeXTV", "ANIMEXTV_LINKS audio=sub groups=$batches links=${seen.size} subtitles=${subSeen.size}")
         seen.isNotEmpty()
+    }
+    private suspend fun guarded(server: String, block: suspend () -> List<ExtractorLink>): List<ExtractorLink> = try {
+        withTimeoutOrNull(15_000L) { block() }.orEmpty()
+    } catch (e: CancellationException) { throw e } catch (e: Exception) {
+        Log.w("AnimeXTV", "ANIMEXTV_SERVER_FAILED server=$server reason=${e.javaClass.simpleName}")
+        emptyList()
     }
 }
