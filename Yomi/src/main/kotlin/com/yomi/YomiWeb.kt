@@ -170,8 +170,7 @@ internal object YomiWeb {
           }
           if(s.index>=buttons.length)return JSON.stringify({html:document.documentElement.outerHTML,embeds:s.embeds});
           if(s.phase===0){buttons[s.index].click();var sub=audio('SUB');if(sub&&!sub.disabled)sub.click();s.phase=1;return '';}
-          if(s.phase===1){capture('sub');var dub=audio('DUB');if(dub&&!dub.disabled){dub.click();s.phase=2;}else{s.index++;s.phase=0;}return '';}
-          capture('dub');s.index++;s.phase=0;return '';
+          capture('sub');s.index++;s.phase=0;return '';
         })()
     """.trimIndent()
     private val MEDIA_SCAN = """

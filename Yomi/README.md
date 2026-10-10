@@ -1,4 +1,4 @@
-# Yomi v3 — full provider implementation candidate
+# Yomi v4 — full provider implementation candidate
 
 Implemented catalogue homepage with isolated row failures, search via the site's published search URL, metadata from Yomi JSON-LD, episode lists from the rendered watch page, and link extraction for the actual embeds discovered by that page.
 
@@ -25,3 +25,6 @@ Homepage remains first-page only; the site's catalogue pagination request has no
 Live DOM selectors and the six Sub embed URLs were checked. Embedded JavaScript syntax and ZIP root paths were checked. Attempted `:Yomi:compileDebugKotlin`; it stopped before compilation because the Gradle distribution download failed with `Network is unreachable`. No successful Android build or Cloudstream device playback test is claimed.
 
 This is the first complete implementation candidate, not a playback-certified release. Export full Yomi trace after opening details and trying an episode. Useful log markers: `YOMI_DETAIL`, `YOMI_PLAYER`, `YOMI_NATIVE_FALLBACK`, `YOMI_SERVER_RESULT`, `YOMI_SERVER_FAILED`, `YOMI_PLAYER_DONE`.
+
+## v4 correction
+Sub only, as requested. The watch scanner never selects Dub, the extraction entry filters audio to Sub, and emitted source labels are always Sub. Android build and device playback remain unverified.

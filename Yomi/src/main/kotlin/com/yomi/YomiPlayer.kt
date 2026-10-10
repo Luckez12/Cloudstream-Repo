@@ -63,8 +63,8 @@ internal class YomiPlayer(private val mainUrl: String) {
         val uri = runCatching { URI(data) }.getOrNull() ?: return@coroutineScope false
         if (uri.host != URI(mainUrl).host || !uri.path.matches(Regex("/watch/[a-z0-9-]+-[0-9]+/[0-9]+/?"))) return@coroutineScope false
         val watch = YomiWeb.watch(data)
-        // Only URLs actually selected by Yomi's player enter extraction. No guessed Dub URLs.
-        val embeds = watch.embeds.distinctBy { it.url }
+        // Sub only: ignore any non-Sub discovery before extraction.
+        val embeds = watch.embeds.filter { it.audio == "sub" }.distinctBy { it.url }
         Log.i("Yomi", "YOMI_PLAYER embeds=${embeds.size}")
         val results = embeds.map { embed -> async {
             val links = mutableListOf<ExtractorLink>()
@@ -115,7 +115,7 @@ internal class YomiPlayer(private val mainUrl: String) {
                     } catch (e: CancellationException) { throw e } catch (_: Exception) { }
                 }
                 val qualityLabel = if (master) "Auto" else link.quality.takeIf { it > 0 && it != Qualities.Unknown.value }?.let { "${it}p" } ?: "Unknown"
-                val audio = if (result.embed.audio == "dub") "Dub" else "Sub"
+                val audio = "Sub"
                 callback(newExtractorLink("Yomi", "${label(result.embed.url)} · $audio · $qualityLabel", link.url, link.type) {
                     referer = link.referer
                     headers = link.headers
