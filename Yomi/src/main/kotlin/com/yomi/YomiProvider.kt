@@ -2,6 +2,7 @@ package com.yomi
 
 import android.util.Log
 import com.lagradost.cloudstream3.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -45,6 +46,18 @@ class YomiProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         require(mainPage.any { it.data == request.data })
+        return try {
+            homepage(page, request)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A failed row must not cancel the other concurrently requested rows.
+            Log.w(name, "YOMI_HOME_ROW_FAILED section=${request.name.replace(' ', '_')} reason=${e.javaClass.simpleName}")
+            newHomePageResponse(HomePageList(request.name, emptyList()), false)
+        }
+    }
+
+    private suspend fun homepage(page: Int, request: MainPageRequest): HomePageResponse {
         // Stage 1 only fetches the first server-rendered catalogue page.
         if (page > 1) return newHomePageResponse(HomePageList(request.name, emptyList()), false)
         val response = withTimeoutOrNull(15_000L) {
@@ -53,10 +66,12 @@ class YomiProvider : MainAPI() {
         Log.i(name, "YOMI_HOME section=${request.name.replace(' ', '_')} status=${response.code}")
         if (response.code !in 200..299) throw ErrorLoadingException("Yomi: catalogue HTTP ${response.code}.")
         // Verified from Yomi's live Browse cards, not inferred from another provider.
-        val items = response.document.select("main a.anime-card[href^=/anime/]")
-            .mapNotNull { card(it) }.distinctBy { it.url }
-        Log.i(name, "YOMI_HOME section=${request.name.replace(' ', '_')} items=${items.size} pagination=stage1_disabled")
-        if (items.isEmpty()) throw ErrorLoadingException("Yomi: no catalogue cards found. Check provider diagnose.")
+        val document = response.document
+        val cards = document.select("main a.anime-card[href^=/anime/]")
+        val items = cards.mapNotNull { card(it) }.distinctBy { it.url }
+        val embeddedCatalogue = document.select("script").any { it.data().contains("initialAnime") }
+        Log.i(name, "YOMI_HOME section=${request.name.replace(' ', '_')} matched=${cards.size} items=${items.size} embedded_catalogue=$embeddedCatalogue pagination=stage1_disabled")
+        if (items.isEmpty()) Log.w(name, "YOMI_HOME_ROW_EMPTY section=${request.name.replace(' ', '_')} matched=${cards.size} embedded_catalogue=$embeddedCatalogue")
         return newHomePageResponse(HomePageList(request.name, items, isHorizontalImages = false), false)
     }
 
