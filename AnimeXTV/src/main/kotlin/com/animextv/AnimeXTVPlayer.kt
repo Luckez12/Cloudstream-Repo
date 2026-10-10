@@ -137,7 +137,7 @@ internal class AnimeXTVPlayer(private val mainUrl: String) {
         val subtitles: (SubtitleFile) -> Unit = { sub ->
             val language = subtitleLanguage(sub.lang, sub.url)
             if (language != null && synchronized(subSeen) { subSeen.add(sub.url) }) {
-                subtitleCallback(newSubtitleFile(language, sub.url))
+                subtitleCallback(SubtitleFile(language, sub.url))
             }
         }
         val mirrors = AnimeXTVMirrors()
