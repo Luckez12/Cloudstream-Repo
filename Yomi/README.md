@@ -1,19 +1,27 @@
-# Yomi — stage 1
+# Yomi v3 — full provider implementation candidate
 
-Homepage test provider for the existing CloudStream repository. Module discovery in settings.gradle.kts is automatic; no root build or workflow changes are needed.
+Implemented catalogue homepage with isolated row failures, search via the site's published search URL, metadata from Yomi JSON-LD, episode lists from the rendered watch page, and link extraction for the actual embeds discovered by that page.
 
-Rows: Trending, Top Rated, New Releases and Movies, using Yomi's observed Browse links. Reads `main a.anime-card`, title from h3/image alt, poster from img src and actual anime href. Links are restricted to Yomi anime paths and duplicates are removed within each row.
+## Verified live site contract (2026-10-11 Malaysia time)
 
-Only the first catalogue page is enabled. Load More, search, details, episodes and playback are not implemented at this stage. Clicking a card reports that details are pending rather than pretending playback is ready.
+Sample: https://yomi.to/watch/the-apothecary-diaries-season-3-195516/1
 
-Validation: live browser inspection showed 24 Trending cards and 24 Movies cards with the expected selectors, titles, URLs and images. The embedded Next.js data also includes initialAnime and initialHasMore. Direct HTTP from this environment returned 403, so raw HTTP behaviour on Android remains unverified. No Android Gradle build or device test was run. Source/path checks only; the first app test must confirm the rows and posters load.
+- Watch page showed episode links `/watch/anime-195516/1` through `/12`.
+- Six player buttons use `title="Server N ..."`.
+- Embed hosts observed: ani.pm, megaplay.buzz, tryembed.us.cc, flixera.co, cinextream.cc, nontongo.win.
+- Server 4 and 6 are Sub only; the sample's primary server also marked Dub unavailable. The provider discovers availability from the actual player controls and never fabricates Dub URLs.
+- Details pages returned an unavailable message in this browser. The provider uses server-rendered metadata and the working watch episode list instead.
 
-Logs: YOMI_HOME records section, HTTP status and parsed item count, without full page dumps or account data.
+## Runtime
 
-## v2 homepage isolation fix
+The extension remains self-contained in `Yomi/`. Android context is resolved through the same runtime pattern already used by other modules in this repository. A maximum of two disposable WebViews render JavaScript pages. Details rendering returns once episode links appear; server discovery has a 28-second bound and each media capture an 18-second bound. Views and callbacks are destroyed on completion or coroutine cancellation. No CAPTCHA solver, credential input, or certificate bypass is added.
 
-A zero-card response now returns an empty row rather than cancelling the whole homepage. Ordinary per-row request/parsing failures are logged and isolated; coroutine cancellation is rethrown. Logs include matched HTML card count, emitted item count and presence of embedded initialAnime data.
+MegaPlay reuses the repository's existing native transport implementation. Other embeds try registered Cloudstream extractors, then capture ordinary HLS/MP4 requests from a disposable player WebView. Signed URLs and request headers pass to the native player. Exposed captions are restricted to English, Malay and Indonesian. Sources that require unsupported media transports may still return no links and need device logs.
 
-The supplied Android v1 log confirms 24 items each for Trending, Top Rated and Movies, while New Releases returned HTTP 200 with zero emitted items. Current browser inspection shows New Releases has 24 cards; the exact cause of the earlier response is still unconfirmed. v2 does not claim to repair unavailable upstream data or implement playback.
+Homepage remains first-page only; the site's catalogue pagination request has not been verified. The episode list is the list displayed by Yomi, not proof every episode/server currently plays.
 
-Two live detail samples (Apothecary Diaries Season 3 and One Piece) currently display Unavailable Right Now in this browser, preventing verification of the actual episode/player flow. No endpoint or episode links were invented.
+## Validation and limitations
+
+Live DOM selectors and the six Sub embed URLs were checked. Embedded JavaScript syntax and ZIP root paths were checked. Attempted `:Yomi:compileDebugKotlin`; it stopped before compilation because the Gradle distribution download failed with `Network is unreachable`. No successful Android build or Cloudstream device playback test is claimed.
+
+This is the first complete implementation candidate, not a playback-certified release. Export full Yomi trace after opening details and trying an episode. Useful log markers: `YOMI_DETAIL`, `YOMI_PLAYER`, `YOMI_NATIVE_FALLBACK`, `YOMI_SERVER_RESULT`, `YOMI_SERVER_FAILED`, `YOMI_PLAYER_DONE`.

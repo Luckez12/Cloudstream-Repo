@@ -6,6 +6,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLEncoder
+import org.jsoup.Jsoup
+import com.lagradost.cloudstream3.utils.ExtractorLink
 
 class YomiProvider : MainAPI() {
     override var mainUrl = "https://yomi.to"
@@ -14,6 +17,7 @@ class YomiProvider : MainAPI() {
     override val hasMainPage = true
     override val hasQuickSearch = false
     override val hasDownloadSupport = false
+    override val usesWebView = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
     override val mainPage = mainPageOf(
         "/browse?sort=TRENDING_DESC" to "Trending",
@@ -58,7 +62,7 @@ class YomiProvider : MainAPI() {
     }
 
     private suspend fun homepage(page: Int, request: MainPageRequest): HomePageResponse {
-        // Stage 1 only fetches the first server-rendered catalogue page.
+        // Pagination is not exposed as a verified server-rendered URL yet.
         if (page > 1) return newHomePageResponse(HomePageList(request.name, emptyList()), false)
         val response = withTimeoutOrNull(15_000L) {
             app.get("$mainUrl${request.data}", referer = "$mainUrl/")
@@ -75,6 +79,59 @@ class YomiProvider : MainAPI() {
         return newHomePageResponse(HomePageList(request.name, items, isHorizontalImages = false), false)
     }
 
-    override suspend fun load(url: String): LoadResponse =
-        throw ErrorLoadingException("Yomi stage 1: homepage test only. Details and playback are not implemented yet.")
+    override suspend fun search(query: String): List<SearchResponse> {
+        val response = app.get("$mainUrl/search?q=${URLEncoder.encode(query, "UTF-8")}", referer = "$mainUrl/")
+        if (response.code !in 200..299) throw ErrorLoadingException("Yomi search HTTP ${response.code}")
+        return response.document.select("main a.anime-card[href^=/anime/]").mapNotNull { card(it) }.distinctBy { it.url }
+    }
+
+    override suspend fun load(url: String): LoadResponse {
+        val uri = runCatching { URI(url) }.getOrNull()
+            ?: throw ErrorLoadingException("Yomi: invalid anime URL")
+        if (uri.host != URI(mainUrl).host) throw ErrorLoadingException("Yomi: invalid anime host")
+        val slug = Regex("/(?:anime|watch)/([a-z0-9-]+-[0-9]+)").find(uri.path)?.groupValues?.get(1)
+            ?: throw ErrorLoadingException("Yomi: invalid anime path")
+        val id = slug.substringAfterLast('-').toIntOrNull() ?: throw ErrorLoadingException("Yomi: invalid anime ID")
+        val detailUrl = "$mainUrl/anime/$slug"
+        val response = try {
+            withTimeoutOrNull(15_000L) { app.get(detailUrl, referer = "$mainUrl/") }
+        } catch (e: CancellationException) { throw e } catch (e: Exception) {
+            Log.w(name, "YOMI_DETAIL_METADATA_FAILED reason=${e.javaClass.simpleName}")
+            null
+        }
+        val doc = response?.document ?: Jsoup.parse("")
+        val metadata = doc.select("script[type=application/ld+json]").mapNotNull {
+            runCatching { mapper.readTree(it.data()) }.getOrNull()
+        }.firstOrNull { it.path("@type").asText() in setOf("TVSeries", "Movie") }
+        // The watch page supplies an actual episode list even when the details client fails.
+        val watch = YomiWeb.watch("$mainUrl/watch/$slug/1", collectServers = false)
+        val watchDoc = Jsoup.parse(watch.html, mainUrl)
+        val episodes = watchDoc.select("a[href^=/watch/]").mapNotNull { link ->
+            val path = runCatching { URI(mainUrl).resolve(link.attr("href")).path }.getOrNull() ?: return@mapNotNull null
+            val match = Regex("/watch/([a-z0-9-]+-$id)/([0-9]+)/?").matchEntire(path) ?: return@mapNotNull null
+            val number = match.groupValues[2].toIntOrNull()?.takeIf { it > 0 } ?: return@mapNotNull null
+            newEpisode("$mainUrl$path") {
+                episode = number
+                name = "Episode $number"
+            }
+        }.distinctBy { it.episode }.sortedBy { it.episode }
+        if (episodes.isEmpty()) throw ErrorLoadingException("Yomi: episode list unavailable. Please export the Yomi diagnostic log.")
+        val title = metadata?.path("name")?.asText("").orEmpty().ifBlank {
+            watchDoc.title().substringBefore(" — Episode").removeSuffix(" | Yomi")
+        }.ifBlank { doc.title().removeSuffix(" | Yomi") }
+        val image = metadata?.path("image")?.asText("").orEmpty().ifBlank {
+            doc.selectFirst("meta[property=og:image]")?.attr("content").orEmpty()
+        }
+        val type = if (metadata?.path("@type")?.asText() == "Movie") TvType.AnimeMovie else TvType.Anime
+        Log.i(name, "YOMI_DETAIL id=$id status=${response?.code} episodes=${episodes.size} embeds=${watch.embeds.size}")
+        return newAnimeLoadResponse(title, detailUrl, type) {
+            posterUrl = image.takeIf { it.isNotBlank() }
+            plot = metadata?.path("description")?.asText()?.let { Jsoup.parse(it).text() }
+            tags = metadata?.path("genre")?.takeIf { it.isArray }?.map { it.asText() }
+            addEpisodes(DubStatus.Subbed, episodes)
+        }
+    }
+
+    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean =
+        YomiPlayer(mainUrl).load(data, subtitleCallback, callback)
 }
