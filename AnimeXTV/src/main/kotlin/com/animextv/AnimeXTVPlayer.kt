@@ -12,6 +12,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URI
+import java.util.Locale
 
 internal class AnimeXTVPlayer(private val mainUrl: String) {
     internal fun servers(ani: Int, mal: Int, episode: Int): List<Pair<String, String>> {
@@ -43,7 +44,7 @@ internal class AnimeXTVPlayer(private val mainUrl: String) {
         val file = sourceFile(root) ?: return emptyList()
         root.path("tracks").filter { it.path("kind").asText("captions") in setOf("captions", "subtitles") }.forEach { track ->
             val raw = track.path("file").asText("")
-            if (raw.isNotBlank()) subtitles(newSubtitleFile(track.path("label").asText("English"), URI(url).resolve(raw).toString()))
+            if (raw.isNotBlank()) subtitles(newSubtitleFile(track.path("label").asText("").ifBlank { track.path("lang").asText("") }, URI(url).resolve(raw).toString()))
         }
         return listOf(newExtractorLink("AnimeXTV · MegaPlay", "MegaPlay", AnimeXTVCrypto.signed(file), ExtractorLinkType.M3U8) {
             referer = "https://megaplay.buzz/"
@@ -71,10 +72,29 @@ internal class AnimeXTVPlayer(private val mainUrl: String) {
     }
     private fun resolution(link: ExtractorLink) = link.quality.takeIf { it > 0 && it != Qualities.Unknown.value }?.let { "${it}p" } ?: "Unknown"
 
+    internal fun serverLabel(server: String): String = server.removePrefix("Vidnest · ")
+
+    internal fun subtitleLanguage(label: String, url: String): String? {
+        val normalized = label.trim().lowercase(Locale.ROOT).replace('_', '-')
+        fun language(value: String): String? = when {
+            Regex("\\b(english|eng|en)\\b").containsMatchIn(value) -> "English"
+            Regex("\\b(malay|melayu|msa|may|ms)\\b").containsMatchIn(value) -> "Malay"
+            Regex("\\b(indonesian|indonesia|indo|ind|id)\\b").containsMatchIn(value) -> "Indo"
+            else -> null
+        }
+        language(normalized)?.let { return it }
+        // Only infer from a filename when the source supplies no language label.
+        if (normalized !in setOf("", "subtitles", "subtitle", "captions", "unknown")) return null
+        val filename = runCatching { URI(url).path.orEmpty().substringAfterLast('/') }.getOrDefault("")
+            .lowercase(Locale.ROOT).replace('_', ' ').replace('-', ' ').replace('.', ' ')
+        return language(filename)
+    }
+
     private suspend fun rename(item: Inspected, server: String, fallback: Int = 0): ExtractorLink {
         val link = item.link
+        val label = serverLabel(server)
         val suffix = if (fallback > 0) " · Fallback $fallback" else ""
-        return newExtractorLink("AnimeXTV · $server", "$server$suffix · Sub · ${item.label}", link.url, link.type) {
+        return newExtractorLink("AnimeXTV · $label", "$label$suffix · Sub · ${item.label}", link.url, link.type) {
             referer = link.referer
             quality = if (item.masterRank > 0) Qualities.Unknown.value else link.quality
             headers = link.headers
@@ -115,7 +135,10 @@ internal class AnimeXTVPlayer(private val mainUrl: String) {
         val seen = mutableSetOf<String>()
         val subSeen = mutableSetOf<String>()
         val subtitles: (SubtitleFile) -> Unit = { sub ->
-            if (synchronized(subSeen) { subSeen.add(sub.url) }) subtitleCallback(sub)
+            val language = subtitleLanguage(sub.lang, sub.url)
+            if (language != null && synchronized(subSeen) { subSeen.add(sub.url) }) {
+                subtitleCallback(newSubtitleFile(language, sub.url))
+            }
         }
         val mirrors = AnimeXTVMirrors()
         val jobs = listOf(
