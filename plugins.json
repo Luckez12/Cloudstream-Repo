@@ -280,10 +280,10 @@
     },
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=yomi.to&sz=128",
-        "fileHash": "sha256-4d1dc5aff47f45379bdd08bfbcd1ff6cdee9bee808861af7f425bdefcf51a891",
+        "fileHash": "sha256-ed524a2ade4a77527f1f24a7ae8282007cb393fb588fe1b0da3070b64cabe0a2",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
-        "fileSize": 54275,
+        "fileSize": 72163,
         "status": 1,
         "language": "en",
         "authors": [
@@ -294,7 +294,7 @@
             "AnimeMovie",
             "OVA"
         ],
-        "version": 5,
+        "version": 6,
         "internalName": "Yomi",
         "description": "Yomi catalogue, details, episodes and JavaScript player extraction.",
         "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/Yomi.cs3",
