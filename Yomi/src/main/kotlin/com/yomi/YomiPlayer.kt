@@ -29,7 +29,9 @@ internal class YomiPlayer(private val mainUrl: String) {
         if (!file.startsWith("https://") && !file.startsWith("http://")) return emptyList()
         root.path("tracks").filter { it.path("kind").asText("captions") in setOf("captions", "subtitles") }.forEach { track ->
             val raw = track.path("file").asText("")
-            if (raw.isNotBlank()) subtitles.add(SubtitleFile(track.path("label").asText("").ifBlank { track.path("lang").asText("") }, URI(url).resolve(raw).toString()))
+            if (raw.isNotBlank()) subtitles.add(SubtitleFile(track.path("label").asText("").ifBlank { track.path("lang").asText("") }, URI(url).resolve(raw).toString()).apply {
+                headers = mapOf("Referer" to url, "Origin" to "https://megaplay.buzz", "User-Agent" to USER_AGENT)
+            })
         }
         return listOf(newExtractorLink("Yomi", "MegaPlay", YomiCrypto.signed(file), ExtractorLinkType.M3U8) {
             referer = "https://megaplay.buzz/"
@@ -46,6 +48,21 @@ internal class YomiPlayer(private val mainUrl: String) {
         "cinextream.cc" -> "Cinextream"
         "nontongo.win" -> "Nontongo"
         else -> URI(url).host.orEmpty()
+    }
+
+    private fun servers(uri: URI): List<YomiWeb.Embed> {
+        val parts = uri.path.trim('/').split('/')
+        val id = parts[1].substringAfterLast('-').toInt()
+        val episode = parts[2].toInt()
+        // These six Sub routes were read from the site's actual player buttons.
+        return listOf(
+            "https://ani.pm/embed/ani/$id/$episode/sub?autoplay=1&autonext=0&episodes=0&color=7c6ee0",
+            "https://megaplay.buzz/stream/ani/$id/$episode/sub",
+            "https://tryembed.us.cc/embed/anime/$id/$episode/sub?autoplay=true&autoNext=false&lang-type=false",
+            "https://flixera.co/embed/ani/$id/$episode/sub?autoplay=1&skipintro=1&skipoutro=1",
+            "https://cinextream.cc/api/embed/anime/sub/$id/$episode?color=7c6ee0",
+            "https://nontongo.win/anime/$id/$episode/play"
+        ).map { YomiWeb.Embed(it, "sub") }
     }
 
     private fun language(sub: SubtitleFile): String? {
@@ -102,7 +119,7 @@ internal class YomiPlayer(private val mainUrl: String) {
         val outputLock = Any()
         val subtitles: (SubtitleFile) -> Unit = { sub ->
             language(sub)?.let { lang -> synchronized(outputLock) {
-                if (seenSubs.add(sub.url)) subtitleCallback(SubtitleFile(lang, sub.url))
+                if (seenSubs.add(sub.url)) subtitleCallback(SubtitleFile(lang, sub.url).apply { headers = sub.headers })
             } }
         }
         suspend fun emit(embed: YomiWeb.Embed, link: ExtractorLink, master: Boolean) {
@@ -123,7 +140,8 @@ internal class YomiPlayer(private val mainUrl: String) {
             var masterFound = false
             suspend fun accept(link: ExtractorLink): Boolean {
                 if (masterFound) return true
-                if (candidates.containsKey(link.url)) return false
+                val previous = candidates[link.url]
+                if (previous != null && previous.headers == link.headers && previous.referer == link.referer) return false
                 if (isMaster(link)) {
                     masterFound = true
                     candidates.clear()
@@ -145,10 +163,19 @@ internal class YomiPlayer(private val mainUrl: String) {
                     tracks.forEach(subtitles)
                     for (link in native) if (accept(link)) break
                 }
-                if (!masterFound) registered(embed.url, data, subtitles, ::accept)
+                if (!masterFound && URI(embed.url).host == "tryembed.us.cc") {
+                    try { withTimeoutOrNull(12_000L) { YomiTryEmbed.load(embed.url, data, subtitles, ::accept) } }
+                    catch (e: CancellationException) { throw e } catch (e: Exception) {
+                        Log.w("Yomi", "YOMI_NATIVE_FALLBACK server=TryEmbed reason=${e.javaClass.simpleName}")
+                    }
+                }
+                if (!masterFound) registered(embed.url, data, { sub ->
+                    if (sub.headers.isNullOrEmpty()) sub.headers = mapOf("Referer" to embed.url, "User-Agent" to USER_AGENT)
+                    subtitles(sub)
+                }, ::accept)
                 if (!masterFound) YomiWeb.streams(embed.url, data) { media ->
                     if (media.kind == "subtitle") {
-                        subtitles(SubtitleFile(media.language, media.url))
+                        subtitles(SubtitleFile(media.language, media.url).apply { headers = media.headers })
                         false
                     } else {
                         val hls = URI(media.url).path.orEmpty().lowercase().endsWith(".m3u8")
@@ -170,10 +197,10 @@ internal class YomiPlayer(private val mainUrl: String) {
             }
             Log.i("Yomi", "YOMI_SERVER_RESULT server=${label(embed.url)} audio=sub master=$masterFound fallbacks=${candidates.size}")
         }
-        // Start each server at discovery time, without waiting for the other embeds.
-        YomiWeb.watch(data, onEmbed = { embed ->
+        // Known player routes avoid waiting for a WebView scan and always include server 6.
+        servers(uri).forEach { embed ->
             if (embed.audio == "sub" && started.add(embed.url)) jobs.add(launch { resolve(embed) })
-        })
+        }
         Log.i("Yomi", "YOMI_PLAYER embeds=${started.size}")
         // Joining only closes the operation; server callbacks have already emitted independently.
         jobs.joinAll()

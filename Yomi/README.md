@@ -1,18 +1,24 @@
-# Yomi v5 — Sub-only server callbacks and master-first extraction
+# Yomi v6 — diagnostic-driven repair candidate
 
-Scope: Yomi loadLinks scheduling and per-server HLS selection only. Homepage/details and subtitle transport behavior from v4 are unchanged.
+Sub only. Inherits independent per-server callbacks and first verified master HLS selection from v5.
 
-- Start a server task immediately when the watch scanner discovers its Sub embed.
-- Every server emits independently; joining tasks only completes the overall loadLinks operation.
-- Verify HLS masters from a successful #EXTM3U response containing master tags, never from the filename alone.
-- Stop that server's registered extractor or disposable WebView after its first verified master. Emit exactly that master and discard buffered media/MP4 candidates. Skip all remaining extraction routes for that server.
-- Continue other servers. If no verified master is found within that server's bounded routes, emit its deduplicated fallback candidates.
-- Sub only. Captions remain limited to English, Malay, Indonesian.
+## Changes for the v4 FullTrace report
 
-MSM21 in this repository provided the reference for callbacks inside independent server tasks. Native MegaPlay uses the existing repository transport implementation. WebView concurrency remains capped at two, with cancellation cleanup.
+- Trending: decode the actual initialAnime data in Next RSC text chunks, including split chunks and escaped strings. Use it when HTML card selectors return no cards. Catalogue metadata is retained in a bounded 256-entry, 10-minute cache.
+- Details: reuse cached catalogue metadata and known released episode counts. Finished titles use their catalogue episode count; releasing titles use nextAiringEpisode minus one; unreleased titles have no episodes. Unknown counts still use the site's rendered watch list, with a 12-second total bound including queue time. Metadata HTTP is bounded to 8 seconds and skipped when catalogue metadata is available.
+- Subtitles: preserve source headers through language filtering. Native MegaPlay captions include its player Referer/Origin/User-Agent. Registered extractors get a player Referer/User-Agent when no headers are provided. WebView captions retain captured transport headers. English, Malay and Indonesian only; deduplicate subtitle URLs.
+- Server discovery: start all six Sub routes directly from verified site player URL templates. Nontongo can no longer disappear because a WebView scanner skipped its last iframe transition. No guessed APIs or Dub URLs are added.
+- Mirrors: initialise an actual 1280x720 WebView viewport for lazy players, deny popups, and preserve captured headers when DOM information enriches a media candidate.
+- TryEmbed: reuse AnimeXTV's existing public bootstrap/nonce/cookie transport as a bounded native route before registered extraction/WebView. The first verified master stops that server's further work.
 
-Validation: live watch DOM contract was verified for v3/v4. v5 incremental scanner behavior is checked with the actual embedded JavaScript against a six-server DOM fixture. Master-before-fallback routing and local producer cancellation are reviewed in source. ZIP contains only the Yomi module at repo-root paths. Android build/device playback have not been verified; the previous build attempt could not download Gradle due to unavailable network access.
+## Evidence and validation
 
-Known v4 diagnostic issues remain for future patches: empty Trending, some details timing out, English subtitle 403, and unresolved mirrors. This patch does not claim to fix those problems.
+Input diagnostic: diagnose_Full_timeline_FullTrace_20261011_013516.txt; installed plugin v4. It showed two working first frames, 50-second extraction, empty Trending, some 28–37-second metadata failures, subtitle 403 and missing/unresolved mirrors.
 
-Useful logs: YOMI_SERVER_MASTER action=emitted_stop_server; YOMI_SERVER_RESULT master=... fallbacks=...; YOMI_PLAYER_DONE.
+Live Trending data decoded to 24 valid catalogue entries (7 finished, 16 releasing, 1 unreleased) on 2026-10-11 Malaysia time. The six embed URL forms were previously read by selecting the actual Yomi server buttons. Cloudstream's official SubtitleFile API exposes a headers property; source headers are now kept instead of discarded.
+
+Embedded JavaScript syntax, source routing and ZIP root paths are checked. Build is not validated: Gradle distribution access failed in the previous attempt and no local Kotlin compiler is present. Device playback and subtitle 403 resolution need a new trace.
+
+## Limits
+
+This repairs identifiable code defects and adds a normal native extraction route. It does not prove all six backends are currently playable. The existing trace does not establish the cause of TryEmbed buffering; buffering is not claimed fixed. Backend denials or unavailable videos may remain. Pagination remains first-page only because a live pagination request is not verified.

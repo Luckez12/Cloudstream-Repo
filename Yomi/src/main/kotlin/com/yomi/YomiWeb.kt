@@ -9,6 +9,9 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.os.Message
+import android.view.View
 import com.lagradost.cloudstream3.mapper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -47,6 +50,10 @@ internal object YomiWeb {
             suspendCancellableCoroutine { continuation ->
                 val handler = Handler(Looper.getMainLooper())
                 val view = WebView(ctx)
+                // Unattached views otherwise have a zero-sized viewport; lazy players may never initialise.
+                view.measure(View.MeasureSpec.makeMeasureSpec(1280, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(720, View.MeasureSpec.EXACTLY))
+                view.layout(0, 0, 1280, 720)
                 val media = linkedMapOf<String, Media>()
                 val discovered = mutableSetOf<String>()
                 var closed = false
@@ -70,7 +77,10 @@ internal object YomiWeb {
                     domStorageEnabled = true
                     mediaPlaybackRequiresUserGesture = false
                     javaScriptCanOpenWindowsAutomatically = false
-                    setSupportMultipleWindows(false)
+                    setSupportMultipleWindows(true)
+                }
+                view.webChromeClient = object : WebChromeClient() {
+                    override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean = false
                 }
                 val userAgent = view.settings.userAgentString
                 view.webViewClient = object : WebViewClient() {
@@ -126,9 +136,11 @@ internal object YomiWeb {
                                             if (src.startsWith("https://") || src.startsWith("http://")) {
                                                 val kind = track.path("kind").asText("video")
                                                 val captured = Media(src, mapOf("Referer" to track.path("referer").asText(url)), kind, track.path("language").asText(""))
-                                                val previous = media.put(src, captured)
+                                                val previous = media[src]
+                                                val enriched = if (previous != null) captured.copy(headers = captured.headers + previous.headers) else captured
+                                                media[src] = enriched
                                                 if (previous == null || (kind == "subtitle" && captured.language.isNotBlank() && previous.language != captured.language))
-                                                    onMedia?.invoke(captured)
+                                                    onMedia?.invoke(enriched)
                                                 if (onMedia == null && kind == "video" && !pending) {
                                                     pending = true
                                                     handler.postDelayed({ finish(mediaResult()) }, 900L)
