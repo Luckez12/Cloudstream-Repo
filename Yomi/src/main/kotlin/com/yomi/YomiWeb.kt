@@ -15,6 +15,10 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import java.io.ByteArrayInputStream
 import kotlin.coroutines.resume
 
@@ -36,13 +40,15 @@ internal object YomiWeb {
     }.getOrNull()?.applicationContext
 
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun render(url: String, referer: String, scanWatch: Boolean, collectServers: Boolean = true): String = slots.withPermit {
+    private suspend fun render(url: String, referer: String, scanWatch: Boolean, collectServers: Boolean = true,
+                               onEmbed: ((Embed) -> Unit)? = null, onMedia: ((Media) -> Unit)? = null): String = slots.withPermit {
         withContext(Dispatchers.Main) {
             val ctx = context() ?: return@withContext ""
             suspendCancellableCoroutine { continuation ->
                 val handler = Handler(Looper.getMainLooper())
                 val view = WebView(ctx)
                 val media = linkedMapOf<String, Media>()
+                val discovered = mutableSetOf<String>()
                 var closed = false
                 var pending = false
                 fun destroy() {
@@ -85,8 +91,9 @@ internal object YomiWeb {
                         CookieManager.getInstance().getCookie(target)?.takeIf { it.isNotBlank() }?.let { headers["Cookie"] = it }
                         handler.post {
                             if (!closed) {
-                                media[target] = Media(target, headers, if (caption) "subtitle" else "video")
-                                if (!caption && !pending) {
+                                val captured = Media(target, headers, if (caption) "subtitle" else "video")
+                                if (media.put(target, captured) == null) onMedia?.invoke(captured)
+                                if (onMedia == null && !caption && !pending) {
                                     pending = true
                                     handler.postDelayed({ finish(mediaResult()) }, 900L)
                                 }
@@ -102,15 +109,27 @@ internal object YomiWeb {
                         view.evaluateJavascript(if (scanWatch) { if (collectServers) WATCH_SCAN else WATCH_FAST } else MEDIA_SCAN) { raw ->
                             if (!closed) {
                                 val value = runCatching { mapper.readTree(raw).asText("") }.getOrDefault("")
-                                if (scanWatch && value.isNotBlank()) finish(value)
+                                if (scanWatch && value.isNotBlank()) {
+                                    val snapshot = runCatching { mapper.readTree(value) }.getOrNull()
+                                    snapshot?.path("embeds")?.forEach { item ->
+                                        val src = item.path("url").asText("")
+                                        if (src.startsWith("https://") && discovered.add(src))
+                                            onEmbed?.invoke(Embed(src, item.path("audio").asText("sub")))
+                                    }
+                                    if (!collectServers || snapshot?.path("done")?.asBoolean() == true) finish(value)
+                                    else handler.postDelayed(this, 750L)
+                                }
                                 else {
                                     if (!scanWatch && value.isNotBlank()) runCatching {
                                         mapper.readTree(value).forEach { track ->
                                             val src = track.path("url").asText("")
                                             if (src.startsWith("https://") || src.startsWith("http://")) {
                                                 val kind = track.path("kind").asText("video")
-                                                media[src] = Media(src, mapOf("Referer" to track.path("referer").asText(url)), kind, track.path("language").asText(""))
-                                                if (kind == "video" && !pending) {
+                                                val captured = Media(src, mapOf("Referer" to track.path("referer").asText(url)), kind, track.path("language").asText(""))
+                                                val previous = media.put(src, captured)
+                                                if (previous == null || (kind == "subtitle" && captured.language.isNotBlank() && previous.language != captured.language))
+                                                    onMedia?.invoke(captured)
+                                                if (onMedia == null && kind == "video" && !pending) {
                                                     pending = true
                                                     handler.postDelayed({ finish(mediaResult()) }, 900L)
                                                 }
@@ -135,21 +154,31 @@ internal object YomiWeb {
         }
     }
 
-    suspend fun watch(url: String, collectServers: Boolean = true): Watch {
-        val raw = render(url, "https://yomi.to/", true, collectServers)
+    suspend fun watch(url: String, collectServers: Boolean = true, onEmbed: ((Embed) -> Unit)? = null): Watch {
+        val seen = mutableSetOf<String>()
+        val discovered: (Embed) -> Unit = { embed -> if (seen.add(embed.url)) onEmbed?.invoke(embed) }
+        val raw = render(url, "https://yomi.to/", true, collectServers, onEmbed = discovered)
         val root = runCatching { mapper.readTree(raw) }.getOrNull()
-        return Watch(root?.path("html")?.asText("").orEmpty(), root?.path("embeds")?.mapNotNull {
+        val embeds = root?.path("embeds")?.mapNotNull {
             val src = it.path("url").asText("")
             if (src.startsWith("https://")) Embed(src, it.path("audio").asText("sub")) else null
-        }.orEmpty())
+        }.orEmpty()
+        embeds.forEach(discovered)
+        return Watch(root?.path("html")?.asText("").orEmpty(), embeds)
     }
 
-    suspend fun streams(url: String, referer: String): List<Media> {
-        val raw = render(url, referer, false)
-        return runCatching { mapper.readTree(raw).map { node ->
-            val headers = node.path("headers").fields().asSequence().associate { it.key to it.value.asText() }
-            Media(node.path("url").asText(), headers, node.path("kind").asText("video"), node.path("language").asText(""))
-        } }.getOrDefault(emptyList())
+    suspend fun streams(url: String, referer: String, accept: suspend (Media) -> Boolean) = coroutineScope {
+        val events = Channel<Media>(Channel.UNLIMITED)
+        val producer = launch {
+            try { render(url, referer, false, onMedia = { events.trySend(it) }) }
+            finally { events.close() }
+        }
+        try {
+            for (media in events) if (accept(media)) break
+        } finally {
+            producer.cancelAndJoin()
+            events.cancel()
+        }
     }
 
     private val WATCH_FAST = """
@@ -168,9 +197,9 @@ internal object YomiWeb {
             var frame=document.querySelector('main iframe[src^="https://"]');
             if(frame&&!s.embeds.some(e=>e.url===frame.src))s.embeds.push({url:frame.src,audio:channel});
           }
-          if(s.index>=buttons.length)return JSON.stringify({html:document.documentElement.outerHTML,embeds:s.embeds});
+          if(s.index>=buttons.length)return JSON.stringify({done:true,html:document.documentElement.outerHTML,embeds:s.embeds});
           if(s.phase===0){buttons[s.index].click();var sub=audio('SUB');if(sub&&!sub.disabled)sub.click();s.phase=1;return '';}
-          capture('sub');s.index++;s.phase=0;return '';
+          capture('sub');s.index++;s.phase=0;return JSON.stringify({done:false,embeds:s.embeds});
         })()
     """.trimIndent()
     private val MEDIA_SCAN = """

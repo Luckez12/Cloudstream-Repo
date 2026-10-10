@@ -1,30 +1,18 @@
-# Yomi v4 — full provider implementation candidate
+# Yomi v5 — Sub-only server callbacks and master-first extraction
 
-Implemented catalogue homepage with isolated row failures, search via the site's published search URL, metadata from Yomi JSON-LD, episode lists from the rendered watch page, and link extraction for the actual embeds discovered by that page.
+Scope: Yomi loadLinks scheduling and per-server HLS selection only. Homepage/details and subtitle transport behavior from v4 are unchanged.
 
-## Verified live site contract (2026-10-11 Malaysia time)
+- Start a server task immediately when the watch scanner discovers its Sub embed.
+- Every server emits independently; joining tasks only completes the overall loadLinks operation.
+- Verify HLS masters from a successful #EXTM3U response containing master tags, never from the filename alone.
+- Stop that server's registered extractor or disposable WebView after its first verified master. Emit exactly that master and discard buffered media/MP4 candidates. Skip all remaining extraction routes for that server.
+- Continue other servers. If no verified master is found within that server's bounded routes, emit its deduplicated fallback candidates.
+- Sub only. Captions remain limited to English, Malay, Indonesian.
 
-Sample: https://yomi.to/watch/the-apothecary-diaries-season-3-195516/1
+MSM21 in this repository provided the reference for callbacks inside independent server tasks. Native MegaPlay uses the existing repository transport implementation. WebView concurrency remains capped at two, with cancellation cleanup.
 
-- Watch page showed episode links `/watch/anime-195516/1` through `/12`.
-- Six player buttons use `title="Server N ..."`.
-- Embed hosts observed: ani.pm, megaplay.buzz, tryembed.us.cc, flixera.co, cinextream.cc, nontongo.win.
-- Server 4 and 6 are Sub only; the sample's primary server also marked Dub unavailable. The provider discovers availability from the actual player controls and never fabricates Dub URLs.
-- Details pages returned an unavailable message in this browser. The provider uses server-rendered metadata and the working watch episode list instead.
+Validation: live watch DOM contract was verified for v3/v4. v5 incremental scanner behavior is checked with the actual embedded JavaScript against a six-server DOM fixture. Master-before-fallback routing and local producer cancellation are reviewed in source. ZIP contains only the Yomi module at repo-root paths. Android build/device playback have not been verified; the previous build attempt could not download Gradle due to unavailable network access.
 
-## Runtime
+Known v4 diagnostic issues remain for future patches: empty Trending, some details timing out, English subtitle 403, and unresolved mirrors. This patch does not claim to fix those problems.
 
-The extension remains self-contained in `Yomi/`. Android context is resolved through the same runtime pattern already used by other modules in this repository. A maximum of two disposable WebViews render JavaScript pages. Details rendering returns once episode links appear; server discovery has a 28-second bound and each media capture an 18-second bound. Views and callbacks are destroyed on completion or coroutine cancellation. No CAPTCHA solver, credential input, or certificate bypass is added.
-
-MegaPlay reuses the repository's existing native transport implementation. Other embeds try registered Cloudstream extractors, then capture ordinary HLS/MP4 requests from a disposable player WebView. Signed URLs and request headers pass to the native player. Exposed captions are restricted to English, Malay and Indonesian. Sources that require unsupported media transports may still return no links and need device logs.
-
-Homepage remains first-page only; the site's catalogue pagination request has not been verified. The episode list is the list displayed by Yomi, not proof every episode/server currently plays.
-
-## Validation and limitations
-
-Live DOM selectors and the six Sub embed URLs were checked. Embedded JavaScript syntax and ZIP root paths were checked. Attempted `:Yomi:compileDebugKotlin`; it stopped before compilation because the Gradle distribution download failed with `Network is unreachable`. No successful Android build or Cloudstream device playback test is claimed.
-
-This is the first complete implementation candidate, not a playback-certified release. Export full Yomi trace after opening details and trying an episode. Useful log markers: `YOMI_DETAIL`, `YOMI_PLAYER`, `YOMI_NATIVE_FALLBACK`, `YOMI_SERVER_RESULT`, `YOMI_SERVER_FAILED`, `YOMI_PLAYER_DONE`.
-
-## v4 correction
-Sub only, as requested. The watch scanner never selects Dub, the extraction entry filters audio to Sub, and emitted source labels are always Sub. Android build and device playback remain unverified.
+Useful logs: YOMI_SERVER_MASTER action=emitted_stop_server; YOMI_SERVER_RESULT master=... fallbacks=...; YOMI_PLAYER_DONE.
