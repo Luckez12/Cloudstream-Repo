@@ -1,4 +1,19 @@
-# Yomi v7 — subtitle validation repair candidate
+# Yomi v8 — homepage recovery and diagnostics candidate
+
+## v8 homepage changes
+
+Input: diagnose_Full_timeline_FullTrace_20261012_022121.txt, installed v7. All four cached HTTP 200 responses produced zero cards and zero embedded entries. This trace does not include response bodies and cannot establish whether the original data was empty or decoding failed.
+
+- On empty or unavailable HTTP data, revalidate once using normal Cache-Control/Pragma headers. Do not clear shared app caches.
+- If still empty, render the exact category URL in a disposable WebView with LOAD_NO_CACHE. Wait for a real anime-card image, with a 12-second render bound and a 28-second total queue/render bound for the two-slot renderer. No invented alternate categories or APIs.
+- Decode multiple Next text pushes per script, whitespace variants, arrays split across chunks, and later populated initialAnime arrays after an earlier empty one. Accept validated anime entries only. Recognise an unwrapped text stream when present.
+- Use the verified anime-card selector without depending on the main wrapper.
+- Report HTTP status, response length, card count, chunk count, decode errors, array count, and resulting items for each attempt. No full HTML, tokens, or cookies are logged.
+- If every attempt fails, throw a catalogue error instead of returning PASS with an empty first-page row. The app may fail/cancel the combined homepage when a row is unavailable; this version no longer silently suppresses that failure. Pagination remains disabled.
+
+Live browser inspection on 2026-10-12 Malaysia time: Trending rendered 24 cards and decoded 24 valid embedded entries; existing card markup is unchanged. Movies returned initialAnime: [] and no cards. Top Rated displayed "Could not load anime. Please try again."; one normal Retry changed it to "No anime found". Therefore upstream empty data is a real observed condition. This patch cannot manufacture missing upstream results. Direct shell HTTP inspection returned 404 and did not provide the device's response body.
+
+Validation: live Trending data/selector checked, embedded catalogue scan JavaScript syntax and ZIP paths checked. No Android/Kotlin build or device verification is available. Subtitle behavior remains v7; video routing remains unchanged.
 
 ## v7 subtitle changes
 

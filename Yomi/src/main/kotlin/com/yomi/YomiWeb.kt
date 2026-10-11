@@ -44,7 +44,8 @@ internal object YomiWeb {
 
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun render(url: String, referer: String, scanWatch: Boolean, collectServers: Boolean = true,
-                               onEmbed: ((Embed) -> Unit)? = null, onMedia: ((Media) -> Unit)? = null): String = slots.withPermit {
+                               onEmbed: ((Embed) -> Unit)? = null, onMedia: ((Media) -> Unit)? = null,
+                               scanCatalogue: Boolean = false): String = slots.withPermit {
         withContext(Dispatchers.Main) {
             val ctx = context() ?: return@withContext ""
             suspendCancellableCoroutine { continuation ->
@@ -75,6 +76,7 @@ internal object YomiWeb {
                 view.settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
+                    if (scanCatalogue) cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
                     mediaPlaybackRequiresUserGesture = false
                     javaScriptCanOpenWindowsAutomatically = false
                     setSupportMultipleWindows(true)
@@ -95,7 +97,7 @@ internal object YomiWeb {
                         val path = request.url.path.orEmpty().lowercase()
                         val caption = path.endsWith(".vtt") || path.endsWith(".srt")
                         if (!(path.endsWith(".m3u8") || path.endsWith(".mp4") || caption)) return null
-                        if (scanWatch) return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
+                        if (scanWatch || scanCatalogue) return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
                         val headers = request.requestHeaders.filterKeys { !it.equals("Range", true) }.toMutableMap()
                         if (headers.keys.none { it.equals("User-Agent", true) }) headers["User-Agent"] = userAgent
                         CookieManager.getInstance().getCookie(target)?.takeIf { it.isNotBlank() }?.let { headers["Cookie"] = it }
@@ -116,10 +118,13 @@ internal object YomiWeb {
                 val poll = object : Runnable {
                     override fun run() {
                         if (closed) return
-                        view.evaluateJavascript(if (scanWatch) { if (collectServers) WATCH_SCAN else WATCH_FAST } else MEDIA_SCAN) { raw ->
+                        view.evaluateJavascript(if (scanCatalogue) CATALOGUE_SCAN else if (scanWatch) { if (collectServers) WATCH_SCAN else WATCH_FAST } else MEDIA_SCAN) { raw ->
                             if (!closed) {
                                 val value = runCatching { mapper.readTree(raw).asText("") }.getOrDefault("")
-                                if (scanWatch && value.isNotBlank()) {
+                                if (scanCatalogue) {
+                                    if (value.isNotBlank()) finish(value) else handler.postDelayed(this, 750L)
+                                }
+                                else if (scanWatch && value.isNotBlank()) {
                                     val snapshot = runCatching { mapper.readTree(value) }.getOrNull()
                                     snapshot?.path("embeds")?.forEach { item ->
                                         val src = item.path("url").asText("")
@@ -156,15 +161,26 @@ internal object YomiWeb {
                 }
                 continuation.invokeOnCancellation { handler.post { destroy() } }
                 handler.postDelayed({
-                    if (scanWatch) view.evaluateJavascript("JSON.stringify({html:document.documentElement.outerHTML,embeds:(window.__yomiScan||{}).embeds||[]})") { raw ->
+                    if (scanCatalogue) finish("")
+                    else if (scanWatch) view.evaluateJavascript("JSON.stringify({html:document.documentElement.outerHTML,embeds:(window.__yomiScan||{}).embeds||[]})") { raw ->
                         finish(runCatching { mapper.readTree(raw).asText("") }.getOrDefault(""))
                     } else finish(mediaResult())
-                }, if (scanWatch) 28_000L else 18_000L)
+                }, if (scanCatalogue) 12_000L else if (scanWatch) 28_000L else 18_000L)
                 view.loadUrl(url, mapOf("Referer" to referer))
                 handler.postDelayed(poll, 750L)
             }
         }
     }
+
+    suspend fun catalogue(url: String, referer: String): String =
+        render(url, referer, scanWatch = false, scanCatalogue = true)
+
+    private val CATALOGUE_SCAN = """
+        (function() {
+          if (!document.querySelector('a.anime-card[href^="/anime/"] img')) return '';
+          return document.documentElement.outerHTML;
+        })()
+    """.trimIndent()
 
     suspend fun watch(url: String, collectServers: Boolean = true, onEmbed: ((Embed) -> Unit)? = null): Watch {
         val seen = mutableSetOf<String>()

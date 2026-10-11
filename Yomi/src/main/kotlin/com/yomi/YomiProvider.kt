@@ -65,30 +65,50 @@ class YomiProvider : MainAPI() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // A failed row must not cancel the other concurrently requested rows.
             Log.w(name, "YOMI_HOME_ROW_FAILED section=${request.name.replace(' ', '_')} reason=${e.javaClass.simpleName}")
-            newHomePageResponse(HomePageList(request.name, emptyList()), false)
+            // Do not report an unavailable catalogue as a successful, empty category.
+            throw e
         }
     }
 
     private suspend fun homepage(page: Int, request: MainPageRequest): HomePageResponse {
         // Pagination is not exposed as a verified server-rendered URL yet.
         if (page > 1) return newHomePageResponse(HomePageList(request.name, emptyList()), false)
-        val response = withTimeoutOrNull(15_000L) {
-            app.get("$mainUrl${request.data}", referer = "$mainUrl/")
-        } ?: throw ErrorLoadingException("Yomi: catalogue request timed out.")
-        Log.i(name, "YOMI_HOME section=${request.name.replace(' ', '_')} status=${response.code}")
-        if (response.code !in 200..299) throw ErrorLoadingException("Yomi: catalogue HTTP ${response.code}.")
-        // Verified from Yomi's live Browse cards, not inferred from another provider.
-        val document = response.document
-        val cards = document.select("main a.anime-card[href^=/anime/]")
-        val embedded = YomiCatalogue.initial(document)
-        YomiCatalogue.remember(embedded)
-        val htmlItems = cards.mapNotNull { card(it) }.distinctBy { it.url }
-        val items = htmlItems.ifEmpty { embedded.mapNotNull { catalogueCard(it) } }
-        val embeddedCatalogue = document.select("script").any { it.data().contains("initialAnime") }
-        Log.i(name, "YOMI_HOME section=${request.name.replace(' ', '_')} matched=${cards.size} items=${items.size} embedded_catalogue=$embeddedCatalogue embedded_items=${embedded.size} pagination=disabled")
-        if (items.isEmpty()) Log.w(name, "YOMI_HOME_ROW_EMPTY section=${request.name.replace(' ', '_')} matched=${cards.size} embedded_catalogue=$embeddedCatalogue")
+        val url = "$mainUrl${request.data}"
+        val section = request.name.replace(' ', '_')
+        fun parse(body: String, source: String): List<SearchResponse> {
+            val document = Jsoup.parse(body, mainUrl)
+            // Keep the verified card class but allow it outside the main wrapper.
+            val cards = document.select("a.anime-card[href^=/anime/]")
+            val decoded = YomiCatalogue.decode(document, body)
+            YomiCatalogue.remember(decoded.items)
+            val items = cards.mapNotNull { card(it) }.ifEmpty { decoded.items.mapNotNull { catalogueCard(it) } }
+                .distinctBy { it.url }
+            Log.i(name, "YOMI_HOME_PARSE section=$section source=$source body_length=${body.length} matched=${cards.size} chunks=${decoded.chunks} decode_errors=${decoded.errors} arrays=${decoded.arrays} embedded_items=${decoded.items.size} items=${items.size}")
+            return items
+        }
+        var items: List<SearchResponse> = emptyList()
+        for (fresh in listOf(false, true)) {
+            val source = if (fresh) "http_revalidate" else "http"
+            try {
+                val response = withTimeoutOrNull(10_000L) {
+                    app.get(url, referer = "$mainUrl/", headers = if (fresh)
+                        mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache") else emptyMap())
+                }
+                Log.i(name, "YOMI_HOME_HTTP section=$section source=$source status=${response?.code}")
+                if (response != null && response.code in 200..299) items = parse(response.text, source)
+                if (items.isNotEmpty()) break
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { Log.w(name, "YOMI_HOME_HTTP_FAILED section=$section source=$source reason=${e.javaClass.simpleName}") }
+        }
+        if (items.isEmpty()) {
+            Log.i(name, "YOMI_HOME_RENDER section=$section action=start")
+            // Two rendering slots serve four rows; include queue time for the second pair.
+            val html = withTimeoutOrNull(28_000L) { YomiWeb.catalogue(url, "$mainUrl/") }.orEmpty()
+            items = parse(html, "webview")
+        }
+        if (items.isEmpty()) throw ErrorLoadingException("Yomi: catalogue unavailable for ${request.name}. Please retry or export the diagnostic log.")
+        Log.i(name, "YOMI_HOME section=$section items=${items.size} pagination=disabled")
         return newHomePageResponse(HomePageList(request.name, items, isHorizontalImages = false), false)
     }
 
