@@ -1,4 +1,18 @@
-# Yomi v6 — diagnostic-driven repair candidate
+# Yomi v7 — subtitle validation repair candidate
+
+## v7 subtitle changes
+
+Input: diagnose_Full_timeline_FullTrace_20261011_024053.txt, installed v6. English caption requests returned HTTP 403 in both tested players. The diagnostic does not expose outgoing transport headers and does not establish the precise denial cause.
+
+- Validate discovered English/Malay/Indo caption files before callback: successful HTTP and WebVTT, SRT, or ASS content are required. Reject HTML/error bodies.
+- Deduplicate attempts by URL plus headers, rather than URL alone. A failed request can be retried when another extractor supplies different headers. A successful caption is emitted once, retaining the headers that passed validation.
+- Three independent caption workers continue after a video's master HLS stops its producer. Each request has a four-second bound. Video callbacks do not wait for caption validation.
+- Log YOMI_SUBTITLE_READY / YOMI_SUBTITLE_REJECT with language, host, status or timeout, and header names. Do not log caption URLs, cookies, or header values.
+- Existing six-server Sub-only routes and master HLS behavior are unchanged. Alternatives come only from those existing extraction routes; no alternate caption endpoints are invented.
+
+This change rejects unusable subtitles and allows improved-header candidates to succeed. It does not guarantee a replacement when every server denies the caption. A successful validation request is also not proof of later playback access. Native MegaPlay headers have not been confirmed against the live original player: browser inspection timed out.
+
+Validation: source wiring and ZIP root paths checked. No local Kotlin compiler is available; build and device caption playback remain unverified.
 
 Sub only. Inherits independent per-server callbacks and first verified master HLS selection from v5.
 
@@ -6,7 +20,7 @@ Sub only. Inherits independent per-server callbacks and first verified master HL
 
 - Trending: decode the actual initialAnime data in Next RSC text chunks, including split chunks and escaped strings. Use it when HTML card selectors return no cards. Catalogue metadata is retained in a bounded 256-entry, 10-minute cache.
 - Details: reuse cached catalogue metadata and known released episode counts. Finished titles use their catalogue episode count; releasing titles use nextAiringEpisode minus one; unreleased titles have no episodes. Unknown counts still use the site's rendered watch list, with a 12-second total bound including queue time. Metadata HTTP is bounded to 8 seconds and skipped when catalogue metadata is available.
-- Subtitles: preserve source headers through language filtering. Native MegaPlay captions include its player Referer/Origin/User-Agent. Registered extractors get a player Referer/User-Agent when no headers are provided. WebView captions retain captured transport headers. English, Malay and Indonesian only; deduplicate subtitle URLs.
+- Subtitles: preserve source headers through language filtering. Native MegaPlay captions include its player Referer/Origin/User-Agent. Registered extractors get a player Referer/User-Agent when no headers are provided. WebView captions retain captured transport headers. English, Malay and Indonesian only; v7 replaces URL-only deduplication with validated requests.
 - Server discovery: start all six Sub routes directly from verified site player URL templates. Nontongo can no longer disappear because a WebView scanner skipped its last iframe transition. No guessed APIs or Dub URLs are added.
 - Mirrors: initialise an actual 1280x720 WebView viewport for lazy players, deny popups, and preserve captured headers when DOM information enriches a media candidate.
 - TryEmbed: reuse AnimeXTV's existing public bootstrap/nonce/cookie transport as a bounded native route before registered extraction/WebView. The first verified master stops that server's further work.

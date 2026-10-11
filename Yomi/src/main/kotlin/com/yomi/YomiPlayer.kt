@@ -113,14 +113,23 @@ internal class YomiPlayer(private val mainUrl: String) {
         val uri = runCatching { URI(data) }.getOrNull() ?: return@coroutineScope false
         if (uri.host != URI(mainUrl).host || !uri.path.matches(Regex("/watch/[a-z0-9-]+-[0-9]+/[0-9]+/?"))) return@coroutineScope false
         val seen = mutableSetOf<String>()
-        val seenSubs = mutableSetOf<String>()
+        var subtitleCount = 0
         val started = mutableSetOf<String>()
         val jobs = mutableListOf<kotlinx.coroutines.Job>()
         val outputLock = Any()
+        val subtitleQueue = Channel<SubtitleFile>(Channel.UNLIMITED)
+        val validator = YomiSubtitles { sub -> synchronized(outputLock) {
+            subtitleCallback(sub)
+            subtitleCount++
+        } }
+        // Independent workers continue validating captions after a server finds its master.
+        val subtitleWorkers = List(3) { launch {
+            for (sub in subtitleQueue) validator.accept(sub)
+        } }
         val subtitles: (SubtitleFile) -> Unit = { sub ->
-            language(sub)?.let { lang -> synchronized(outputLock) {
-                if (seenSubs.add(sub.url)) subtitleCallback(SubtitleFile(lang, sub.url).apply { headers = sub.headers })
-            } }
+            language(sub)?.let { lang ->
+                subtitleQueue.trySend(SubtitleFile(lang, sub.url).apply { headers = sub.headers?.toMap() })
+            }
         }
         suspend fun emit(embed: YomiWeb.Embed, link: ExtractorLink, master: Boolean) {
             val qualityLabel = if (master) "Auto" else link.quality.takeIf { it > 0 && it != Qualities.Unknown.value }?.let { "${it}p" } ?: "Unknown"
@@ -203,8 +212,11 @@ internal class YomiPlayer(private val mainUrl: String) {
         }
         Log.i("Yomi", "YOMI_PLAYER embeds=${started.size}")
         // Joining only closes the operation; server callbacks have already emitted independently.
-        jobs.joinAll()
-        Log.i("Yomi", "YOMI_PLAYER_DONE links=${seen.size} subtitles=${seenSubs.size}")
+        try {
+            jobs.joinAll()
+        } finally { subtitleQueue.close() }
+        subtitleWorkers.joinAll()
+        Log.i("Yomi", "YOMI_PLAYER_DONE links=${seen.size} subtitles=$subtitleCount")
         seen.isNotEmpty()
     }
 }
