@@ -86,6 +86,28 @@
         "name": "AnimeXTV"
     },
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=aniwatchtv.ro&sz=128",
+        "fileHash": "sha256-c320053ce3d1822b629c5d76ac51a71f133d71563237bba75e272ca5bf19b51d",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Luckez12/Cloudstream-Repo",
+        "fileSize": 37567,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "kurato-svg"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA"
+        ],
+        "version": 1,
+        "internalName": "AniwatchTV",
+        "description": "AniwatchTV.ro \u2014 catalogue, details, episodes and Sub servers.",
+        "url": "https://raw.githubusercontent.com/Luckez12/Cloudstream-Repo/builds/AniwatchTV.cs3",
+        "name": "AniwatchTV"
+    },
+    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=aniwaves.ru&sz=128",
         "fileHash": "sha256-985f75b67482e45ed13372da0d7838c174b7da57f7ec8026664492f702809bd3",
         "apiVersion": 1,
