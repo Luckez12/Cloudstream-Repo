@@ -10,10 +10,41 @@ import org.jsoup.Jsoup
 import java.net.URI
 
 internal class AniwatchTVPlayer(private val base: String) {
+    private data class Server(val url: String, val choice: String, val index: Int) {
+        val key: String get() = "$index|$choice|$url"
+    }
     private fun site(url: String): String = when (URI(url).host?.lowercase()) {
         "megaplay.su" -> "MegaPlay.su"
+        "megaplay.buzz" -> "MegaPlay.buzz"
+        "zokoanime.video" -> "ZokoAnime"
+        "gogoanime.me.uk" -> "GogoAnime.me.uk"
+        "vidtube.site" -> "VidTube"
         "vidmoly.org", "vidmoly.net", "vidmoly.to" -> "Vidmoly"
         else -> URI(url).host.orEmpty()
+    }
+    private suspend fun megaBuzz(url: String, referer: String, subs: (SubtitleFile) -> Unit): List<ExtractorLink> {
+        val page = app.get(url, referer = referer)
+        Log.i("AniwatchTV.ro", "ANIWATCH_EMBED server=MegaPlay.buzz status=${page.code}")
+        if (page.code !in 200..299) return emptyList()
+        val id = page.document.selectFirst("#megaplay-player[data-id]")?.attr("data-id")
+            ?.takeIf { it.matches(Regex("[0-9]+")) } ?: return emptyList()
+        val response = app.get("https://megaplay.buzz/stream/getSources?id=$id&platform=OTHER", referer = url,
+            headers = mapOf("X-Requested-With" to "XMLHttpRequest"))
+        if (response.code !in 200..299) return emptyList()
+        val root = mapper.readTree(response.text)
+        if (root.has("error")) return emptyList()
+        val source = if (root.path("enc").asText("").isNotBlank()) mapper.readTree(AniwatchTVCrypto.decrypt(root.path("enc").asText()))
+            else root.path("sources")
+        val file = if (source.isTextual) source.asText() else source.path("file").asText("")
+        if (runCatching { URI(file).scheme in setOf("http", "https") }.getOrDefault(false).not()) return emptyList()
+        val transport = mapOf("Referer" to url, "Origin" to "https://megaplay.buzz", "User-Agent" to USER_AGENT)
+        root.path("tracks").filter { it.path("kind").asText("captions") in setOf("captions", "subtitles") }.forEach { track ->
+            val raw = track.path("file").asText("")
+            if (raw.isNotBlank()) subs(SubtitleFile(track.path("label").asText("").ifBlank { track.path("lang").asText("") }, URI(url).resolve(raw).toString()).apply { headers = transport })
+        }
+        return listOf(newExtractorLink("MegaPlay.buzz", "MegaPlay.buzz", AniwatchTVCrypto.signed(file), ExtractorLinkType.M3U8) {
+            this.referer = url; headers = transport; quality = Qualities.Unknown.value
+        })
     }
     private suspend fun master(link: ExtractorLink): Boolean {
         if (link.type != ExtractorLinkType.M3U8) return false
@@ -26,7 +57,7 @@ internal class AniwatchTVPlayer(private val base: String) {
     }
     private suspend fun native(url: String, referer: String, subs: (SubtitleFile) -> Unit): List<ExtractorLink> {
         val host = URI(url).host.orEmpty()
-        if (host !in setOf("megaplay.su", "vidmoly.org", "vidmoly.net", "vidmoly.to")) return emptyList()
+        if (host == "megaplay.buzz") return megaBuzz(url, referer, subs)
         val response = app.get(url, referer = referer, headers = mapOf("User-Agent" to USER_AGENT))
         Log.i("AniwatchTV.ro", "ANIWATCH_EMBED server=${site(url)} status=${response.code}")
         if (response.code !in 200..299) return emptyList()
@@ -60,16 +91,23 @@ internal class AniwatchTVPlayer(private val base: String) {
         val root = mapper.readTree(response.text)
         if (!root.path("status").asBoolean()) throw ErrorLoadingException("AniwatchTV: server list unavailable")
         val servers = Jsoup.parse(root.path("html").asText()).select(".server-item[data-type=sub][data-hash]")
-            .mapNotNull { el -> runCatching { String(Base64.decode(el.attr("data-hash"), Base64.DEFAULT), Charsets.UTF_8) }.getOrNull()
-                ?.takeIf { runCatching { URI(it).scheme in setOf("http", "https") && !URI(it).host.isNullOrBlank() }.getOrDefault(false) } }
-            .distinct()
+            .mapIndexedNotNull { index, el ->
+                val url = runCatching { String(Base64.decode(el.attr("data-hash"), Base64.DEFAULT), Charsets.UTF_8) }.getOrNull()
+                    ?.takeIf { runCatching { URI(it).scheme in setOf("http", "https") && !URI(it).host.isNullOrBlank() }.getOrDefault(false) }
+                    ?: return@mapIndexedNotNull null
+                Server(url, el.attr("data-server-name").ifBlank { "Server ${index + 1}" }, index + 1)
+            }
         Log.i("AniwatchTV.ro", "ANIWATCH_SERVERS episode_id=$id sub=${servers.size}")
         val lock = Any()
         val emitted = mutableSetOf<String>()
         val captions = Channel<SubtitleFile>(Channel.UNLIMITED)
         val validator = AniwatchTVSubtitles(subtitleCallback)
         val workers = List(3) { launch { for (sub in captions) validator.accept(sub) } }
-        val jobs = servers.map { url -> launch {
+        val jobs = servers.groupBy { it.url }.map { (url, aliases) -> launch {
+            val server = aliases.first()
+            val choice = server.choice.replace(Regex("\\s+"), " ").trim()
+            val display = "${site(url)} · $choice"
+            Log.i("AniwatchTV.ro", "ANIWATCH_SERVER_START index=${server.index} choice=${choice.replace(' ', '_')} server=${site(url)}")
             val candidates = linkedMapOf<String, ExtractorLink>()
             var found = false
             val subs: (SubtitleFile) -> Unit = { sub ->
@@ -86,11 +124,14 @@ internal class AniwatchTVPlayer(private val base: String) {
             }
             suspend fun emit(link: ExtractorLink, isMaster: Boolean) {
                 val quality = if (isMaster) "Auto" else link.quality.takeIf { it > 0 && it != Qualities.Unknown.value }?.let { "${it}p" } ?: "Unknown"
-                val output = newExtractorLink(site(url), "${site(url)} · Sub · $quality", link.url, link.type) {
-                    this.referer = link.referer; headers = link.headers; this.quality = if (isMaster) Qualities.Unknown.value else link.quality
-                    extractorData = link.extractorData; audioTracks = link.audioTracks
+                for (alias in aliases) {
+                    val label = "${site(url)} · ${alias.choice}"
+                    val output = newExtractorLink(label, "$label · Sub · $quality", link.url, link.type) {
+                        this.referer = link.referer; headers = link.headers; this.quality = if (isMaster) Qualities.Unknown.value else link.quality
+                        extractorData = link.extractorData; audioTracks = link.audioTracks
+                    }
+                    synchronized(lock) { if (emitted.add("${alias.key}|${link.url}")) callback(output) }
                 }
-                synchronized(lock) { if (emitted.add("${site(url)}|${link.url}")) callback(output) }
             }
             suspend fun accept(link: ExtractorLink): Boolean {
                 if (found) return true
@@ -98,7 +139,7 @@ internal class AniwatchTVPlayer(private val base: String) {
                 if (old != null && old.headers == link.headers && old.referer == link.referer) return false
                 if (master(link)) {
                     found = true; candidates.clear(); emit(link, true)
-                    Log.i("AniwatchTV.ro", "ANIWATCH_MASTER server=${site(url)} action=stop_server")
+                    Log.i("AniwatchTV.ro", "ANIWATCH_MASTER index=${server.index} choice=${choice.replace(' ', '_')} server=${site(url)} action=stop_server")
                     return true
                 }
                 candidates[link.url] = link
@@ -120,8 +161,33 @@ internal class AniwatchTVPlayer(private val base: String) {
                 try { for (link in links) if (accept(link)) break }
                 finally { producer.cancelAndJoin(); links.cancel() }
             }
+            if (!found) {
+                try {
+                    // Capture the actual embedded player's requests for every returned Sub route.
+                    // The callback cancels only this WebView after a verified master.
+                    val complete = withTimeoutOrNull(45_000L) {
+                        AniwatchTVWeb.streams(url, referer) { media ->
+                            if (media.kind == "subtitle") {
+                                subs(SubtitleFile(media.language, media.url).apply { headers = media.headers })
+                                false
+                            } else {
+                                val path = runCatching { URI(media.url).path }.getOrNull().orEmpty().lowercase()
+                                val link = newExtractorLink(display, display, media.url,
+                                    if (path.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                                    this.referer = media.headers.entries.firstOrNull { it.key.equals("Referer", true) }?.value ?: url
+                                    headers = media.headers; quality = Qualities.Unknown.value
+                                }
+                                accept(link)
+                            }
+                        }
+                        true
+                    }
+                    if (complete != true) Log.w("AniwatchTV.ro", "ANIWATCH_WEB_TIMEOUT index=${server.index} server=${site(url)}")
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { Log.w("AniwatchTV.ro", "ANIWATCH_WEB_FAILED index=${server.index} server=${site(url)} reason=${e.javaClass.simpleName}") }
+            }
             if (!found) candidates.values.forEach { emit(it, false) }
-            Log.i("AniwatchTV.ro", "ANIWATCH_SERVER_RESULT server=${site(url)} master=$found fallbacks=${candidates.size}")
+            aliases.forEach { alias -> Log.i("AniwatchTV.ro", "ANIWATCH_SERVER_RESULT index=${alias.index} choice=${alias.choice.replace(' ', '_')} server=${site(url)} master=$found fallbacks=${candidates.size}") }
         } }
         try { jobs.joinAll() } finally { captions.close() }
         workers.joinAll()
