@@ -5,6 +5,8 @@ import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -271,13 +273,13 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V65_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V66_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
         )
 
         if (isLatestRelease) {
             Log.i(
                 "Anichin",
-                "ANICHIN_V65_LATEST page=$page source=$source first=" +
+                "ANICHIN_V66_LATEST page=$page source=$source first=" +
                     cards.take(LATEST_DIAGNOSTIC_LIMIT)
                         .joinToString(" | ") { it.title }
             )
@@ -337,7 +339,7 @@ class AnichinProvider : MainAPI() {
                 ?.firstOrNull { child -> child.hasClass("listupd") }
 
             directList?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let {
-                Log.i("Anichin", "ANICHIN_V65_LATEST_BLOCK mode=child depth=$depth")
+                Log.i("Anichin", "ANICHIN_V66_LATEST_BLOCK mode=child depth=$depth")
                 return it
             }
 
@@ -347,7 +349,7 @@ class AnichinProvider : MainAPI() {
                     sibling?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let { articles ->
                         Log.i(
                             "Anichin",
-                            "ANICHIN_V65_LATEST_BLOCK mode=sibling depth=$depth"
+                            "ANICHIN_V66_LATEST_BLOCK mode=sibling depth=$depth"
                         )
                         return articles
                     }
@@ -367,7 +369,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V65_LATEST_BLOCK mode=fallback cards=${fallback.size}"
+            "ANICHIN_V66_LATEST_BLOCK mode=fallback cards=${fallback.size}"
         )
         return fallback
     }
@@ -425,7 +427,7 @@ class AnichinProvider : MainAPI() {
             val fixed = card.poster?.let { fixUrlNull(it) }
             Log.i(
                 "Anichin",
-                "ANICHIN_V65_POSTER index=${index + 1} " +
+                "ANICHIN_V66_POSTER index=${index + 1} " +
                     "source=${card.posterSource} host=${fixed?.let(::hostOf).orEmpty()} " +
                     "url=${fixed.orEmpty()}"
             )
@@ -730,7 +732,7 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V65_DETAIL_POSTER source=$posterSource " +
+            "ANICHIN_V66_DETAIL_POSTER source=$posterSource " +
                 "host=${fixedPoster?.let(::hostOf).orEmpty()} url=$poster"
         )
 
@@ -907,7 +909,7 @@ class AnichinProvider : MainAPI() {
 
             Log.i(
                 "Anichin",
-                "ANICHIN_V65_EPISODES mode=$episodeSource " +
+                "ANICHIN_V66_EPISODES mode=$episodeSource " +
                     "count=${resolvedEpisodes.size} title=$responseTitle"
             )
 
@@ -1698,13 +1700,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V65_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V66_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V65_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V66_DONE candidates=0 success=false")
             return false
         }
 
@@ -1729,14 +1731,26 @@ class AnichinProvider : MainAPI() {
             }
 
             withTimeoutOrNull(pipelineTimeout) {
-                resolvePlayerPipeline(
-                    player.url,
-                    data,
-                    player.label,
-                    serverAttempts,
-                    effectiveSubtitleCallback,
-                    { link -> serverLinks.add(link) }
-                )
+                coroutineScope {
+                    val masterFound = CompletableDeferred<Unit>()
+                    val pipeline = async {
+                        resolvePlayerPipeline(
+                            player.url, data, player.label, serverAttempts,
+                            effectiveSubtitleCallback,
+                            { link ->
+                                serverLinks.add(link)
+                                if (isAdaptiveMaster(link)) masterFound.complete(Unit)
+                            }
+                        )
+                    }
+                    // Cancel remaining work for this server as soon as its
+                    // master arrives. Other server families continue normally.
+                    select<Unit> {
+                        masterFound.onAwait { pipeline.cancel() }
+                        pipeline.onAwait { }
+                    }
+                    pipeline.join()
+                }
             }
 
             val eligibleLinks = serverLinks
@@ -1746,7 +1760,7 @@ class AnichinProvider : MainAPI() {
             /*
              * One clean source per website. A native master already contains
              * every adaptive track, so do not repeat its 1080p/720p children.
-             * OK.ru also keeps its best fixed fallback beside the master.
+             * Use a fixed fallback only when no master was found.
              */
             val rawMasterLink = eligibleLinks
                 .filter(::isAdaptiveMaster)
@@ -1768,10 +1782,6 @@ class AnichinProvider : MainAPI() {
             // Rebuilding it as a data URI delays startup and is unsupported by
             // some ExoPlayer/Cloudstream versions.
             val orderedLinks = when {
-                // OK.ru can expose an unusable HLS endpoint alongside working
-                // MP4. Retain the best fixed alternative for manual selection.
-                rawMasterLink != null && player.priority() == 0 ->
-                    listOfNotNull(rawMasterLink, fixedFallbacks.firstOrNull())
                 rawMasterLink != null -> listOf(rawMasterLink)
                 player.priority() == 1 -> fixedFallbacks.distinctBy { it.quality }
                 else -> listOfNotNull(fixedFallbacks.firstOrNull())
@@ -1861,7 +1871,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V65_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V66_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 

@@ -92,17 +92,19 @@ open class OkRuExtractor : ExtractorApi() {
             }
         }
 
-        /*
-         * Fast path: read the embed page first. In the working V17 cases this
-         * already contains data-options/metadata with every quality, so avoid
-         * paying for an extra metadata API request before playback can appear.
-         */
+        suspend fun emitMaster(): Boolean {
+            val hlsUrl = adaptiveHlsUrl ?: return false
+            callback(newExtractorLink(source = name, name = name, url = hlsUrl, type = ExtractorLinkType.M3U8) {
+                this.referer = embedUrl
+                this.quality = Qualities.Unknown.value
+                this.headers = requestHeaders(embedUrl)
+            })
+            return true
+        }
+
         val response = try {
-            app.get(
-                embedUrl,
-                referer = referer ?: "https://anichin.moe/",
-                headers = requestHeaders(embedUrl)
-            )
+            app.get(embedUrl, referer = referer ?: "https://anichin.moe/",
+                headers = requestHeaders(embedUrl))
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -110,162 +112,60 @@ open class OkRuExtractor : ExtractorApi() {
         }
 
         if (response != null) {
-            response.document
-                .select("[data-options]")
-                .forEach { element ->
-                    if (videos.isNotEmpty()) return@forEach
-
-                    val optionsNode = parseNode(
-                        cleanJsonString(
-                            element.attr("data-options")
-                        )
-                    ) ?: return@forEach
-
-                    val flashvars = optionsNode.get("flashvars")
-                        ?: return@forEach
-
-                    val metadataNode = flashvars.get("metadata")
-
-                    when {
-                        metadataNode == null || metadataNode.isNull -> Unit
-
-                        metadataNode.isObject || metadataNode.isArray -> {
-                            addMetadata(metadataNode)
-                        }
-
-                        metadataNode.isTextual -> {
-                            parseNode(
-                                cleanJsonString(
-                                    metadataNode.asText()
-                                )
-                            )?.let(::addMetadata)
-                        }
-                    }
-
-                    // Preserve inline links even if a later optional probe is cancelled.
-                    emitVideos()
-                    discoveredMetadataUrl = flashvars
-                        .get("metadataUrl")
-                        ?.asText()
-                        ?.takeIf { it.isNotBlank() }
-                        ?.let(::cleanJsonString)
-                        ?.let(::decodeUrl)
-                        ?: discoveredMetadataUrl
-
-                    /*
-                     * For OK.ru track selection, HLS is preferred even when
-                     * inline metadata already contains MP4 videos[].
-                     * Probe metadataUrl whenever HLS was not exposed inline.
-                     */
-                    if (
-                        adaptiveHlsUrl.isNullOrBlank() &&
-                        !discoveredMetadataUrl.isNullOrBlank()
-                    ) {
-                        val metadataText = try {
-                            withTimeoutOrNull(
-                                if (videos.isEmpty()) RECOVERY_METADATA_TIMEOUT_MS
-                                else OPTIONAL_METADATA_TIMEOUT_MS
-                            ) {
-                                app.get(
-                                    discoveredMetadataUrl!!,
-                                    referer = embedUrl,
-                                    headers = requestHeaders(embedUrl)
-                                ).text
-                            }
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (_: Exception) {
-                            null
-                        }
-
-                        metadataText
-                            ?.let(::parseNode)
-                            ?.let(::addMetadata)
-                        emitVideos()
-                    }
+            for (element in response.document.select("[data-options]")) {
+                val options = parseNode(cleanJsonString(element.attr("data-options"))) ?: continue
+                val flashvars = options.get("flashvars") ?: continue
+                val metadata = flashvars.get("metadata")
+                when {
+                    metadata == null || metadata.isNull -> Unit
+                    metadata.isTextual -> parseNode(cleanJsonString(metadata.asText()))?.let(::addMetadata)
+                    else -> addMetadata(metadata)
                 }
+                if (emitMaster()) return
+                discoveredMetadataUrl = flashvars.get("metadataUrl")?.asText()
+                    ?.takeIf { it.isNotBlank() }?.let(::cleanJsonString)?.let(::decodeUrl)
+                    ?: discoveredMetadataUrl
+            }
 
-            /*
-             * HTML fallback before the separate metadata API.
-             */
-            if (videos.isEmpty() && adaptiveHlsUrl.isNullOrBlank()) {
-                val normalizedHtml = cleanJsonString(response.text)
-
-                adaptiveHlsUrl = HLS_FIELD_REGEX
-                    .find(normalizedHtml)
-                    ?.groupValues
-                    ?.getOrNull(1)
-                    ?.let(::cleanJsonString)
-                    ?.let(::normalizeMediaUrl)
-                    ?.takeIf { it.isNotBlank() }
-
-                Regex(
-                    """"videos"\s*:\s*(\[[\s\S]*?])""",
-                    RegexOption.IGNORE_CASE
-                ).find(normalizedHtml)
-                    ?.groupValues
-                    ?.getOrNull(1)
-                    ?.let(::parseNode)
-                    ?.let(::extractVideos)
-                    ?.let(::addVideos)
+            // Check inline HLS even when MP4 videos were already found.
+            val normalizedHtml = cleanJsonString(response.text)
+            adaptiveHlsUrl = HLS_FIELD_REGEX.find(normalizedHtml)?.groupValues?.getOrNull(1)
+                ?.let(::cleanJsonString)?.let(::normalizeMediaUrl)?.takeIf { it.isNotBlank() }
+            if (emitMaster()) return
+            if (videos.isEmpty()) {
+                Regex(""""videos"\s*:\s*(\[[\s\S]*?])""", RegexOption.IGNORE_CASE)
+                    .find(normalizedHtml)?.groupValues?.getOrNull(1)
+                    ?.let(::parseNode)?.let(::extractVideos)?.let(::addVideos)
             }
         }
 
-        /*
-         * Slow fallback only. Keep V17's direct metadata endpoint because it
-         * recovered OK.ru on pages where the embed markup was incomplete.
-         */
-        emitVideos()
-        if (adaptiveHlsUrl.isNullOrBlank() && videoId != null) {
-            val apiText = try {
-                withTimeoutOrNull(
-                    if (videos.isEmpty()) RECOVERY_METADATA_TIMEOUT_MS
-                    else OPTIONAL_METADATA_TIMEOUT_MS
-                ) {
-                    app.post(
-                        "https://www.ok.ru/dk?cmd=videoPlayerMetadata",
-                        data = mapOf("mid" to videoId),
-                        referer = embedUrl,
-                        headers = requestHeaders(embedUrl)
-                    ).text
+        // One shared discovery budget, not a fresh wait for each endpoint.
+        // MP4 is emitted only after master discovery has finished or timed out.
+        withTimeoutOrNull(
+            if (videos.isEmpty()) RECOVERY_METADATA_TIMEOUT_MS else OPTIONAL_METADATA_TIMEOUT_MS
+        ) {
+            suspend fun readMetadata(url: String, post: Boolean = false): JsonNode? {
+                return try {
+                    val text = if (post) {
+                        app.post(url, data = mapOf("mid" to videoId.orEmpty()),
+                            referer = embedUrl, headers = requestHeaders(embedUrl)).text
+                    } else {
+                        app.get(url, referer = embedUrl, headers = requestHeaders(embedUrl)).text
+                    }
+                    parseNode(text)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                null
             }
-
-            apiText
-                ?.let(::parseNode)
-                ?.let(::addMetadata)
+            discoveredMetadataUrl?.let { readMetadata(it)?.let(::addMetadata) }
+            if (!adaptiveHlsUrl.isNullOrBlank()) return@withTimeoutOrNull
+            if (videoId != null) {
+                readMetadata("https://www.ok.ru/dk?cmd=videoPlayerMetadata", true)?.let(::addMetadata)
+            }
         }
-
-        /*
-         * Fast preferred path: hand the native master HLS straight to the
-         * player. Expanding it here adds another network request and produces
-         * duplicate 720p/1080p choices that already live inside the master.
-         */
-        adaptiveHlsUrl?.let { hlsUrl ->
-            val streamHeaders = mapOf(
-                "User-Agent" to USER_AGENT,
-                "Referer" to embedUrl,
-                "Origin" to "https://ok.ru"
-            )
-
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = hlsUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = embedUrl
-                    this.headers = streamHeaders
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-        }
-
+        if (emitMaster()) return
         emitVideos()
     }
 
