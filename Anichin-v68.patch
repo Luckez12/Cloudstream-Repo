@@ -1,0 +1,946 @@
+--- a/Anichin/build.gradle.kts
++++ b/Anichin/build.gradle.kts
+@@ -1,4 +1,4 @@
+-version = 63
++version = 68
+ cloudstream {
+     description = "Anichin — Streaming Donghua Subtitle Indonesia"
+     language = "id"
+--- a/Anichin/src/main/kotlin/com/anichin/AnichinPlugin.kt
++++ b/Anichin/src/main/kotlin/com/anichin/AnichinPlugin.kt
+@@ -7,7 +7,7 @@
+ @CloudstreamPlugin
+ class AnichinPlugin : BasePlugin() {
+     override fun load() {
+-        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=62-wrapper-labels")
++        Log.i("Anichin", "ANICHIN_PLUGIN_LOADED version=68-poster-selection")
+         registerMainAPI(AnichinProvider())
+ 
+         // Custom host fixes for Anichin:
+--- a/Anichin/src/main/kotlin/com/anichin/ExtractorsRumble.kt
++++ b/Anichin/src/main/kotlin/com/anichin/ExtractorsRumble.kt
+@@ -35,15 +35,16 @@
+             ?: return
+ 
+         val embedUrl = "$mainUrl/embed/$videoId"
+-        val embedPage = fetchText(embedUrl, referer ?: url)
+-
+-        /*
+-         * The object embedded under m.f[videoId] belongs to this exact video.
+-         * Older Rumble uploads often expose only ua.mp4 and no ua.hls.
+-         */
+-        val metadata = embedPage
+-            ?.let { extractExactVideoMetadata(it, videoId) }
+-            ?: fetchApiMetadata(videoId, embedUrl)
++        // The exact-video API exposes ua.hls directly. Current embed HTML no
++        // longer consistently includes m.f[videoId]; avoid fetching both pages
++        // on every successful resolution. Keep the old parser as a fallback.
++        val metadata = fetchApiMetadata(videoId, embedUrl)
++            ?.takeIf {
++                !it.path("ua").path("hls").isMissingNode ||
++                    !it.path("ua").path("mp4").isMissingNode
++            }
++            ?: fetchText(embedUrl, referer ?: url)
++                ?.let { extractExactVideoMetadata(it, videoId) }
+             ?: return
+ 
+         val streamHeaders = mapOf(
+@@ -113,14 +114,16 @@
+ 
+         val verifiedMedia = mutableListOf<MediaCandidate>()
+         val orderedCandidates = candidates
++            .filter { it.height == null || it.height >= MINIMUM_HEIGHT }
+             .distinctBy { it.url }
+             .sortedWith(
+                 compareBy<MediaCandidate> { candidate ->
+                     if (
+                         candidate.url.contains("master", true) ||
+-                        candidate.url.contains("/hls-vod/", true)
++                        Regex("""/playlist\.m3u8(?:[?#]|$)""", RegexOption.IGNORE_CASE)
++                            .containsMatchIn(candidate.url)
+                     ) 0 else 1
+-                }.thenBy { it.height ?: Int.MAX_VALUE }
++                }.thenByDescending { it.height ?: Int.MAX_VALUE }
+             )
+ 
+         for (candidate in orderedCandidates) {
+--- a/Anichin/src/main/kotlin/com/anichin/ExtractorsOkru.kt
++++ b/Anichin/src/main/kotlin/com/anichin/ExtractorsOkru.kt
+@@ -13,6 +13,7 @@
+ import com.lagradost.cloudstream3.utils.getQualityFromName
+ import com.lagradost.cloudstream3.utils.newExtractorLink
+ import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.withTimeoutOrNull
+ import java.net.URLDecoder
+ 
+ open class OkRuExtractor : ExtractorApi() {
+@@ -56,17 +57,54 @@
+             addVideos(extractVideos(node))
+         }
+ 
+-        /*
+-         * Fast path: read the embed page first. In the working V17 cases this
+-         * already contains data-options/metadata with every quality, so avoid
+-         * paying for an extra metadata API request before playback can appear.
+-         */
++        val emittedVideoUrls = mutableSetOf<String>()
++        suspend fun emitVideos() {
++            videos.values.toList().forEach { video ->
++                if (!emittedVideoUrls.add(video.url)) return@forEach
++                val quality = when (video.name.uppercase()) {
++                    "MOBILE" -> "144p"
++                    "LOWEST" -> "240p"
++                    "LOW" -> "360p"
++                    "SD" -> "480p"
++                    "HD" -> "720p"
++                    "FULL" -> "1080p"
++                    "QUAD" -> "1440p"
++                    "ULTRA" -> "2160p"
++                    else -> video.name
++                }
++
++                callback(
++                    newExtractorLink(
++                        source = name,
++                        name = name,
++                        url = video.url,
++                        type = INFER_TYPE
++                    ) {
++                        this.referer = embedUrl
++                        this.quality = getQualityFromName(quality)
++                        this.headers = mapOf(
++                            "User-Agent" to USER_AGENT,
++                            "Referer" to embedUrl,
++                            "Origin" to "https://ok.ru"
++                        )
++                    }
++                )
++            }
++        }
++
++        suspend fun emitMaster(): Boolean {
++            val hlsUrl = adaptiveHlsUrl ?: return false
++            callback(newExtractorLink(source = name, name = name, url = hlsUrl, type = ExtractorLinkType.M3U8) {
++                this.referer = embedUrl
++                this.quality = Qualities.Unknown.value
++                this.headers = requestHeaders(embedUrl)
++            })
++            return true
++        }
++
+         val response = try {
+-            app.get(
+-                embedUrl,
+-                referer = referer ?: "https://anichin.moe/",
+-                headers = requestHeaders(embedUrl)
+-            )
++            app.get(embedUrl, referer = referer ?: "https://anichin.moe/",
++                headers = requestHeaders(embedUrl))
+         } catch (e: CancellationException) {
+             throw e
+         } catch (_: Exception) {
+@@ -74,178 +112,65 @@
+         }
+ 
+         if (response != null) {
+-            response.document
+-                .select("[data-options]")
+-                .forEach { element ->
+-                    if (videos.isNotEmpty()) return@forEach
+-
+-                    val optionsNode = parseNode(
+-                        cleanJsonString(
+-                            element.attr("data-options")
+-                        )
+-                    ) ?: return@forEach
+-
+-                    val flashvars = optionsNode.get("flashvars")
+-                        ?: return@forEach
+-
+-                    val metadataNode = flashvars.get("metadata")
+-
+-                    when {
+-                        metadataNode == null || metadataNode.isNull -> Unit
+-
+-                        metadataNode.isObject || metadataNode.isArray -> {
+-                            addMetadata(metadataNode)
+-                        }
+-
+-                        metadataNode.isTextual -> {
+-                            parseNode(
+-                                cleanJsonString(
+-                                    metadataNode.asText()
+-                                )
+-                            )?.let(::addMetadata)
+-                        }
++            for (element in response.document.select("[data-options]")) {
++                val options = parseNode(cleanJsonString(element.attr("data-options"))) ?: continue
++                val flashvars = options.get("flashvars") ?: continue
++                val metadata = flashvars.get("metadata")
++                when {
++                    metadata == null || metadata.isNull -> Unit
++                    metadata.isTextual -> parseNode(cleanJsonString(metadata.asText()))?.let(::addMetadata)
++                    else -> addMetadata(metadata)
++                }
++                if (emitMaster()) return
++                discoveredMetadataUrl = flashvars.get("metadataUrl")?.asText()
++                    ?.takeIf { it.isNotBlank() }?.let(::cleanJsonString)?.let(::decodeUrl)
++                    ?: discoveredMetadataUrl
++            }
++
++            // Check inline HLS even when MP4 videos were already found.
++            val normalizedHtml = cleanJsonString(response.text)
++            adaptiveHlsUrl = HLS_FIELD_REGEX.find(normalizedHtml)?.groupValues?.getOrNull(1)
++                ?.let(::cleanJsonString)?.let(::normalizeMediaUrl)?.takeIf { it.isNotBlank() }
++            if (emitMaster()) return
++            if (videos.isEmpty()) {
++                Regex(""""videos"\s*:\s*(\[[\s\S]*?])""", RegexOption.IGNORE_CASE)
++                    .find(normalizedHtml)?.groupValues?.getOrNull(1)
++                    ?.let(::parseNode)?.let(::extractVideos)?.let(::addVideos)
++            }
++        }
++
++        // Prioritize startup: inline master was already checked. If the page
++        // supplied MP4, use it without spending requests looking for more HLS.
++        if (videos.isNotEmpty()) {
++            emitVideos()
++            return
++        }
++
++        // Recovery only when the embed supplied neither HLS nor MP4.
++        withTimeoutOrNull(RECOVERY_METADATA_TIMEOUT_MS        ) {
++            suspend fun readMetadata(url: String, post: Boolean = false): JsonNode? {
++                return try {
++                    val text = if (post) {
++                        app.post(url, data = mapOf("mid" to videoId.orEmpty()),
++                            referer = embedUrl, headers = requestHeaders(embedUrl)).text
++                    } else {
++                        app.get(url, referer = embedUrl, headers = requestHeaders(embedUrl)).text
+                     }
+-
+-                    discoveredMetadataUrl = flashvars
+-                        .get("metadataUrl")
+-                        ?.asText()
+-                        ?.takeIf { it.isNotBlank() }
+-                        ?.let(::cleanJsonString)
+-                        ?.let(::decodeUrl)
+-                        ?: discoveredMetadataUrl
+-
+-                    /*
+-                     * For OK.ru track selection, HLS is preferred even when
+-                     * inline metadata already contains MP4 videos[].
+-                     * Probe metadataUrl whenever HLS was not exposed inline.
+-                     */
+-                    if (
+-                        adaptiveHlsUrl.isNullOrBlank() &&
+-                        !discoveredMetadataUrl.isNullOrBlank()
+-                    ) {
+-                        val metadataText = try {
+-                            app.get(
+-                                discoveredMetadataUrl!!,
+-                                referer = embedUrl,
+-                                headers = requestHeaders(embedUrl)
+-                            ).text
+-                        } catch (e: CancellationException) {
+-                            throw e
+-                        } catch (_: Exception) {
+-                            null
+-                        }
+-
+-                        metadataText
+-                            ?.let(::parseNode)
+-                            ?.let(::addMetadata)
+-                    }
++                    parseNode(text)
++                } catch (e: CancellationException) {
++                    throw e
++                } catch (_: Exception) {
++                    null
+                 }
+-
+-            /*
+-             * HTML fallback before the separate metadata API.
+-             */
+-            if (videos.isEmpty() && adaptiveHlsUrl.isNullOrBlank()) {
+-                val normalizedHtml = cleanJsonString(response.text)
+-
+-                adaptiveHlsUrl = HLS_FIELD_REGEX
+-                    .find(normalizedHtml)
+-                    ?.groupValues
+-                    ?.getOrNull(1)
+-                    ?.let(::cleanJsonString)
+-                    ?.let(::normalizeMediaUrl)
+-                    ?.takeIf { it.isNotBlank() }
+-
+-                Regex(
+-                    """"videos"\s*:\s*(\[[\s\S]*?])""",
+-                    RegexOption.IGNORE_CASE
+-                ).find(normalizedHtml)
+-                    ?.groupValues
+-                    ?.getOrNull(1)
+-                    ?.let(::parseNode)
+-                    ?.let(::extractVideos)
+-                    ?.let(::addVideos)
+-            }
+-        }
+-
+-        /*
+-         * Slow fallback only. Keep V17's direct metadata endpoint because it
+-         * recovered OK.ru on pages where the embed markup was incomplete.
+-         */
+-        if (adaptiveHlsUrl.isNullOrBlank() && videoId != null) {
+-            val apiText = try {
+-                app.post(
+-                    "https://www.ok.ru/dk?cmd=videoPlayerMetadata",
+-                    data = mapOf("mid" to videoId),
+-                    referer = embedUrl,
+-                    headers = requestHeaders(embedUrl)
+-                ).text
+-            } catch (e: CancellationException) {
+-                throw e
+-            } catch (_: Exception) {
+-                null
+-            }
+-
+-            apiText
+-                ?.let(::parseNode)
+-                ?.let(::addMetadata)
+-        }
+-
+-        /*
+-         * Fast preferred path: hand the native master HLS straight to the
+-         * player. Expanding it here adds another network request and produces
+-         * duplicate 720p/1080p choices that already live inside the master.
+-         */
+-        adaptiveHlsUrl?.let { hlsUrl ->
+-            val streamHeaders = mapOf(
+-                "User-Agent" to USER_AGENT,
+-                "Referer" to embedUrl,
+-                "Origin" to "https://ok.ru"
+-            )
+-
+-            callback(
+-                newExtractorLink(
+-                    source = name,
+-                    name = name,
+-                    url = hlsUrl,
+-                    type = ExtractorLinkType.M3U8
+-                ) {
+-                    this.referer = embedUrl
+-                    this.headers = streamHeaders
+-                    this.quality = Qualities.Unknown.value
+-                }
+-            )
+-        }
+-
+-        videos.values.forEach { video ->
+-            val quality = when (video.name.uppercase()) {
+-                "MOBILE" -> "144p"
+-                "LOWEST" -> "240p"
+-                "LOW" -> "360p"
+-                "SD" -> "480p"
+-                "HD" -> "720p"
+-                "FULL" -> "1080p"
+-                "QUAD" -> "1440p"
+-                "ULTRA" -> "2160p"
+-                else -> video.name
+-            }
+-
+-            callback(
+-                newExtractorLink(
+-                    source = name,
+-                    name = name,
+-                    url = video.url,
+-                    type = INFER_TYPE
+-                ) {
+-                    this.referer = embedUrl
+-                    this.quality = getQualityFromName(quality)
+-                    this.headers = mapOf(
+-                        "User-Agent" to USER_AGENT,
+-                        "Referer" to embedUrl,
+-                        "Origin" to "https://ok.ru"
+-                    )
+-                }
+-            )
+-        }
++            }
++            discoveredMetadataUrl?.let { readMetadata(it)?.let(::addMetadata) }
++            if (!adaptiveHlsUrl.isNullOrBlank()) return@withTimeoutOrNull
++            if (videoId != null) {
++                readMetadata("https://www.ok.ru/dk?cmd=videoPlayerMetadata", true)?.let(::addMetadata)
++            }
++        }
++        if (emitMaster()) return
++        emitVideos()
+     }
+ 
+     private fun requestHeaders(referer: String): Map<String, String> {
+@@ -391,6 +316,7 @@
+     )
+ 
+     companion object {
++        private const val RECOVERY_METADATA_TIMEOUT_MS = 4_000L
+         private val HLS_FIELD_REGEX = Regex(
+             """"(?:hlsMasterPlaylistUrl|hlsManifestUrl|ondemandHls)"\s*:\s*"([^"]+)"""",
+             RegexOption.IGNORE_CASE
+--- a/Anichin/src/main/kotlin/com/anichin/ExtractorDailymotion.kt
++++ b/Anichin/src/main/kotlin/com/anichin/ExtractorDailymotion.kt
+@@ -38,7 +38,8 @@
+         val metadataText = try {
+             app.get(
+                 metadataUrl,
+-                referer = embedUrl
++                referer = embedUrl,
++                timeout = 6L
+             ).text
+         } catch (e: CancellationException) {
+             throw e
+--- a/Anichin/src/main/kotlin/com/anichin/CloudflareCompat.kt
++++ b/Anichin/src/main/kotlin/com/anichin/CloudflareCompat.kt
+@@ -41,12 +41,64 @@
+             }.getOrNull() ?: fallbackCookies
+         }
+ 
++    private val challengeLock = Any()
++    @Volatile private var clearanceGeneration = 0L
++
++    private fun withCookies(request: okhttp3.Request): okhttp3.Request {
++        val cookies = savedCookies[request.url.host].orEmpty()
++        if (cookies.isEmpty()) return request
++        val merged = linkedMapOf<String, String>()
++        request.header("Cookie")?.split(';')?.forEach { entry ->
++            val parts = entry.trim().split('=', limit = 2)
++            if (parts.size == 2) merged[parts[0]] = parts[1]
++        }
++        merged.putAll(cookies)
++        val builder = request.newBuilder().header(
++            "Cookie", merged.entries.joinToString("; ") { "${it.key}=${it.value}" }
++        )
++        // Clearance is bound to the WebView UA that solved the challenge.
++        val clearanceHeaders = runCatching {
++            delegate?.javaClass?.getMethod("getCookieHeaders", String::class.java)
++                ?.invoke(delegate, request.url.toString()) as? okhttp3.Headers
++        }.getOrNull()
++        clearanceHeaders?.get("User-Agent")?.let { builder.header("User-Agent", it) }
++        return builder.build()
++    }
++
++    private fun isChallenge(response: Response): Boolean {
++        if (response.header("cf-mitigated").equals("challenge", true)) return true
++        if (response.code != 403 && response.code != 503) return false
++        val body = response.peekBody(16_384).string()
++        return body.contains("cf-chl-", true) ||
++            body.contains("/cdn-cgi/challenge-platform", true) ||
++            body.contains("Just a moment", true)
++    }
++
+     override fun intercept(chain: Interceptor.Chain): Response {
+-        val active = delegate
+-        return if (active != null) {
+-            active.intercept(chain)
+-        } else {
+-            chain.proceed(chain.request())
++        val active = delegate ?: return chain.proceed(chain.request())
++        val original = chain.request()
++        val host = original.url.host
++        val generationAtStart = clearanceGeneration
++        val cookiesAtStart = savedCookies[host]?.toMap()
++        val initial = chain.proceed(withCookies(original))
++        if (!isChallenge(initial)) return initial
++        initial.close()
++
++        // Normal requests stay parallel. Only confirmed challenges enter the
++        // WebView lane, including after a previously valid clearance expires.
++        return synchronized(challengeLock) {
++            if (clearanceGeneration != generationAtStart ||
++                savedCookies[host]?.toMap() != cookiesAtStart) {
++                val retry = chain.proceed(withCookies(original))
++                if (!isChallenge(retry)) return@synchronized retry
++                retry.close()
++            }
++            // The runtime interceptor otherwise keeps retrying an expired
++            // cached cookie instead of entering its solver.
++            savedCookies.remove(host)
++            val resolved = active.intercept(chain)
++            if (resolved.isSuccessful && !isChallenge(resolved)) clearanceGeneration++
++            resolved
+         }
+     }
+ }
+--- a/Anichin/src/main/kotlin/com/anichin/AnichinProvider.kt
++++ b/Anichin/src/main/kotlin/com/anichin/AnichinProvider.kt
+@@ -5,6 +5,8 @@
+ import com.lagradost.cloudstream3.*
+ import com.lagradost.cloudstream3.utils.*
+ import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.CompletableDeferred
++import kotlinx.coroutines.selects.select
+ import kotlinx.coroutines.async
+ import kotlinx.coroutines.awaitAll
+ import kotlinx.coroutines.coroutineScope
+@@ -44,8 +46,7 @@
+     private val siteHeaders = mapOf(
+         "User-Agent" to USER_AGENT,
+         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+-        "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+-        "Cache-Control" to "no-cache"
++        "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"
+     )
+ 
+     private fun imageHeadersFor(imageUrl: String?): Map<String, String> {
+@@ -83,76 +84,30 @@
+         URI(url).host.orEmpty()
+     }.getOrDefault("")
+ 
+-    /**
+-     * Fetch an Anichin page and invoke Cloudstream's WebView challenge solver
+-     * when the site answers with an anti-bot status or returns a successful
+-     * HTTP response containing a challenge page. When no clearance exists,
+-     * only one request is allowed to enter the solver; concurrent homepage
+-     * sections wait for it and then reuse the same cached cookies.
+-     */
++    // Challenge recovery is coordinated inside the interceptor. Ordinary HTTP
++    // failures must not erase a valid clearance or start a second page request.
+     private suspend fun fetchSiteDocument(
+         url: String,
+         referer: String = "$mainUrl/"
+     ): Document {
+-        val host = hostOf(url)
+-
+-        suspend fun requestWithCloudflare(): Document {
+-            val response = app.get(
+-                url,
+-                headers = siteHeaders,
+-                referer = referer,
+-                timeout = SITE_REQUEST_TIMEOUT_SECONDS,
+-                interceptor = sharedCloudflareKiller
+-            )
+-
+-            if (!response.isSuccessful) {
+-                val status = response.code
+-                response.okhttpResponse.close()
+-                throw IllegalStateException("HTTP $status from $host")
+-            }
+-
+-            val document = response.document
+-            if (document.isCloudflareChallenge()) {
+-                response.okhttpResponse.close()
+-                throw IllegalStateException("Cloudflare challenge from $host")
+-            }
+-
+-            sharedSiteReadyHosts.add(host)
+-            return document
+-        }
+-
+-        val cookiesAtStart = sharedCloudflareKiller.savedCookies[host]
+-        if (cookiesAtStart != null || sharedSiteReadyHosts.contains(host)) {
+-            try {
+-                return requestWithCloudflare()
+-            } catch (e: CancellationException) {
+-                throw e
+-            } catch (_: Throwable) {
+-                sharedCloudflareMutex.withLock {
+-                    sharedSiteReadyHosts.remove(host)
+-                    if (sharedCloudflareKiller.savedCookies[host] == cookiesAtStart) {
+-                        sharedCloudflareKiller.savedCookies.remove(host)
+-                    }
+-                }
+-            }
+-        }
+-
+-        val bootstrapDocument = sharedCloudflareMutex.withLock {
+-            if (
+-                sharedCloudflareKiller.savedCookies.containsKey(host) ||
+-                sharedSiteReadyHosts.contains(host)
+-            ) {
+-                return@withLock null
+-            }
+-
+-            requestWithCloudflare()
+-        }
+-
+-        if (bootstrapDocument != null) return bootstrapDocument
+-
+-        // The first request has completed the challenge. Waiting sections can
+-        // now continue in parallel using the shared clearance cookies.
+-        return requestWithCloudflare()
++        val response = app.get(
++            url,
++            headers = siteHeaders,
++            referer = referer,
++            timeout = SITE_REQUEST_TIMEOUT_SECONDS,
++            interceptor = sharedCloudflareKiller
++        )
++        if (!response.isSuccessful) {
++            val status = response.code
++            response.okhttpResponse.close()
++            throw IllegalStateException("HTTP $status from ${hostOf(url)}")
++        }
++        val document = response.document
++        if (document.isCloudflareChallenge()) {
++            response.okhttpResponse.close()
++            throw IllegalStateException("Cloudflare challenge from ${hostOf(url)}")
++        }
++        return document
+     }
+ 
+     private fun Document.isCloudflareChallenge(): Boolean {
+@@ -190,6 +145,17 @@
+         val source: String
+     )
+ 
++    private fun isUsableImageUrl(raw: String?): Boolean {
++        val value = raw?.trim()?.takeIf { it.isNotBlank() } ?: return false
++        if (value.lowercase() in setOf("#", "null", "undefined") || value.startsWith("data:", true) ||
++            value.startsWith("javascript:", true) || value.startsWith("about:", true)) return false
++        val filename = value.substringBefore('?').substringBefore('#')
++            .substringAfterLast('/').lowercase()
++        return !Regex(
++            """^(?:lazy[-_])?(?:placeholder|no[-_]?image|no[-_]?poster|blank|transparent|loading)(?:[._-].*)?$"""
++        ).matches(filename)
++    }
++
+     private fun Element.selectImage(): ImageSelection {
+         fun srcset(value: String): String? {
+             val candidates = value
+@@ -198,7 +164,7 @@
+                     val parts = entry.trim().split(Regex("""\s+"""))
+                     val url = parts.firstOrNull()
+                         ?.takeIf {
+-                            it.isNotBlank() && !it.startsWith("data:", true)
++                            isUsableImageUrl(it)
+                         }
+                         ?: return@mapNotNull null
+                     val width = parts.getOrNull(1)
+@@ -228,10 +194,35 @@
+         )
+ 
+         val selected = candidates.firstOrNull { (_, imageUrl) ->
+-            !imageUrl.isNullOrBlank() &&
+-                !imageUrl.startsWith("data:", ignoreCase = true)
+-        }
+-        return ImageSelection(selected?.second, selected?.first ?: "none")
++            isUsableImageUrl(imageUrl)
++        }
++        return ImageSelection(selected?.second?.trim(), selected?.first ?: "none")
++    }
++
++    private fun Document.selectDetailPoster(): ImageSelection {
++        // Separate queries enforce priority; comma-separated selectFirst uses
++        // document order and could pick an unrelated earlier wp-post-image.
++        val selectors = listOf(
++            ".bigcontent .thumb img", ".bigcontent .ime img",
++            "#singlepisode .thumb img", "#singlepisode .headlist img",
++            ".single-info .thumb img", "div.thumb img", "div.ime img"
++        )
++        for (selector in selectors) {
++            for (element in select(selector)) {
++                val image = element.selectImage()
++                if (isUsableImageUrl(image.url)) {
++                    return ImageSelection(image.url, "$selector:${image.source}")
++                }
++            }
++        }
++        val og = selectFirst("meta[property=og:image]")?.attr("content")?.trim()
++        if (isUsableImageUrl(og)) return ImageSelection(og, "og:image")
++        // Restrict the generic fallback to the main content, avoiding widgets.
++        for (element in select("article img.wp-post-image, .postbody img.wp-post-image")) {
++            val image = element.selectImage()
++            if (isUsableImageUrl(image.url)) return ImageSelection(image.url, "content:${image.source}")
++        }
++        return ImageSelection(null, "none")
+     }
+ 
+     private data class CardData(
+@@ -242,7 +233,30 @@
+         val type: TvType
+     )
+ 
+-    override suspend fun getMainPage(
++    private data class HomeCacheEntry(val createdAt: Long, val response: HomePageResponse)
++    private val homeCache = ConcurrentHashMap<String, HomeCacheEntry>()
++    private val homeLocks = ConcurrentHashMap<String, Mutex>()
++
++    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
++        // Cache only the four first-page sections, never episode/player data.
++        if (page != 1 || mainPage.none { it.data == request.data }) {
++            return fetchMainPage(page, request)
++        }
++        val key = "$mainUrl|${request.data}"
++        return homeLocks.getOrPut(key) { Mutex() }.withLock {
++            val cached = homeCache[key]
++            if (cached != null && System.nanoTime() - cached.createdAt < HOME_CACHE_TTL_NS) {
++                return@withLock cached.response
++            }
++            val response = fetchMainPage(page, request)
++            if (response.items.any { it.list.isNotEmpty() }) {
++                homeCache[key] = HomeCacheEntry(System.nanoTime(), response)
++            }
++            response
++        }
++    }
++
++    private suspend fun fetchMainPage(
+         page: Int,
+         request: MainPageRequest
+     ): HomePageResponse {
+@@ -295,13 +309,13 @@
+ 
+         Log.i(
+             "Anichin",
+-            "ANICHIN_V63_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
++            "ANICHIN_V68_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+         )
+ 
+         if (isLatestRelease) {
+             Log.i(
+                 "Anichin",
+-                "ANICHIN_V63_LATEST page=$page source=$source first=" +
++                "ANICHIN_V68_LATEST page=$page source=$source first=" +
+                     cards.take(LATEST_DIAGNOSTIC_LIMIT)
+                         .joinToString(" | ") { it.title }
+             )
+@@ -329,9 +343,7 @@
+     }
+ 
+     private fun latestHomepageUrl(page: Int): String {
+-        val base = if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page/"
+-        val freshnessBucket = System.currentTimeMillis() / LATEST_CACHE_BUCKET_MS
+-        return "${base}?cs_latest=$freshnessBucket"
++        return if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page/"
+     }
+ 
+     private fun Document.archiveArticles(typeHint: TvType?): List<CardData> =
+@@ -363,7 +375,7 @@
+                 ?.firstOrNull { child -> child.hasClass("listupd") }
+ 
+             directList?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let {
+-                Log.i("Anichin", "ANICHIN_V63_LATEST_BLOCK mode=child depth=$depth")
++                Log.i("Anichin", "ANICHIN_V68_LATEST_BLOCK mode=child depth=$depth")
+                 return it
+             }
+ 
+@@ -373,7 +385,7 @@
+                     sibling?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let { articles ->
+                         Log.i(
+                             "Anichin",
+-                            "ANICHIN_V63_LATEST_BLOCK mode=sibling depth=$depth"
++                            "ANICHIN_V68_LATEST_BLOCK mode=sibling depth=$depth"
+                         )
+                         return articles
+                     }
+@@ -393,7 +405,7 @@
+ 
+         Log.w(
+             "Anichin",
+-            "ANICHIN_V63_LATEST_BLOCK mode=fallback cards=${fallback.size}"
++            "ANICHIN_V68_LATEST_BLOCK mode=fallback cards=${fallback.size}"
+         )
+         return fallback
+     }
+@@ -420,8 +432,9 @@
+ 
+         val href = fixUrl(anchor.attr("href"))
+ 
+-        val posterSelection = selectFirst("div.bsx > a img, img")
+-            ?.selectImage()
++        val posterSelection = select("div.bsx > a img, img")
++            .map { it.selectImage() }
++            .firstOrNull { isUsableImageUrl(it.url) }
+             ?: ImageSelection(null, "missing-img")
+ 
+         val badge = selectFirst(".typez, .type, .status")
+@@ -451,7 +464,7 @@
+             val fixed = card.poster?.let { fixUrlNull(it) }
+             Log.i(
+                 "Anichin",
+-                "ANICHIN_V63_POSTER index=${index + 1} " +
++                "ANICHIN_V68_POSTER index=${index + 1} " +
+                     "source=${card.posterSource} host=${fixed?.let(::hostOf).orEmpty()} " +
+                     "url=${fixed.orEmpty()}"
+             )
+@@ -737,26 +750,33 @@
+             ?.trim()
+             .orEmpty()
+ 
+-        val detailImage = document
+-            .selectFirst("div.thumb img, div.ime img, img.wp-post-image")
+-            ?.selectImage()
+-        val ogPoster = document
+-            .selectFirst("meta[property=og:image]")
+-            ?.attr("content")
+-            ?.trim()
+-        val rawPoster = detailImage?.url ?: ogPoster
+-        val posterSource = when {
+-            detailImage?.url != null -> detailImage.source
+-            !ogPoster.isNullOrBlank() -> "og:image"
+-            else -> "none"
+-        }
+-
+-        val fixedPoster = rawPoster?.let { fixUrlNull(it) }
++        var posterSelection = document.selectDetailPoster()
++        if (posterSelection.url == null) {
++            // Episode pages normally contain a series poster in the sidebar.
++            // Fetch the series only when no usable local/OG image exists.
++            val seriesUrl = document.selectFirst("#singlepisode .headlist h2 a[href]")
++                ?.attr("href")?.let { fixUrl(it) }
++                ?.takeIf { it != detailUrl && hostOf(it) == hostOf(mainUrl) }
++            if (seriesUrl != null) {
++                val seriesPoster = try {
++                    withTimeoutOrNull(4_000L) { fetchSiteDocument(seriesUrl).selectDetailPoster() }
++                } catch (e: CancellationException) {
++                    throw e
++                } catch (_: Exception) {
++                    null
++                }
++                if (seriesPoster?.url != null) {
++                    posterSelection = ImageSelection(seriesPoster.url, "series:${seriesPoster.source}")
++                }
++            }
++        }
++        val posterSource = posterSelection.source
++        val fixedPoster = posterSelection.url?.trim()?.let { fixUrlNull(it) }
+         val poster = fixedPoster.orEmpty()
+ 
+         Log.i(
+             "Anichin",
+-            "ANICHIN_V63_DETAIL_POSTER source=$posterSource " +
++            "ANICHIN_V68_DETAIL_POSTER source=$posterSource " +
+                 "host=${fixedPoster?.let(::hostOf).orEmpty()} url=$poster"
+         )
+ 
+@@ -933,7 +953,7 @@
+ 
+             Log.i(
+                 "Anichin",
+-                "ANICHIN_V63_EPISODES mode=$episodeSource " +
++                "ANICHIN_V68_EPISODES mode=$episodeSource " +
+                     "count=${resolvedEpisodes.size} title=$responseTitle"
+             )
+ 
+@@ -945,6 +965,7 @@
+             ) {
+                 this.posterUrl = poster.takeIf { it.isNotBlank() }
+                 this.posterHeaders = imageHeadersFor(poster)
++                this.backgroundPosterUrl = poster.takeIf { it.isNotBlank() }
+                 this.plot = description
+             }
+ 
+@@ -964,6 +985,7 @@
+             ) {
+                 this.posterUrl = poster.takeIf { it.isNotBlank() }
+                 this.posterHeaders = imageHeadersFor(poster)
++                this.backgroundPosterUrl = poster.takeIf { it.isNotBlank() }
+                 this.plot = description
+             }
+         }
+@@ -1724,13 +1746,13 @@
+ 
+         Log.w(
+             "Anichin",
+-            "ANICHIN_V63_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
++            "ANICHIN_V68_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
+                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
+         )
+ 
+         if (players.isEmpty()) {
+-            Log.w("Anichin", "ANICHIN_V63_DONE candidates=0 success=false")
++            Log.w("Anichin", "ANICHIN_V68_DONE candidates=0 success=false")
+             return false
+         }
+ 
+@@ -1747,21 +1769,34 @@
+             val serverLinks: MutableList<ExtractorLink> =
+                 Collections.synchronizedList(mutableListOf())
+ 
+-            val pipelineTimeout = if (player.priority() <= 2) {
+-                PREFERRED_PIPELINE_TIMEOUT_MS
+-            } else {
+-                FALLBACK_PIPELINE_TIMEOUT_MS
++            val pipelineTimeout = when (player.priority()) {
++                0 -> OKRU_PIPELINE_TIMEOUT_MS
++                2 -> DAILYMOTION_PIPELINE_TIMEOUT_MS
++                1 -> PREFERRED_PIPELINE_TIMEOUT_MS
++                else -> FALLBACK_PIPELINE_TIMEOUT_MS
+             }
+ 
+             withTimeoutOrNull(pipelineTimeout) {
+-                resolvePlayerPipeline(
+-                    player.url,
+-                    data,
+-                    player.label,
+-                    serverAttempts,
+-                    effectiveSubtitleCallback,
+-                    { link -> serverLinks.add(link) }
+-                )
++                coroutineScope {
++                    val masterFound = CompletableDeferred<Unit>()
++                    val pipeline = async {
++                        resolvePlayerPipeline(
++                            player.url, data, player.label, serverAttempts,
++                            effectiveSubtitleCallback,
++                            { link ->
++                                serverLinks.add(link)
++                                if (isAdaptiveMaster(link)) masterFound.complete(Unit)
++                            }
++                        )
++                    }
++                    // Cancel remaining work for this server as soon as its
++                    // master arrives. Other server families continue normally.
++                    select<Unit> {
++                        masterFound.onAwait { pipeline.cancel() }
++                        pipeline.onAwait { }
++                    }
++                    pipeline.join()
++                }
+             }
+ 
+             val eligibleLinks = serverLinks
+@@ -1771,7 +1806,7 @@
+             /*
+              * One clean source per website. A native master already contains
+              * every adaptive track, so do not repeat its 1080p/720p children.
+-             * Only use the highest fixed link when no master was found.
++             * Use a fixed fallback only when no master was found.
+              */
+             val rawMasterLink = eligibleLinks
+                 .filter(::isAdaptiveMaster)
+@@ -1882,7 +1917,7 @@
+ 
+         Log.w(
+             "Anichin",
+-            "ANICHIN_V63_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
++            "ANICHIN_V68_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
+         )
+ 
+@@ -1920,9 +1955,6 @@
+             "Update Terbaru"
+         )
+         private val sharedCloudflareKiller by lazy { CloudflareCompat() }
+-        private val sharedCloudflareMutex = Mutex()
+-        private val sharedSiteReadyHosts: MutableSet<String> =
+-            ConcurrentHashMap.newKeySet()
+ 
+         private val PLAYER_HOST_HINTS = listOf(
+             "ok.ru",
+@@ -1957,13 +1989,15 @@
+         private const val FALLBACK_SERVER_CONCURRENCY = 3
+         private const val EPISODE_REQUEST_TIMEOUT_MS = 8_000L
+         private const val PLAYER_REQUEST_TIMEOUT_MS = 6_000L
+-        private const val EXTRACTOR_TIMEOUT_MS = 7_000L
++        private const val EXTRACTOR_TIMEOUT_MS = 9_000L
+         private const val PREFERRED_PIPELINE_TIMEOUT_MS = 6_000L
+         private const val FALLBACK_PIPELINE_TIMEOUT_MS = 4_500L
+-        private const val PREFERRED_GROUP_TIMEOUT_MS = 7_000L
++        private const val OKRU_PIPELINE_TIMEOUT_MS = 9_000L
++        private const val DAILYMOTION_PIPELINE_TIMEOUT_MS = 13_000L
++        private const val PREFERRED_GROUP_TIMEOUT_MS = 14_000L
+         private const val FALLBACK_GROUP_TIMEOUT_MS = 5_000L
+         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
+-        private const val LATEST_CACHE_BUCKET_MS = 5 * 60 * 1_000L
++        private const val HOME_CACHE_TTL_NS = 60 * 1_000_000_000L
+         private const val LATEST_BLOCK_SEARCH_DEPTH = 4
+         private const val LATEST_SIBLING_SEARCH_LIMIT = 3
+         private const val LATEST_DIAGNOSTIC_LIMIT = 5

@@ -1,0 +1,23 @@
+[
+  {
+    "title": "Wu Dong Qian Kun Season 7 - Anichin",
+    "selector": ".bigcontent .thumb img",
+    "image": "https://anichin.moe/wp-content/uploads/2026/11/Wu-Dong-Qian-Kun-Season-7-Subtitle-Indonesia.webp",
+    "status": 200,
+    "type": "image/webp"
+  },
+  {
+    "title": "Nonton Lord of the Ancient God Grave Episode 499 Subtitle Indonesia - Anichin",
+    "selector": "#singlepisode .thumb img",
+    "image": "https://anichin.moe/wp-content/uploads/2026/07/WAN-JIE-DU-ZUN-SUBTITLE-INDONESIA-214x300.webp",
+    "status": 200,
+    "type": "image/webp"
+  },
+  {
+    "title": "Nonton The Great Ruler 3D Episode 98 Subtitle Indonesia - Anichin",
+    "selector": "#singlepisode .thumb img",
+    "image": "https://anichin.moe/wp-content/uploads/2023/06/The-Great-Ruler-3D-Subtitle-Indonesia-214x300.webp",
+    "status": 200,
+    "type": "image/webp"
+  }
+]

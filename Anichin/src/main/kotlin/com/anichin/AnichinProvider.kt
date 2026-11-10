@@ -145,6 +145,17 @@ class AnichinProvider : MainAPI() {
         val source: String
     )
 
+    private fun isUsableImageUrl(raw: String?): Boolean {
+        val value = raw?.trim()?.takeIf { it.isNotBlank() } ?: return false
+        if (value.lowercase() in setOf("#", "null", "undefined") || value.startsWith("data:", true) ||
+            value.startsWith("javascript:", true) || value.startsWith("about:", true)) return false
+        val filename = value.substringBefore('?').substringBefore('#')
+            .substringAfterLast('/').lowercase()
+        return !Regex(
+            """^(?:lazy[-_])?(?:placeholder|no[-_]?image|no[-_]?poster|blank|transparent|loading)(?:[._-].*)?$"""
+        ).matches(filename)
+    }
+
     private fun Element.selectImage(): ImageSelection {
         fun srcset(value: String): String? {
             val candidates = value
@@ -153,7 +164,7 @@ class AnichinProvider : MainAPI() {
                     val parts = entry.trim().split(Regex("""\s+"""))
                     val url = parts.firstOrNull()
                         ?.takeIf {
-                            it.isNotBlank() && !it.startsWith("data:", true)
+                            isUsableImageUrl(it)
                         }
                         ?: return@mapNotNull null
                     val width = parts.getOrNull(1)
@@ -183,10 +194,35 @@ class AnichinProvider : MainAPI() {
         )
 
         val selected = candidates.firstOrNull { (_, imageUrl) ->
-            !imageUrl.isNullOrBlank() &&
-                !imageUrl.startsWith("data:", ignoreCase = true)
+            isUsableImageUrl(imageUrl)
         }
-        return ImageSelection(selected?.second, selected?.first ?: "none")
+        return ImageSelection(selected?.second?.trim(), selected?.first ?: "none")
+    }
+
+    private fun Document.selectDetailPoster(): ImageSelection {
+        // Separate queries enforce priority; comma-separated selectFirst uses
+        // document order and could pick an unrelated earlier wp-post-image.
+        val selectors = listOf(
+            ".bigcontent .thumb img", ".bigcontent .ime img",
+            "#singlepisode .thumb img", "#singlepisode .headlist img",
+            ".single-info .thumb img", "div.thumb img", "div.ime img"
+        )
+        for (selector in selectors) {
+            for (element in select(selector)) {
+                val image = element.selectImage()
+                if (isUsableImageUrl(image.url)) {
+                    return ImageSelection(image.url, "$selector:${image.source}")
+                }
+            }
+        }
+        val og = selectFirst("meta[property=og:image]")?.attr("content")?.trim()
+        if (isUsableImageUrl(og)) return ImageSelection(og, "og:image")
+        // Restrict the generic fallback to the main content, avoiding widgets.
+        for (element in select("article img.wp-post-image, .postbody img.wp-post-image")) {
+            val image = element.selectImage()
+            if (isUsableImageUrl(image.url)) return ImageSelection(image.url, "content:${image.source}")
+        }
+        return ImageSelection(null, "none")
     }
 
     private data class CardData(
@@ -273,13 +309,13 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V67_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V68_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
         )
 
         if (isLatestRelease) {
             Log.i(
                 "Anichin",
-                "ANICHIN_V67_LATEST page=$page source=$source first=" +
+                "ANICHIN_V68_LATEST page=$page source=$source first=" +
                     cards.take(LATEST_DIAGNOSTIC_LIMIT)
                         .joinToString(" | ") { it.title }
             )
@@ -339,7 +375,7 @@ class AnichinProvider : MainAPI() {
                 ?.firstOrNull { child -> child.hasClass("listupd") }
 
             directList?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let {
-                Log.i("Anichin", "ANICHIN_V67_LATEST_BLOCK mode=child depth=$depth")
+                Log.i("Anichin", "ANICHIN_V68_LATEST_BLOCK mode=child depth=$depth")
                 return it
             }
 
@@ -349,7 +385,7 @@ class AnichinProvider : MainAPI() {
                     sibling?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let { articles ->
                         Log.i(
                             "Anichin",
-                            "ANICHIN_V67_LATEST_BLOCK mode=sibling depth=$depth"
+                            "ANICHIN_V68_LATEST_BLOCK mode=sibling depth=$depth"
                         )
                         return articles
                     }
@@ -369,7 +405,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V67_LATEST_BLOCK mode=fallback cards=${fallback.size}"
+            "ANICHIN_V68_LATEST_BLOCK mode=fallback cards=${fallback.size}"
         )
         return fallback
     }
@@ -396,8 +432,9 @@ class AnichinProvider : MainAPI() {
 
         val href = fixUrl(anchor.attr("href"))
 
-        val posterSelection = selectFirst("div.bsx > a img, img")
-            ?.selectImage()
+        val posterSelection = select("div.bsx > a img, img")
+            .map { it.selectImage() }
+            .firstOrNull { isUsableImageUrl(it.url) }
             ?: ImageSelection(null, "missing-img")
 
         val badge = selectFirst(".typez, .type, .status")
@@ -427,7 +464,7 @@ class AnichinProvider : MainAPI() {
             val fixed = card.poster?.let { fixUrlNull(it) }
             Log.i(
                 "Anichin",
-                "ANICHIN_V67_POSTER index=${index + 1} " +
+                "ANICHIN_V68_POSTER index=${index + 1} " +
                     "source=${card.posterSource} host=${fixed?.let(::hostOf).orEmpty()} " +
                     "url=${fixed.orEmpty()}"
             )
@@ -713,26 +750,33 @@ class AnichinProvider : MainAPI() {
             ?.trim()
             .orEmpty()
 
-        val detailImage = document
-            .selectFirst("div.thumb img, div.ime img, img.wp-post-image")
-            ?.selectImage()
-        val ogPoster = document
-            .selectFirst("meta[property=og:image]")
-            ?.attr("content")
-            ?.trim()
-        val rawPoster = detailImage?.url ?: ogPoster
-        val posterSource = when {
-            detailImage?.url != null -> detailImage.source
-            !ogPoster.isNullOrBlank() -> "og:image"
-            else -> "none"
+        var posterSelection = document.selectDetailPoster()
+        if (posterSelection.url == null) {
+            // Episode pages normally contain a series poster in the sidebar.
+            // Fetch the series only when no usable local/OG image exists.
+            val seriesUrl = document.selectFirst("#singlepisode .headlist h2 a[href]")
+                ?.attr("href")?.let { fixUrl(it) }
+                ?.takeIf { it != detailUrl && hostOf(it) == hostOf(mainUrl) }
+            if (seriesUrl != null) {
+                val seriesPoster = try {
+                    withTimeoutOrNull(4_000L) { fetchSiteDocument(seriesUrl).selectDetailPoster() }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
+                if (seriesPoster?.url != null) {
+                    posterSelection = ImageSelection(seriesPoster.url, "series:${seriesPoster.source}")
+                }
+            }
         }
-
-        val fixedPoster = rawPoster?.let { fixUrlNull(it) }
+        val posterSource = posterSelection.source
+        val fixedPoster = posterSelection.url?.trim()?.let { fixUrlNull(it) }
         val poster = fixedPoster.orEmpty()
 
         Log.i(
             "Anichin",
-            "ANICHIN_V67_DETAIL_POSTER source=$posterSource " +
+            "ANICHIN_V68_DETAIL_POSTER source=$posterSource " +
                 "host=${fixedPoster?.let(::hostOf).orEmpty()} url=$poster"
         )
 
@@ -909,7 +953,7 @@ class AnichinProvider : MainAPI() {
 
             Log.i(
                 "Anichin",
-                "ANICHIN_V67_EPISODES mode=$episodeSource " +
+                "ANICHIN_V68_EPISODES mode=$episodeSource " +
                     "count=${resolvedEpisodes.size} title=$responseTitle"
             )
 
@@ -921,6 +965,7 @@ class AnichinProvider : MainAPI() {
             ) {
                 this.posterUrl = poster.takeIf { it.isNotBlank() }
                 this.posterHeaders = imageHeadersFor(poster)
+                this.backgroundPosterUrl = poster.takeIf { it.isNotBlank() }
                 this.plot = description
             }
 
@@ -940,6 +985,7 @@ class AnichinProvider : MainAPI() {
             ) {
                 this.posterUrl = poster.takeIf { it.isNotBlank() }
                 this.posterHeaders = imageHeadersFor(poster)
+                this.backgroundPosterUrl = poster.takeIf { it.isNotBlank() }
                 this.plot = description
             }
         }
@@ -1700,13 +1746,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V67_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V68_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V67_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V68_DONE candidates=0 success=false")
             return false
         }
 
@@ -1871,7 +1917,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V67_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V68_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
