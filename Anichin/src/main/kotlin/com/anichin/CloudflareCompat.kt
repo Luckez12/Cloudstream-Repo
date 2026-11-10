@@ -41,12 +41,64 @@ class CloudflareCompat : Interceptor {
             }.getOrNull() ?: fallbackCookies
         }
 
+    private val challengeLock = Any()
+    @Volatile private var clearanceGeneration = 0L
+
+    private fun withCookies(request: okhttp3.Request): okhttp3.Request {
+        val cookies = savedCookies[request.url.host].orEmpty()
+        if (cookies.isEmpty()) return request
+        val merged = linkedMapOf<String, String>()
+        request.header("Cookie")?.split(';')?.forEach { entry ->
+            val parts = entry.trim().split('=', limit = 2)
+            if (parts.size == 2) merged[parts[0]] = parts[1]
+        }
+        merged.putAll(cookies)
+        val builder = request.newBuilder().header(
+            "Cookie", merged.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        )
+        // Clearance is bound to the WebView UA that solved the challenge.
+        val clearanceHeaders = runCatching {
+            delegate?.javaClass?.getMethod("getCookieHeaders", String::class.java)
+                ?.invoke(delegate, request.url.toString()) as? okhttp3.Headers
+        }.getOrNull()
+        clearanceHeaders?.get("User-Agent")?.let { builder.header("User-Agent", it) }
+        return builder.build()
+    }
+
+    private fun isChallenge(response: Response): Boolean {
+        if (response.header("cf-mitigated").equals("challenge", true)) return true
+        if (response.code != 403 && response.code != 503) return false
+        val body = response.peekBody(16_384).string()
+        return body.contains("cf-chl-", true) ||
+            body.contains("/cdn-cgi/challenge-platform", true) ||
+            body.contains("Just a moment", true)
+    }
+
     override fun intercept(chain: Interceptor.Chain): Response {
-        val active = delegate
-        return if (active != null) {
-            active.intercept(chain)
-        } else {
-            chain.proceed(chain.request())
+        val active = delegate ?: return chain.proceed(chain.request())
+        val original = chain.request()
+        val host = original.url.host
+        val generationAtStart = clearanceGeneration
+        val cookiesAtStart = savedCookies[host]?.toMap()
+        val initial = chain.proceed(withCookies(original))
+        if (!isChallenge(initial)) return initial
+        initial.close()
+
+        // Normal requests stay parallel. Only confirmed challenges enter the
+        // WebView lane, including after a previously valid clearance expires.
+        return synchronized(challengeLock) {
+            if (clearanceGeneration != generationAtStart ||
+                savedCookies[host]?.toMap() != cookiesAtStart) {
+                val retry = chain.proceed(withCookies(original))
+                if (!isChallenge(retry)) return@synchronized retry
+                retry.close()
+            }
+            // The runtime interceptor otherwise keeps retrying an expired
+            // cached cookie instead of entering its solver.
+            savedCookies.remove(host)
+            val resolved = active.intercept(chain)
+            if (resolved.isSuccessful && !isChallenge(resolved)) clearanceGeneration++
+            resolved
         }
     }
 }

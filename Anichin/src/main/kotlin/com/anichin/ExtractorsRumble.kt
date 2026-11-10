@@ -35,15 +35,16 @@ class Rumble : ExtractorApi() {
             ?: return
 
         val embedUrl = "$mainUrl/embed/$videoId"
-        val embedPage = fetchText(embedUrl, referer ?: url)
-
-        /*
-         * The object embedded under m.f[videoId] belongs to this exact video.
-         * Older Rumble uploads often expose only ua.mp4 and no ua.hls.
-         */
-        val metadata = embedPage
-            ?.let { extractExactVideoMetadata(it, videoId) }
-            ?: fetchApiMetadata(videoId, embedUrl)
+        // The exact-video API exposes ua.hls directly. Current embed HTML no
+        // longer consistently includes m.f[videoId]; avoid fetching both pages
+        // on every successful resolution. Keep the old parser as a fallback.
+        val metadata = fetchApiMetadata(videoId, embedUrl)
+            ?.takeIf {
+                !it.path("ua").path("hls").isMissingNode ||
+                    !it.path("ua").path("mp4").isMissingNode
+            }
+            ?: fetchText(embedUrl, referer ?: url)
+                ?.let { extractExactVideoMetadata(it, videoId) }
             ?: return
 
         val streamHeaders = mapOf(
@@ -113,14 +114,16 @@ class Rumble : ExtractorApi() {
 
         val verifiedMedia = mutableListOf<MediaCandidate>()
         val orderedCandidates = candidates
+            .filter { it.height == null || it.height >= MINIMUM_HEIGHT }
             .distinctBy { it.url }
             .sortedWith(
                 compareBy<MediaCandidate> { candidate ->
                     if (
                         candidate.url.contains("master", true) ||
-                        candidate.url.contains("/hls-vod/", true)
+                        Regex("""/playlist\.m3u8(?:[?#]|$)""", RegexOption.IGNORE_CASE)
+                            .containsMatchIn(candidate.url)
                     ) 0 else 1
-                }.thenBy { it.height ?: Int.MAX_VALUE }
+                }.thenByDescending { it.height ?: Int.MAX_VALUE }
             )
 
         for (candidate in orderedCandidates) {
