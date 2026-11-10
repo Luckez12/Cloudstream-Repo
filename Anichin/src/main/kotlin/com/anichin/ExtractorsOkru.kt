@@ -139,11 +139,15 @@ open class OkRuExtractor : ExtractorApi() {
             }
         }
 
-        // One shared discovery budget, not a fresh wait for each endpoint.
-        // MP4 is emitted only after master discovery has finished or timed out.
-        withTimeoutOrNull(
-            if (videos.isEmpty()) RECOVERY_METADATA_TIMEOUT_MS else OPTIONAL_METADATA_TIMEOUT_MS
-        ) {
+        // Prioritize startup: inline master was already checked. If the page
+        // supplied MP4, use it without spending requests looking for more HLS.
+        if (videos.isNotEmpty()) {
+            emitVideos()
+            return
+        }
+
+        // Recovery only when the embed supplied neither HLS nor MP4.
+        withTimeoutOrNull(RECOVERY_METADATA_TIMEOUT_MS        ) {
             suspend fun readMetadata(url: String, post: Boolean = false): JsonNode? {
                 return try {
                     val text = if (post) {
@@ -312,7 +316,6 @@ open class OkRuExtractor : ExtractorApi() {
     )
 
     companion object {
-        private const val OPTIONAL_METADATA_TIMEOUT_MS = 1_500L
         private const val RECOVERY_METADATA_TIMEOUT_MS = 4_000L
         private val HLS_FIELD_REGEX = Regex(
             """"(?:hlsMasterPlaylistUrl|hlsManifestUrl|ondemandHls)"\s*:\s*"([^"]+)"""",
