@@ -38,7 +38,8 @@ open class Dailymotion : ExtractorApi() {
         val metadataText = try {
             app.get(
                 metadataUrl,
-                referer = embedUrl
+                referer = embedUrl,
+                timeout = 6L
             ).text
         } catch (e: CancellationException) {
             throw e

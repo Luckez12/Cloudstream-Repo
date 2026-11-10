@@ -13,6 +13,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URLDecoder
 
 open class OkRuExtractor : ExtractorApi() {
@@ -54,6 +55,41 @@ open class OkRuExtractor : ExtractorApi() {
             }
 
             addVideos(extractVideos(node))
+        }
+
+        val emittedVideoUrls = mutableSetOf<String>()
+        suspend fun emitVideos() {
+            videos.values.toList().forEach { video ->
+                if (!emittedVideoUrls.add(video.url)) return@forEach
+                val quality = when (video.name.uppercase()) {
+                    "MOBILE" -> "144p"
+                    "LOWEST" -> "240p"
+                    "LOW" -> "360p"
+                    "SD" -> "480p"
+                    "HD" -> "720p"
+                    "FULL" -> "1080p"
+                    "QUAD" -> "1440p"
+                    "ULTRA" -> "2160p"
+                    else -> video.name
+                }
+
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = name,
+                        url = video.url,
+                        type = INFER_TYPE
+                    ) {
+                        this.referer = embedUrl
+                        this.quality = getQualityFromName(quality)
+                        this.headers = mapOf(
+                            "User-Agent" to USER_AGENT,
+                            "Referer" to embedUrl,
+                            "Origin" to "https://ok.ru"
+                        )
+                    }
+                )
+            }
         }
 
         /*
@@ -106,6 +142,8 @@ open class OkRuExtractor : ExtractorApi() {
                         }
                     }
 
+                    // Preserve inline links even if a later optional probe is cancelled.
+                    emitVideos()
                     discoveredMetadataUrl = flashvars
                         .get("metadataUrl")
                         ?.asText()
@@ -124,11 +162,16 @@ open class OkRuExtractor : ExtractorApi() {
                         !discoveredMetadataUrl.isNullOrBlank()
                     ) {
                         val metadataText = try {
-                            app.get(
-                                discoveredMetadataUrl!!,
-                                referer = embedUrl,
-                                headers = requestHeaders(embedUrl)
-                            ).text
+                            withTimeoutOrNull(
+                                if (videos.isEmpty()) RECOVERY_METADATA_TIMEOUT_MS
+                                else OPTIONAL_METADATA_TIMEOUT_MS
+                            ) {
+                                app.get(
+                                    discoveredMetadataUrl!!,
+                                    referer = embedUrl,
+                                    headers = requestHeaders(embedUrl)
+                                ).text
+                            }
                         } catch (e: CancellationException) {
                             throw e
                         } catch (_: Exception) {
@@ -138,6 +181,7 @@ open class OkRuExtractor : ExtractorApi() {
                         metadataText
                             ?.let(::parseNode)
                             ?.let(::addMetadata)
+                        emitVideos()
                     }
                 }
 
@@ -171,14 +215,20 @@ open class OkRuExtractor : ExtractorApi() {
          * Slow fallback only. Keep V17's direct metadata endpoint because it
          * recovered OK.ru on pages where the embed markup was incomplete.
          */
+        emitVideos()
         if (adaptiveHlsUrl.isNullOrBlank() && videoId != null) {
             val apiText = try {
-                app.post(
-                    "https://www.ok.ru/dk?cmd=videoPlayerMetadata",
-                    data = mapOf("mid" to videoId),
-                    referer = embedUrl,
-                    headers = requestHeaders(embedUrl)
-                ).text
+                withTimeoutOrNull(
+                    if (videos.isEmpty()) RECOVERY_METADATA_TIMEOUT_MS
+                    else OPTIONAL_METADATA_TIMEOUT_MS
+                ) {
+                    app.post(
+                        "https://www.ok.ru/dk?cmd=videoPlayerMetadata",
+                        data = mapOf("mid" to videoId),
+                        referer = embedUrl,
+                        headers = requestHeaders(embedUrl)
+                    ).text
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -216,36 +266,7 @@ open class OkRuExtractor : ExtractorApi() {
             )
         }
 
-        videos.values.forEach { video ->
-            val quality = when (video.name.uppercase()) {
-                "MOBILE" -> "144p"
-                "LOWEST" -> "240p"
-                "LOW" -> "360p"
-                "SD" -> "480p"
-                "HD" -> "720p"
-                "FULL" -> "1080p"
-                "QUAD" -> "1440p"
-                "ULTRA" -> "2160p"
-                else -> video.name
-            }
-
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = video.url,
-                    type = INFER_TYPE
-                ) {
-                    this.referer = embedUrl
-                    this.quality = getQualityFromName(quality)
-                    this.headers = mapOf(
-                        "User-Agent" to USER_AGENT,
-                        "Referer" to embedUrl,
-                        "Origin" to "https://ok.ru"
-                    )
-                }
-            )
-        }
+        emitVideos()
     }
 
     private fun requestHeaders(referer: String): Map<String, String> {
@@ -391,6 +412,8 @@ open class OkRuExtractor : ExtractorApi() {
     )
 
     companion object {
+        private const val OPTIONAL_METADATA_TIMEOUT_MS = 1_500L
+        private const val RECOVERY_METADATA_TIMEOUT_MS = 4_000L
         private val HLS_FIELD_REGEX = Regex(
             """"(?:hlsMasterPlaylistUrl|hlsManifestUrl|ondemandHls)"\s*:\s*"([^"]+)"""",
             RegexOption.IGNORE_CASE

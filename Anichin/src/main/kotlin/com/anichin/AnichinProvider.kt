@@ -271,13 +271,13 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V64_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V65_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
         )
 
         if (isLatestRelease) {
             Log.i(
                 "Anichin",
-                "ANICHIN_V64_LATEST page=$page source=$source first=" +
+                "ANICHIN_V65_LATEST page=$page source=$source first=" +
                     cards.take(LATEST_DIAGNOSTIC_LIMIT)
                         .joinToString(" | ") { it.title }
             )
@@ -337,7 +337,7 @@ class AnichinProvider : MainAPI() {
                 ?.firstOrNull { child -> child.hasClass("listupd") }
 
             directList?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let {
-                Log.i("Anichin", "ANICHIN_V64_LATEST_BLOCK mode=child depth=$depth")
+                Log.i("Anichin", "ANICHIN_V65_LATEST_BLOCK mode=child depth=$depth")
                 return it
             }
 
@@ -347,7 +347,7 @@ class AnichinProvider : MainAPI() {
                     sibling?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let { articles ->
                         Log.i(
                             "Anichin",
-                            "ANICHIN_V64_LATEST_BLOCK mode=sibling depth=$depth"
+                            "ANICHIN_V65_LATEST_BLOCK mode=sibling depth=$depth"
                         )
                         return articles
                     }
@@ -367,7 +367,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V64_LATEST_BLOCK mode=fallback cards=${fallback.size}"
+            "ANICHIN_V65_LATEST_BLOCK mode=fallback cards=${fallback.size}"
         )
         return fallback
     }
@@ -425,7 +425,7 @@ class AnichinProvider : MainAPI() {
             val fixed = card.poster?.let { fixUrlNull(it) }
             Log.i(
                 "Anichin",
-                "ANICHIN_V64_POSTER index=${index + 1} " +
+                "ANICHIN_V65_POSTER index=${index + 1} " +
                     "source=${card.posterSource} host=${fixed?.let(::hostOf).orEmpty()} " +
                     "url=${fixed.orEmpty()}"
             )
@@ -730,7 +730,7 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V64_DETAIL_POSTER source=$posterSource " +
+            "ANICHIN_V65_DETAIL_POSTER source=$posterSource " +
                 "host=${fixedPoster?.let(::hostOf).orEmpty()} url=$poster"
         )
 
@@ -907,7 +907,7 @@ class AnichinProvider : MainAPI() {
 
             Log.i(
                 "Anichin",
-                "ANICHIN_V64_EPISODES mode=$episodeSource " +
+                "ANICHIN_V65_EPISODES mode=$episodeSource " +
                     "count=${resolvedEpisodes.size} title=$responseTitle"
             )
 
@@ -1698,13 +1698,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V64_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V65_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V64_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V65_DONE candidates=0 success=false")
             return false
         }
 
@@ -1721,10 +1721,11 @@ class AnichinProvider : MainAPI() {
             val serverLinks: MutableList<ExtractorLink> =
                 Collections.synchronizedList(mutableListOf())
 
-            val pipelineTimeout = if (player.priority() <= 2) {
-                PREFERRED_PIPELINE_TIMEOUT_MS
-            } else {
-                FALLBACK_PIPELINE_TIMEOUT_MS
+            val pipelineTimeout = when (player.priority()) {
+                0 -> OKRU_PIPELINE_TIMEOUT_MS
+                2 -> DAILYMOTION_PIPELINE_TIMEOUT_MS
+                1 -> PREFERRED_PIPELINE_TIMEOUT_MS
+                else -> FALLBACK_PIPELINE_TIMEOUT_MS
             }
 
             withTimeoutOrNull(pipelineTimeout) {
@@ -1745,7 +1746,7 @@ class AnichinProvider : MainAPI() {
             /*
              * One clean source per website. A native master already contains
              * every adaptive track, so do not repeat its 1080p/720p children.
-             * Only use the highest fixed link when no master was found.
+             * OK.ru also keeps its best fixed fallback beside the master.
              */
             val rawMasterLink = eligibleLinks
                 .filter(::isAdaptiveMaster)
@@ -1767,6 +1768,10 @@ class AnichinProvider : MainAPI() {
             // Rebuilding it as a data URI delays startup and is unsupported by
             // some ExoPlayer/Cloudstream versions.
             val orderedLinks = when {
+                // OK.ru can expose an unusable HLS endpoint alongside working
+                // MP4. Retain the best fixed alternative for manual selection.
+                rawMasterLink != null && player.priority() == 0 ->
+                    listOfNotNull(rawMasterLink, fixedFallbacks.firstOrNull())
                 rawMasterLink != null -> listOf(rawMasterLink)
                 player.priority() == 1 -> fixedFallbacks.distinctBy { it.quality }
                 else -> listOfNotNull(fixedFallbacks.firstOrNull())
@@ -1856,7 +1861,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V64_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V65_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
@@ -1928,10 +1933,12 @@ class AnichinProvider : MainAPI() {
         private const val FALLBACK_SERVER_CONCURRENCY = 3
         private const val EPISODE_REQUEST_TIMEOUT_MS = 8_000L
         private const val PLAYER_REQUEST_TIMEOUT_MS = 6_000L
-        private const val EXTRACTOR_TIMEOUT_MS = 7_000L
+        private const val EXTRACTOR_TIMEOUT_MS = 9_000L
         private const val PREFERRED_PIPELINE_TIMEOUT_MS = 6_000L
         private const val FALLBACK_PIPELINE_TIMEOUT_MS = 4_500L
-        private const val PREFERRED_GROUP_TIMEOUT_MS = 7_000L
+        private const val OKRU_PIPELINE_TIMEOUT_MS = 9_000L
+        private const val DAILYMOTION_PIPELINE_TIMEOUT_MS = 13_000L
+        private const val PREFERRED_GROUP_TIMEOUT_MS = 14_000L
         private const val FALLBACK_GROUP_TIMEOUT_MS = 5_000L
         private const val SITE_REQUEST_TIMEOUT_SECONDS = 20L
         private const val HOME_CACHE_TTL_NS = 60 * 1_000_000_000L
