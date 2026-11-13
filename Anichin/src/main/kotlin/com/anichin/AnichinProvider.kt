@@ -102,7 +102,7 @@ class AnichinProvider : MainAPI() {
             response.okhttpResponse.close()
             throw IllegalStateException("HTTP $status from ${hostOf(url)}")
         }
-        val document = response.document
+        val document = response.document.apply { setBaseUri(response.url) }
         if (document.isCloudflareChallenge()) {
             response.okhttpResponse.close()
             throw IllegalStateException("Cloudflare challenge from ${hostOf(url)}")
@@ -156,6 +156,15 @@ class AnichinProvider : MainAPI() {
         ).matches(filename)
     }
 
+    private fun Element.resolvePosterUrl(raw: String?): String? {
+        val value = raw?.takeIf(::isUsableImageUrl) ?: return null
+        val url = absoluteUrl(baseUri().ifBlank { mainUrl }, value) ?: return null
+        return url.takeIf {
+            (it.startsWith("https://", true) || it.startsWith("http://", true)) &&
+                hostOf(it).isNotBlank()
+        }
+    }
+
     private fun Element.selectImage(): ImageSelection {
         fun srcset(value: String): String? {
             val candidates = value
@@ -193,10 +202,9 @@ class AnichinProvider : MainAPI() {
             "src" to attr("src")
         )
 
-        val selected = candidates.firstOrNull { (_, imageUrl) ->
-            isUsableImageUrl(imageUrl)
-        }
-        return ImageSelection(selected?.second?.trim(), selected?.first ?: "none")
+        return candidates.firstNotNullOfOrNull { (source, imageUrl) ->
+            resolvePosterUrl(imageUrl)?.let { ImageSelection(it, source) }
+        } ?: ImageSelection(null, "none")
     }
 
     private fun Document.selectDetailPoster(): ImageSelection {
@@ -215,8 +223,8 @@ class AnichinProvider : MainAPI() {
                 }
             }
         }
-        val og = selectFirst("meta[property=og:image]")?.attr("content")?.trim()
-        if (isUsableImageUrl(og)) return ImageSelection(og, "og:image")
+        val og = selectFirst("meta[property=og:image]")?.attr("content")
+        resolvePosterUrl(og)?.let { return ImageSelection(it, "og:image") }
         // Restrict the generic fallback to the main content, avoiding widgets.
         for (element in select("article img.wp-post-image, .postbody img.wp-post-image")) {
             val image = element.selectImage()
@@ -309,13 +317,13 @@ class AnichinProvider : MainAPI() {
 
         Log.i(
             "Anichin",
-            "ANICHIN_V68_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
+            "ANICHIN_V69_HOME name=${request.name} source=$source page=$page cards=${cards.size}"
         )
 
         if (isLatestRelease) {
             Log.i(
                 "Anichin",
-                "ANICHIN_V68_LATEST page=$page source=$source first=" +
+                "ANICHIN_V69_LATEST page=$page source=$source first=" +
                     cards.take(LATEST_DIAGNOSTIC_LIMIT)
                         .joinToString(" | ") { it.title }
             )
@@ -375,7 +383,7 @@ class AnichinProvider : MainAPI() {
                 ?.firstOrNull { child -> child.hasClass("listupd") }
 
             directList?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let {
-                Log.i("Anichin", "ANICHIN_V68_LATEST_BLOCK mode=child depth=$depth")
+                Log.i("Anichin", "ANICHIN_V69_LATEST_BLOCK mode=child depth=$depth")
                 return it
             }
 
@@ -385,7 +393,7 @@ class AnichinProvider : MainAPI() {
                     sibling?.scopedArticles()?.takeIf { it.isNotEmpty() }?.let { articles ->
                         Log.i(
                             "Anichin",
-                            "ANICHIN_V68_LATEST_BLOCK mode=sibling depth=$depth"
+                            "ANICHIN_V69_LATEST_BLOCK mode=sibling depth=$depth"
                         )
                         return articles
                     }
@@ -405,7 +413,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V68_LATEST_BLOCK mode=fallback cards=${fallback.size}"
+            "ANICHIN_V69_LATEST_BLOCK mode=fallback cards=${fallback.size}"
         )
         return fallback
     }
@@ -461,17 +469,17 @@ class AnichinProvider : MainAPI() {
         cards: List<CardData>
     ): List<SearchResponse> {
         cards.take(POSTER_DIAGNOSTIC_LIMIT).forEachIndexed { index, card ->
-            val fixed = card.poster?.let { fixUrlNull(it) }
+            val fixed = card.poster
             Log.i(
                 "Anichin",
-                "ANICHIN_V68_POSTER index=${index + 1} " +
+                "ANICHIN_V69_POSTER index=${index + 1} " +
                     "source=${card.posterSource} host=${fixed?.let(::hostOf).orEmpty()} " +
                     "url=${fixed.orEmpty()}"
             )
         }
 
         return cards.map { card ->
-            val fixedPoster = card.poster?.let { fixUrlNull(it) }
+            val fixedPoster = card.poster
 
             newAnimeSearchResponse(
                 card.title,
@@ -771,12 +779,12 @@ class AnichinProvider : MainAPI() {
             }
         }
         val posterSource = posterSelection.source
-        val fixedPoster = posterSelection.url?.trim()?.let { fixUrlNull(it) }
+        val fixedPoster = posterSelection.url
         val poster = fixedPoster.orEmpty()
 
         Log.i(
             "Anichin",
-            "ANICHIN_V68_DETAIL_POSTER source=$posterSource " +
+            "ANICHIN_V69_DETAIL_POSTER source=$posterSource " +
                 "host=${fixedPoster?.let(::hostOf).orEmpty()} url=$poster"
         )
 
@@ -867,7 +875,6 @@ class AnichinProvider : MainAPI() {
                             .selectFirst("a img")
                             ?.selectImage()
                             ?.url
-                            ?.let { fixUrlNull(it) }
 
                     val episodeNumber = episodeNumberFrom(
                         episodeElement,
@@ -953,7 +960,7 @@ class AnichinProvider : MainAPI() {
 
             Log.i(
                 "Anichin",
-                "ANICHIN_V68_EPISODES mode=$episodeSource " +
+                "ANICHIN_V69_EPISODES mode=$episodeSource " +
                     "count=${resolvedEpisodes.size} title=$responseTitle"
             )
 
@@ -1746,13 +1753,13 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V68_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
+            "ANICHIN_V69_DISCOVERY page=${data.substringAfter(mainUrl).take(90)} " +
                 "top=${topLevelPlayers.size} nested=${nestedPlayers.size} merged=${players.size} " +
                 "hosts=${players.take(8).joinToString(" | ") { runCatching { URI(it.url).host }.getOrNull().orEmpty() }}"
         )
 
         if (players.isEmpty()) {
-            Log.w("Anichin", "ANICHIN_V68_DONE candidates=0 success=false")
+            Log.w("Anichin", "ANICHIN_V69_DONE candidates=0 success=false")
             return false
         }
 
@@ -1917,7 +1924,7 @@ class AnichinProvider : MainAPI() {
 
         Log.w(
             "Anichin",
-            "ANICHIN_V68_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
+            "ANICHIN_V69_DONE candidates=${players.size} preferred=${preferredPlayers.size} " +
                 "fallbackAttempted=$fallbackAttempted emitted=${emittedCount.get()} success=$success"
         )
 
